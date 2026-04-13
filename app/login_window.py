@@ -1,0 +1,545 @@
+import logging
+import os
+import sys
+from pathlib import Path
+
+
+def _enable_auto_reload(app):
+    """Enable auto-reload during development if ETL_DISABLE_AUTORELOAD is not set."""
+    if os.getenv("ETL_DISABLE_AUTORELOAD") == "1":
+        return None
+    try:
+        from dev.auto_reload import enable_auto_reload
+        return enable_auto_reload(app)
+    except ImportError:
+        return None
+
+from PySide6.QtCore import QObject, QThread, Qt, QRect, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QKeySequence,
+    QLinearGradient,
+    QPainter,
+    QPixmap,
+    QShortcut,
+)
+from PySide6.QtWidgets import (
+    QApplication,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QPushButton,
+    QSizePolicy,
+    QSplashScreen,
+    QVBoxLayout,
+    QWidget,
+)
+
+from app.dashboard_window import DashboardWindow
+from core.api import api_get_app_step_list, api_login, api_sign_out, session_has_sadmin_role
+from core.app_version import APP_VERSION
+from ui.widgets.password_edit import PasswordLineEdit
+from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
+from ui.form_page_styles import (
+    APP_FONT_SIZE_PX,
+    FORM_SINGLELINE_FIELD_HEIGHT_PX,
+    LINEEDIT_PLACEHOLDER_SUBSTYLE,
+    LIST_PAGE_HEADER_BUTTON_FONT_PX,
+    LIST_PAGE_HEADER_BUTTON_PADDING_H_PX,
+    LIST_PAGE_HEADER_BUTTON_PADDING_V_PX,
+    placeholder_enter,
+)
+from ui.styles import COLOR_ERROR, COLOR_SUCCESS, apply_app_theme
+from ui.theme import Theme
+from ui.widgets.required_label import field_caption_label
+from core.user_context import (
+    set_nav_access_steps,
+    set_user_email,
+    set_user_profile,
+    set_user_role,
+)
+
+
+def _token_from_login_result(login_result: dict) -> str | None:
+    t = (
+        login_result.get("token")
+        or login_result.get("accessToken")
+        or login_result.get("access_token")
+        or login_result.get("jwt")
+        or login_result.get("idToken")
+        or login_result.get("id_token")
+    )
+    if t is None:
+        return None
+    s = str(t).strip()
+    return s if s else None
+
+
+def _session_role_string(login_result: dict) -> str:
+    """Normalize ``roles`` (list/str) or ``role`` for ``set_user_role`` (expects a string)."""
+    dr = login_result.get("defaultRole") or login_result.get("default_role")
+    if isinstance(dr, str) and dr.strip():
+        return dr.strip()
+    r = login_result.get("roles")
+    if isinstance(r, list) and r:
+        first = r[0]
+        if isinstance(first, dict):
+            rr = first.get("role") or first.get("roleName") or first.get("name")
+            if rr is not None and str(rr).strip():
+                return str(rr).strip()
+        return str(first).strip()
+    if isinstance(r, str) and r.strip():
+        return r.strip()
+    role_one = login_result.get("role")
+    if isinstance(role_one, str) and role_one.strip():
+        return role_one.strip()
+    return ""
+
+
+class _LoginWorker(QObject):
+    """Runs api_login in a background thread so the UI stays responsive."""
+    finished = Signal(object)  # emits response dict
+
+    def __init__(self, username: str, password: str) -> None:
+        super().__init__()
+        self._username = username
+        self._password = password
+
+    def run(self) -> None:
+        try:
+            response = api_login(self._username, self._password)
+        except Exception as e:
+            response = {
+                "success": False,
+                "message": f"Login failed ({type(e).__name__}). Check your network and try again.",
+            }
+        self.finished.emit(response)
+
+
+class LoginWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("MY ETLZONE App")
+        self.dashboard_window = None
+
+        self.base_pixmap = self._load_login_image()
+
+        root = QWidget()
+        self.setCentralWidget(root)
+
+        main_layout = QHBoxLayout(root)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        left_container = QWidget()
+        left_layout = QVBoxLayout(left_container)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setStyleSheet(
+            f"background-color: {Theme.BG_LOGIN_IMAGE};"
+        )
+        self.image_label.setMinimumSize(0, 0)
+        self.image_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored
+        )
+        left_layout.addWidget(self.image_label)
+
+        right_container = QWidget()
+        right_container.setStyleSheet(
+            f"background-color: {Theme.BG_PAGE_ALT};"
+        )
+        right_layout = QVBoxLayout(right_container)
+        right_layout.setContentsMargins(42, 36, 42, 36)
+        right_layout.setSpacing(12)
+
+        _login_subtitle_font_px = 14
+        subtitle = QLabel("Sign in to continue")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setStyleSheet(
+            f"color: {Theme.TEXT_SECONDARY}; font-size: {_login_subtitle_font_px}px; font-weight: 500;"
+        )
+
+        _login_field_h = FORM_SINGLELINE_FIELD_HEIGHT_PX
+        # Same border, radius, colors, and type size as each other; username padding on the edit,
+        # password padding on the inner edit (PasswordLineEdit) so text lines up.
+        _login_field_chrome = (
+            f"border: 1px solid {Theme.BORDER_INPUT}; border-radius: 6px; "
+            f"background-color: {Theme.BG_WHITE}; "
+            f"font-size: {APP_FONT_SIZE_PX}px; font-weight: 400; color: {Theme.TEXT_INPUT};"
+        )
+        _login_password_shell = (
+            f"border: 1px solid {Theme.BORDER_INPUT}; border-radius: 6px; "
+            f"background-color: {Theme.BG_WHITE};"
+        )
+        self.username_input = QLineEdit()
+        self.username_input.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.username_input.setPlaceholderText(placeholder_enter("username"))
+        self.username_input.setText("")
+        self.username_input.setFixedHeight(_login_field_h)
+        self.username_input.setStyleSheet(
+            f"{_login_field_chrome} padding: 2px 8px;" + LINEEDIT_PLACEHOLDER_SUBSTYLE
+        )
+
+        self.password_input = PasswordLineEdit(use_default_style=False)
+        self.password_input.setPlaceholderText(placeholder_enter("password"))
+        self.password_input.setText("")
+        self.password_input.setFixedHeight(_login_field_h)
+        # Shell only on the wrapper; typography on the inner QLineEdit (matches username QLineEdit).
+        self.password_input.setStyleSheet(_login_password_shell)
+        self.password_input.set_inner_padding(
+            "2px 8px",
+            font_size_px=APP_FONT_SIZE_PX,
+            color=Theme.TEXT_INPUT,
+        )
+
+        form_widget = QWidget()
+        form_widget.setObjectName("loginForm")
+        form = QFormLayout(form_widget)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignHCenter)
+        form.setVerticalSpacing(10)
+        form.setHorizontalSpacing(12)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        _login_lbl = (
+            f"color: {Theme.TEXT_MUTED}; font-size: {APP_FONT_SIZE_PX}px; font-weight: 500; min-width: 64px;"
+        )
+        form.addRow(
+            field_caption_label(
+                "Username",
+                _login_lbl,
+                required=True,
+                muted_color=Theme.TEXT_MUTED,
+                font_size_px=APP_FONT_SIZE_PX,
+            ),
+            self.username_input,
+        )
+        form.addRow(
+            field_caption_label(
+                "Password",
+                _login_lbl,
+                required=True,
+                muted_color=Theme.TEXT_MUTED,
+                font_size_px=APP_FONT_SIZE_PX,
+            ),
+            self.password_input,
+        )
+        form_widget.setStyleSheet(
+            f"#loginForm QLabel {{ color: {Theme.TEXT_MUTED}; font-size: {APP_FONT_SIZE_PX}px; "
+            f"font-weight: 500; min-width: 64px; }}"
+        )
+
+        self.status_label = QLabel("")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+
+        self.login_button = QPushButton("Login")
+        self.login_button.setDefault(True)
+        _tbtn = Theme
+        _bfs = LIST_PAGE_HEADER_BUTTON_FONT_PX
+        _bpv = LIST_PAGE_HEADER_BUTTON_PADDING_V_PX
+        _bph = LIST_PAGE_HEADER_BUTTON_PADDING_H_PX
+        self.login_button.setStyleSheet(
+            f"QPushButton {{ background: {_tbtn.LOGIN_GRADIENT_END}; color: {_tbtn.PANEL_TEXT_BRIGHT}; border: none; "
+            f"border-radius: 6px; padding: {_bpv}px {_bph}px; font-size: {_bfs}px; font-weight: 500; }}"
+            f"QPushButton:hover {{ background: {_tbtn.BG_LOGIN_IMAGE}; }}"
+            f"QPushButton:pressed {{ background: {_tbtn.LOGIN_GRADIENT_START}; }}"
+            f"QPushButton:disabled {{ background: #94a3b8; color: #e2e8f0; }}"
+        )
+        self.login_button.setFixedWidth(100)
+        self.login_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.login_button.clicked.connect(self.handle_login)
+
+        self.clear_button = QPushButton("Clear")
+        self.clear_button.setObjectName("loginClearButton")
+        self.clear_button.setProperty("buttonRole", "secondary")
+        self.clear_button.setAutoDefault(False)
+        self.clear_button.setDefault(False)
+        self.clear_button.setFixedWidth(100)
+        self.clear_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_button.setToolTip("Clear username and password")
+        self.clear_button.setStyleSheet(
+            f"QPushButton {{ background: {Theme.BG_WHITE}; color: {Theme.TEXT_INPUT}; "
+            f"border: 1px solid {Theme.BORDER_INPUT}; border-radius: 6px; "
+            f"padding: {_bpv}px {_bph}px; font-size: {_bfs}px; font-weight: 500; }}"
+            f"QPushButton:hover {{ background: {Theme.BG_PAGE_ALT}; border-color: {Theme.TEXT_SECONDARY}; }}"
+            f"QPushButton:pressed {{ background: {Theme.BORDER_DEFAULT}; }}"
+            f"QPushButton:disabled {{ background: #f1f5f9; color: #94a3b8; border-color: #e2e8f0; }}"
+        )
+        self.clear_button.clicked.connect(self.handle_clear)
+
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.activated.connect(lambda: self.login_button.animateClick())
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(12)
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.addWidget(self.login_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        button_row.addWidget(self.clear_button, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        right_layout.addStretch()
+        right_layout.addWidget(subtitle)
+        right_layout.addSpacing(8)
+        right_layout.addWidget(form_widget)
+        right_layout.addLayout(button_row)
+        right_layout.setAlignment(button_row, Qt.AlignmentFlag.AlignHCenter)
+        right_layout.addWidget(self.status_label)
+        right_layout.addStretch()
+
+        main_layout.addWidget(left_container, 7)
+        main_layout.addWidget(right_container, 3)
+        main_layout.setStretch(0, 7)
+        main_layout.setStretch(1, 3)
+
+        self._login_in_progress = False
+        self._login_thread: QThread | None = None
+        self._login_worker: _LoginWorker | None = None
+
+        self._update_image()
+
+    def _load_login_image(self) -> QPixmap:
+        # Optional login background image. Fall back to local file or gradient placeholder.
+        image_path = Path(__file__).resolve().parents[1].joinpath("login_image.jpg")
+
+        if os.path.exists(image_path):
+            pixmap = QPixmap(str(image_path))
+            if not pixmap.isNull():
+                return pixmap
+
+        placeholder = QPixmap(1600, 1000)
+        gradient = QLinearGradient(0, 0, 1600, 1000)
+        gradient.setColorAt(0.0, QColor(Theme.LOGIN_GRADIENT_START))
+        gradient.setColorAt(1.0, QColor(Theme.LOGIN_GRADIENT_END))
+
+        painter = QPainter(placeholder)
+        painter.fillRect(placeholder.rect(), gradient)
+        r = placeholder.rect()
+        title = "MY ETLZONE App"
+        ver = f"v{APP_VERSION}"
+        title_font = QFont("Segoe UI", 40, QFont.Weight.Bold)
+        ver_font = QFont("Segoe UI", 12, QFont.Weight.Normal)
+        fm_t = QFontMetrics(title_font)
+        fm_v = QFontMetrics(ver_font)
+        th, vh = fm_t.height(), fm_v.height()
+        gap = 12
+        cy = r.center().y()
+        y_title = cy - (th + gap + vh) // 2
+        painter.setFont(title_font)
+        painter.setPen(QColor(Theme.PANEL_TEXT_BRIGHT))
+        painter.drawText(
+            QRect(r.left(), y_title, r.width(), th),
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+            title,
+        )
+        painter.setFont(ver_font)
+        painter.setPen(QColor("#e2e8f0"))
+        painter.drawText(
+            QRect(r.left(), y_title + th + gap, r.width(), vh),
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+            ver,
+        )
+        painter.end()
+
+        return placeholder
+
+    def _update_image(self) -> None:
+        if self.base_pixmap.isNull():
+            return
+        target_size = self.image_label.size()
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            return
+        scaled = self.base_pixmap.scaled(
+            target_size,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.image_label.setPixmap(scaled)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_image()
+
+    def handle_clear(self) -> None:
+        if self._login_in_progress:
+            return
+        self.username_input.clear()
+        self.password_input.clear()
+        cancel_auto_hide_message(self, self.status_label)
+        self.status_label.setText("")
+        self.username_input.setFocus()
+
+    def handle_login(self) -> None:
+        username = self.username_input.text().strip()
+        password = self.password_input.text()
+
+        if not username or not password:
+            set_user_role("")
+            set_user_email("")
+            set_user_profile({})
+            self._set_status("Please enter both username and password.", error=True)
+            return
+
+        if self._login_in_progress:
+            return
+        self._login_in_progress = True
+        self.login_button.setEnabled(False)
+        self.clear_button.setEnabled(False)
+        self._set_status("Signing in...", error=False)
+
+        # Run login in background thread so UI stays responsive
+        self._login_thread = QThread()
+        self._login_worker = _LoginWorker(username, password)
+        self._login_worker.moveToThread(self._login_thread)
+        self._login_thread.started.connect(self._login_worker.run)
+        self._login_worker.finished.connect(
+            self._on_login_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._login_worker.finished.connect(self._login_thread.quit)
+        self._login_thread.finished.connect(self._cleanup_login_thread)
+        self._login_thread.start()
+
+    def _cleanup_login_thread(self) -> None:
+        if self._login_worker is not None:
+            self._login_worker.deleteLater()
+            self._login_worker = None
+        if self._login_thread is not None:
+            self._login_thread.deleteLater()
+            self._login_thread = None
+
+    def _on_login_finished(self, response: dict) -> None:
+        self._login_in_progress = False
+        self.login_button.setEnabled(True)
+        self.clear_button.setEnabled(True)
+        username = self.username_input.text().strip()
+
+        if response.get("success"):
+            set_user_role(_session_role_string(response))
+            set_user_email(response.get("email", username))
+            set_user_profile(response)
+            if session_has_sadmin_role(response):
+                # Super-admin: full left nav; skip getAppStepList filtering.
+                set_nav_access_steps(None)
+            else:
+                tok = _token_from_login_result(response)
+                if tok:
+                    step_res = api_get_app_step_list(tok)
+                    if step_res.get("success"):
+                        set_nav_access_steps(step_res.get("steps") or [])
+                    else:
+                        set_nav_access_steps(None)
+                else:
+                    set_nav_access_steps(None)
+            from core.app_preferences import get_timezone, set_display_timezone
+            set_display_timezone("")
+            tz = get_timezone()
+            set_display_timezone(tz)
+            self._set_status(response["message"], error=False)
+            self.open_dashboard()
+        else:
+            set_user_role("")
+            set_user_email("")
+            set_user_profile({})
+            set_nav_access_steps(None)
+            self._set_status(
+                response.get("message", "Invalid username or password."), error=True
+            )
+
+    def _set_status(self, text: str, *, error: bool) -> None:
+        color = COLOR_ERROR if error else COLOR_SUCCESS
+        show_auto_hiding_message(
+            self,
+            self.status_label,
+            text,
+            error=error,
+            style_sheet=f"color: {color};",
+        )
+
+    def open_dashboard(self) -> None:
+        try:
+            self.dashboard_window = DashboardWindow(on_sign_out=self.handle_sign_out)
+            self.hide()
+            self.dashboard_window.showMaximized()
+            self.dashboard_window.raise_()
+            self.dashboard_window.activateWindow()
+            QApplication.processEvents()
+        except Exception as e:
+            self.login_button.setEnabled(True)
+            self.clear_button.setEnabled(True)
+            self._set_status(f"Failed to open dashboard: {e}", error=True)
+
+    def handle_sign_out(self) -> None:
+        api_sign_out()
+        set_user_role("")
+        set_user_email("")
+        set_user_profile({})
+        set_nav_access_steps(None)
+        from core.app_preferences import set_display_timezone
+        set_display_timezone("")
+        if self.dashboard_window is not None:
+            self.dashboard_window.close()
+            self.dashboard_window = None
+        self.password_input.clear()
+        cancel_auto_hide_message(self, self.status_label)
+        self.status_label.setText("")
+        self.showMaximized()
+
+
+def run_app() -> None:
+    """Run the application (used by `main.py`)."""
+    if not logging.root.handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    app = QApplication(sys.argv)
+    apply_app_theme(app)
+    reloader = _enable_auto_reload(app)
+    if reloader is not None:
+        app._reloader = reloader
+    splash_pix = QPixmap(520, 320)
+    splash_pix.fill(QColor("#0f2340"))
+    sp = splash_pix.rect()
+    sp_painter = QPainter(splash_pix)
+    title = "MY ETLZONE App"
+    ver = f"v{APP_VERSION}"
+    title_f = QFont("Segoe UI", 22, QFont.Weight.Bold)
+    ver_f = QFont("Segoe UI", 11, QFont.Weight.Normal)
+    fm_t = QFontMetrics(title_f)
+    fm_v = QFontMetrics(ver_f)
+    th, vh = fm_t.height(), fm_v.height()
+    gap = 10
+    cy = sp.center().y()
+    y_title = cy - (th + gap + vh) // 2
+    sp_painter.setFont(title_f)
+    sp_painter.setPen(QColor("#f1f5f9"))
+    sp_painter.drawText(
+        QRect(sp.left(), y_title, sp.width(), th),
+        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+        title,
+    )
+    sp_painter.setFont(ver_f)
+    sp_painter.setPen(QColor("#e2e8f0"))
+    sp_painter.drawText(
+        QRect(sp.left(), y_title + th + gap, sp.width(), vh),
+        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+        ver,
+    )
+    sp_painter.end()
+    splash = QSplashScreen(splash_pix)
+    splash.show()
+    QApplication.processEvents()
+    window = LoginWindow()
+    window.showMaximized()
+    splash.finish(window)
+    sys.exit(app.exec())

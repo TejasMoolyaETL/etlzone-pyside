@@ -1,0 +1,9 @@
+dist/
+build/
+installer/
+*.exe
+*.dll
+*.zip
+*.log
+__pycache__/
+*.pyc
