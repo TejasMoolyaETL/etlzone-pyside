@@ -24,6 +24,19 @@ from ui.form_page_styles import (
     LIST_PAGE_HEADER_LAYOUT_SPACING,
     LIST_PAGE_HEADER_STYLESHEET,
 )
+from ui.theme import Theme
+
+# Lower-left section title strip — same compact style as Comments panel header.
+_ALL_IN_ONE_VALIDATIONS_TITLE_HEIGHT_PX = 22
+_ALL_IN_ONE_VALIDATIONS_TITLE_MARGINS = (6, 0, 6, 0)
+
+
+def _all_in_one_validations_section_title_stylesheet() -> str:
+    z = Theme
+    return (
+        f"QWidget {{ background: {z.HEADER_NAV}; }}"
+        f"QLabel {{ color: {z.PANEL_TEXT_BRIGHT}; font-size: 9px; font-weight: 600; }}"
+    )
 
 
 class _AllInOneLoadWorker(QObject):
@@ -54,7 +67,7 @@ class _AllInOneLoadWorker(QObject):
 
 
 class ApiDevAllInOnePage(QWidget):
-    """Details and validations list UX without per-section headers; one **Refresh** for both."""
+    """Details + validations + comments; top bar matches list pages (e.g. API: Validations); subsection titles unchanged."""
 
     def __init__(
         self,
@@ -103,7 +116,22 @@ class ApiDevAllInOnePage(QWidget):
         layout.addWidget(header)
 
         self._lower_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self._lower_splitter.addWidget(self._validations_page)
+        self._validations_section = QWidget()
+        _vsec = QVBoxLayout(self._validations_section)
+        _vsec.setContentsMargins(0, 0, 0, 0)
+        _vsec.setSpacing(0)
+        _val_title_bar = QWidget()
+        _val_title_bar.setFixedHeight(_ALL_IN_ONE_VALIDATIONS_TITLE_HEIGHT_PX)
+        _val_title_bar.setStyleSheet(_all_in_one_validations_section_title_stylesheet())
+        _val_title_layout = QHBoxLayout(_val_title_bar)
+        _val_title_layout.setContentsMargins(*_ALL_IN_ONE_VALIDATIONS_TITLE_MARGINS)
+        _val_title_layout.setSpacing(0)
+        _val_title = QLabel("API: Validations")
+        _val_title_layout.addWidget(_val_title)
+        _val_title_layout.addStretch()
+        _vsec.addWidget(_val_title_bar)
+        _vsec.addWidget(self._validations_page, 1)
+        self._lower_splitter.addWidget(self._validations_section)
         self._comment_panel = ValidationCommentPanel(self._validations_page, self)
         self._lower_splitter.addWidget(self._comment_panel)
         self._lower_splitter.setSizes([1, 1])

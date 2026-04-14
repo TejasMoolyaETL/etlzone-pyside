@@ -11,8 +11,10 @@ from PySide6.QtWidgets import (
     QApplication,
     QHeaderView,
     QLineEdit,
+    QPlainTextEdit,
     QTableWidget,
     QTableWidgetItem,
+    QTextEdit,
     QWidget,
 )
 
@@ -146,12 +148,42 @@ def copy_table_selection_to_clipboard(table: QTableWidget) -> None:
     QApplication.clipboard().setText("\n".join(lines))
 
 
+def try_copy_from_focused_text_widget() -> bool:
+    """If focus is in a text control, copy its selection (or line) and return True.
+
+    Needed because :func:`attach_table_copy_shortcut` uses ``WidgetWithChildrenShortcut`` so Ctrl+C
+    also fires while the filter-row :class:`QLineEdit` has focus; without this, the table handler
+    runs first and often copies nothing.
+    """
+    w = QApplication.focusWidget()
+    if isinstance(w, QLineEdit):
+        w.copy()
+        return True
+    if isinstance(w, QPlainTextEdit):
+        w.copy()
+        return True
+    if isinstance(w, QTextEdit):
+        w.copy()
+        return True
+    return False
+
+
 def attach_table_copy_shortcut(table: QTableWidget, parent: QWidget | None = None) -> QShortcut:
-    """Wire StandardKey.Copy on ``parent`` (default: ``table``) to :func:`copy_table_selection_to_clipboard`."""
+    """Wire StandardKey.Copy on ``parent`` (default: ``table``).
+
+    Delegates to the focused line/plain/text edit when applicable (filter row, embedded editors),
+    otherwise copies selected table cells.
+    """
     target = parent or table
     sc = QShortcut(QKeySequence.StandardKey.Copy, target)
     sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-    sc.activated.connect(lambda: copy_table_selection_to_clipboard(table))
+
+    def _on_copy() -> None:
+        if try_copy_from_focused_text_widget():
+            return
+        copy_table_selection_to_clipboard(table)
+
+    sc.activated.connect(_on_copy)
     return sc
 
 

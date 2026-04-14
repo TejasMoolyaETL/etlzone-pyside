@@ -28,7 +28,6 @@ from typing import Any, Iterable
 from core.left_panel_nav_items import (
     API_MANAGEMENT_SUB_OPTIONS,
     API_SUB_OPTIONS,
-    APP_ACCESS_CONTROL_SUB_OPTIONS,
     ORG_MANAGEMENT_SUB_OPTIONS,
     USER_MANAGEMENT_SUB_OPTIONS,
 )
@@ -89,20 +88,6 @@ LEFT_PANEL_NAV_ITEM_APP_ID_KEYS: dict[str, tuple[str, ...]] = {
         "USER_MANAGEMENT",
         "USER_MGMT",
     ),
-    # App Access Control
-    "App: Permissions": (
-        "APP_PERMISSIONS_SCREEN",
-        "APP_PERMISSIONS",
-        "APP_ACCESS",
-        "APP_ACCESS_CONTROL",
-        "APP",
-    ),
-    "App: Role-Permission Assignment": (
-        "APP_ROLE_PERMISSION_ASSIGNMENT",
-        "APP_ACCESS",
-        "APP_ACCESS_CONTROL",
-        "APP",
-    ),
     # API Management
     "API: App Id": (
         "API_MGMT_APP_ID",
@@ -119,13 +104,13 @@ LEFT_PANEL_NAV_ITEM_APP_ID_KEYS: dict[str, tuple[str, ...]] = {
         "API_MANAGEMENT",
         "API_MGMT",
     ),
-    "API: Audit Logs": (
-        "API_MGMT_AUDIT_LOGS",
+    "API: Role-API Assignment": (
+        "API_MGMT_ROLE_API_ASSIGNMENT",
         "API_MANAGEMENT",
         "API_MGMT",
     ),
-    "API: Login History": (
-        "API_MGMT_LOGIN_HISTORY",
+    "API: Audit Logs": (
+        "API_MGMT_AUDIT_LOGS",
         "API_MANAGEMENT",
         "API_MGMT",
     ),
@@ -177,10 +162,9 @@ def format_nav_app_id_descriptions_by_section() -> str:
     groups: list[tuple[str, list[str]]] = [
         ("Org Management", list(ORG_MANAGEMENT_SUB_OPTIONS)),
         ("User Management", list(USER_MANAGEMENT_SUB_OPTIONS)),
-        ("App Access Control", list(APP_ACCESS_CONTROL_SUB_OPTIONS)),
         ("API Management", list(API_MANAGEMENT_SUB_OPTIONS)),
-        ("DB Design Project", ["DB Design Project"]),
         ("API Development", list(API_SUB_OPTIONS)),
+        ("DB Design Project", ["DB Design Project"]),
     ]
     for section_title, labels in groups:
         lines.append(f"[{section_title}]")
@@ -225,7 +209,6 @@ def nav_item_visible(label: str, allowed: set[str]) -> bool:
 class LeftPanelAccessState:
     show_org_management: bool
     show_user_management: bool
-    show_app_access_control: bool
     show_api_management: bool
     show_db_design_project: bool
     show_api_development: bool
@@ -247,7 +230,6 @@ def build_left_panel_access_state(steps: list[dict[str, Any]] | None) -> LeftPan
             True,
             True,
             True,
-            True,
             default_title,
             True,
             empty_visible,
@@ -259,7 +241,6 @@ def build_left_panel_access_state(steps: list[dict[str, Any]] | None) -> LeftPan
 
     show_org = any(nav_item_visible(lbl, allowed) for lbl in ORG_MANAGEMENT_SUB_OPTIONS)
     show_user = any(nav_item_visible(lbl, allowed) for lbl in USER_MANAGEMENT_SUB_OPTIONS)
-    show_app = any(nav_item_visible(lbl, allowed) for lbl in APP_ACCESS_CONTROL_SUB_OPTIONS)
     show_api_mgmt = any(nav_item_visible(lbl, allowed) for lbl in API_MANAGEMENT_SUB_OPTIONS)
     show_db = nav_item_visible("DB Design Project", allowed)
     show_api_dev = any(nav_item_visible(lbl, allowed) for lbl in API_SUB_OPTIONS)
@@ -267,7 +248,6 @@ def build_left_panel_access_state(steps: list[dict[str, Any]] | None) -> LeftPan
     return LeftPanelAccessState(
         show_org,
         show_user,
-        show_app,
         show_api_mgmt,
         show_db,
         show_api_dev,

@@ -18,8 +18,8 @@ API_MANAGEMENT_SUB_OPTIONS = [
     "API: App Id",
     "API: List",
     "API: API-Role Assignment",
+    "API: Role-API Assignment",
     "API: Audit Logs",
-    "API: Login History",
 ]
 
 # Org Management sub-options
@@ -29,12 +29,6 @@ ORG_MANAGEMENT_SUB_OPTIONS = [
     "Departments",
     "Positions",
     "Roles",
-]
-
-# App Access Control sub-options
-APP_ACCESS_CONTROL_SUB_OPTIONS = [
-    "App: Permissions",
-    "App: Role-Permission Assignment",
 ]
 
 # API Development sub-options

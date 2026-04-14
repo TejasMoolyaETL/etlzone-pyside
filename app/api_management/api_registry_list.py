@@ -135,6 +135,22 @@ def _api_catalog_endpoint(row: dict[str, Any]) -> str:
     return ""
 
 
+def _normalize_api_endpoint_for_save(raw: str) -> str:
+    """If the endpoint is a relative path without a leading slash, add ``/`` before save.
+
+    ``http://`` and ``https://`` values are left unchanged.
+    """
+    s = raw.strip()
+    if not s:
+        return s
+    low = s.lower()
+    if low.startswith("http://") or low.startswith("https://"):
+        return s
+    if s.startswith("/"):
+        return s
+    return "/" + s
+
+
 def _api_catalog_method(row: dict[str, Any]) -> str:
     for k in ("httpMethod", "http_method", "method", "verb"):
         v = row.get(k)
@@ -407,7 +423,7 @@ class _CreateApiDialog(QDialog):
     def _submit(self) -> None:
         self._clear_msg()
         api_name = self.api_name_edit.text().strip()
-        api_endpoint = self.api_endpoint_edit.text().strip()
+        api_endpoint = _normalize_api_endpoint_for_save(self.api_endpoint_edit.text())
         app_search = self.app_search_edit.text().strip()
         if not app_search:
             self._show_err("Please select an app from the search list.")
@@ -454,7 +470,7 @@ class _CreateApiDialog(QDialog):
         return {
             "app_id": app_id_val,
             "api_name": self.api_name_edit.text().strip(),
-            "api_endpoint": self.api_endpoint_edit.text().strip(),
+            "api_endpoint": _normalize_api_endpoint_for_save(self.api_endpoint_edit.text()),
             "method": self.method_combo.currentText().strip().upper(),
         }
 
@@ -799,7 +815,7 @@ class _EditApiDialog(QDialog):
             self.accept()
             return
         api_name = self.api_name_edit.text().strip()
-        api_endpoint = self.api_endpoint_edit.text().strip()
+        api_endpoint = _normalize_api_endpoint_for_save(self.api_endpoint_edit.text())
         method_val = self.method_combo.currentText().strip().upper()
         if not api_name:
             self.msg.setText("API name is required.")
@@ -858,7 +874,7 @@ class _EditApiDialog(QDialog):
     def values(self) -> dict[str, str]:
         return {
             "api_name": self.api_name_edit.text().strip(),
-            "api_endpoint": self.api_endpoint_edit.text().strip(),
+            "api_endpoint": _normalize_api_endpoint_for_save(self.api_endpoint_edit.text()),
             "method": self.method_combo.currentText().strip().upper(),
         }
 

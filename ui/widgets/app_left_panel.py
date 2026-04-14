@@ -9,7 +9,6 @@ from PySide6.QtWidgets import QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QL
 from core.left_panel_nav_items import (
     API_MANAGEMENT_SUB_OPTIONS,
     API_SUB_OPTIONS,
-    APP_ACCESS_CONTROL_SUB_OPTIONS,
     ORG_MANAGEMENT_SUB_OPTIONS,
     USER_MANAGEMENT_SUB_OPTIONS,
 )
@@ -32,8 +31,8 @@ def _make_tinted_icon(path: Path, r: int, g: int, b: int) -> QIcon | None:
                 img.setPixelColor(x, y, QColor(r, g, b, c.alpha()))
     return QIcon(QPixmap.fromImage(img))
 
-# Order: Dashboard, Org Management, User Management, App Access Control, API Management,
-#        DB Design Project, API Development
+# Order: Dashboard, Org Management, User Management, API Management,
+#        API Development, DB Design Project (last before View Profile / Settings / Sign out)
 DEFAULT_PANEL_ITEMS = ["Dashboard", "DB Design Project"]
 
 # Bottom section items (pinned at bottom)
@@ -267,29 +266,7 @@ class AppLeftPanel(QWidget):
         self._user_mgmt_sub_container.setMinimumHeight(0)
         self._user_mgmt_sub_container.set_content_height(len(USER_MANAGEMENT_SUB_OPTIONS) * 36 + 20)
 
-        # 4. App Access Control (collapsible, start collapsed)
-        self._app_access_toggle = QPushButton("App Access Control")
-        self._app_access_toggle.setCheckable(True)
-        self._app_access_toggle.setChecked(False)
-        self._app_access_toggle.setStyleSheet(_toggle_style)
-        self._app_access_toggle.clicked.connect(self._on_app_access_toggle)
-        content_layout.addWidget(self._app_access_toggle)
-        self._app_access_sub_container = _CollapsibleWidget()
-        self._app_access_sub_container.setMaximumHeight(0)
-        app_access_layout = QVBoxLayout(self._app_access_sub_container)
-        app_access_layout.setContentsMargins(20, 4, 0, 8)
-        app_access_layout.setSpacing(6)
-        for opt in APP_ACCESS_CONTROL_SUB_OPTIONS:
-            btn = QPushButton(opt)
-            btn.setStyleSheet(_sub_btn_style)
-            btn.clicked.connect(lambda checked=False, name=opt: self.navigation_requested.emit(name))
-            self._nav_buttons[opt] = btn
-            app_access_layout.addWidget(btn)
-        content_layout.addWidget(self._app_access_sub_container)
-        self._app_access_sub_container.setMinimumHeight(0)
-        self._app_access_sub_container.set_content_height(len(APP_ACCESS_CONTROL_SUB_OPTIONS) * 36 + 20)
-
-        # 5. API Management (collapsible, start collapsed)
+        # 4. API Management (collapsible, start collapsed)
         self._api_mgmt_toggle = QPushButton("API Management")
         self._api_mgmt_toggle.setCheckable(True)
         self._api_mgmt_toggle.setChecked(False)
@@ -311,16 +288,7 @@ class AppLeftPanel(QWidget):
         self._api_mgmt_sub_container.setMinimumHeight(0)
         self._api_mgmt_sub_container.set_content_height(len(API_MANAGEMENT_SUB_OPTIONS) * 36 + 20)
 
-        # 6. DB Design Project (single button)
-        self._db_design_btn = QPushButton("DB Design Project")
-        self._db_design_btn.setStyleSheet(_sub_btn_style)
-        self._db_design_btn.clicked.connect(
-            lambda: self.navigation_requested.emit("DB Design Project")
-        )
-        self._nav_buttons["DB Design Project"] = self._db_design_btn
-        content_layout.addWidget(self._db_design_btn)
-
-        # 7. API Development (collapsible, start collapsed)
+        # 5. API Development (collapsible, start collapsed)
         self._api_toggle = QPushButton("API Development")
         self._api_toggle.setCheckable(True)
         self._api_toggle.setChecked(False)
@@ -341,6 +309,15 @@ class AppLeftPanel(QWidget):
         content_layout.addWidget(self._api_sub_container)
         self._api_sub_container.setMinimumHeight(0)
         self._api_sub_container.set_content_height(len(API_SUB_OPTIONS) * 36 + 20)
+
+        # 6. DB Design Project (single button) — last main nav item before bottom actions
+        self._db_design_btn = QPushButton("DB Design Project")
+        self._db_design_btn.setStyleSheet(_sub_btn_style)
+        self._db_design_btn.clicked.connect(
+            lambda: self.navigation_requested.emit("DB Design Project")
+        )
+        self._nav_buttons["DB Design Project"] = self._db_design_btn
+        content_layout.addWidget(self._db_design_btn)
 
         content_layout.addStretch()
 
@@ -408,14 +385,6 @@ class AppLeftPanel(QWidget):
             _apply_subs(USER_MANAGEMENT_SUB_OPTIONS, self._user_mgmt_sub_container)
 
         _pair(
-            self._app_access_toggle,
-            self._app_access_sub_container,
-            state.show_app_access_control,
-        )
-        if state.show_app_access_control:
-            _apply_subs(APP_ACCESS_CONTROL_SUB_OPTIONS, self._app_access_sub_container)
-
-        _pair(
             self._api_mgmt_toggle,
             self._api_mgmt_sub_container,
             state.show_api_management,
@@ -448,10 +417,6 @@ class AppLeftPanel(QWidget):
             self._collapse_others_except(self._org_mgmt_toggle)
             self._org_mgmt_toggle.setChecked(True)
             self._org_mgmt_sub_container.expand()
-        elif item_name in APP_ACCESS_CONTROL_SUB_OPTIONS:
-            self._collapse_others_except(self._app_access_toggle)
-            self._app_access_toggle.setChecked(True)
-            self._app_access_sub_container.expand()
         elif item_name in USER_MANAGEMENT_SUB_OPTIONS:
             self._collapse_others_except(self._user_mgmt_toggle)
             self._user_mgmt_toggle.setChecked(True)
@@ -471,8 +436,6 @@ class AppLeftPanel(QWidget):
         """Collapse collapsible sections (e.g. when clicking Dashboard)."""
         self._org_mgmt_toggle.setChecked(False)
         self._org_mgmt_sub_container.collapse()
-        self._app_access_toggle.setChecked(False)
-        self._app_access_sub_container.collapse()
         self._user_mgmt_toggle.setChecked(False)
         self._user_mgmt_sub_container.collapse()
         self._api_mgmt_toggle.setChecked(False)
@@ -485,9 +448,6 @@ class AppLeftPanel(QWidget):
         if except_toggle is not self._org_mgmt_toggle:
             self._org_mgmt_toggle.setChecked(False)
             self._org_mgmt_sub_container.collapse()
-        if except_toggle is not self._app_access_toggle:
-            self._app_access_toggle.setChecked(False)
-            self._app_access_sub_container.collapse()
         if except_toggle is not self._user_mgmt_toggle:
             self._user_mgmt_toggle.setChecked(False)
             self._user_mgmt_sub_container.collapse()
@@ -504,13 +464,6 @@ class AppLeftPanel(QWidget):
             self._org_mgmt_sub_container.expand()
         else:
             self._org_mgmt_sub_container.collapse()
-
-    def _on_app_access_toggle(self) -> None:
-        if self._app_access_toggle.isChecked():
-            self._collapse_others_except(self._app_access_toggle)
-            self._app_access_sub_container.expand()
-        else:
-            self._app_access_sub_container.collapse()
 
     def _on_user_mgmt_toggle(self) -> None:
         if self._user_mgmt_toggle.isChecked():

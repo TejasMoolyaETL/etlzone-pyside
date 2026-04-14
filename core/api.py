@@ -3507,12 +3507,102 @@ def api_get_all_apis(*, token: str | None = None) -> dict[str, Any]:
         return {"success": False, "message": "Backend not reachable.", "data": []}
 
 
+def _flatten_app_version_envelope(payload: dict[str, Any]) -> dict[str, Any]:
+    """Merge nested ``data`` / ``result`` / ``content`` so version + download fields are visible."""
+    cur: dict[str, Any] = dict(payload)
+    for _ in range(6):
+        nested_key: str | None = None
+        nested: dict[str, Any] | None = None
+        for key in ("data", "result", "content", "payload", "body", "response"):
+            blk = cur.get(key)
+            if isinstance(blk, dict):
+                nested_key = key
+                nested = blk
+                break
+        if nested is None or nested_key is None:
+            break
+        cur = {**cur, **nested}
+        cur.pop(nested_key, None)
+    return cur
+
+
+def _pick_non_empty_str(*values: Any) -> str:
+    for v in values:
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            return s
+    return ""
+
+
+def _server_version_string(d: dict[str, Any]) -> str:
+    return _pick_non_empty_str(
+        d.get("version"),
+        d.get("latestVersion"),
+        d.get("latest_version"),
+        d.get("newVersion"),
+        d.get("new_version"),
+        d.get("targetVersion"),
+        d.get("target_version"),
+        d.get("appVersion"),
+        d.get("app_version"),
+        d.get("remoteVersion"),
+        d.get("remote_version"),
+    )
+
+
+def _version_tuple_cmp(ver: str) -> tuple[int, ...]:
+    s = str(ver or "").strip().lstrip("vV")
+    if not s:
+        return (0,)
+    parts: list[int] = []
+    for segment in s.split("."):
+        buf = ""
+        for ch in segment.strip():
+            if ch.isdigit():
+                buf += ch
+            else:
+                break
+        parts.append(int(buf) if buf else 0)
+    return tuple(parts)
+
+
+def _is_version_newer(latest: str, current: str) -> bool:
+    return _version_tuple_cmp(latest) > _version_tuple_cmp(current)
+
+
+def _truthy_flag(v: Any) -> bool:
+    if v is True:
+        return True
+    if isinstance(v, str) and v.strip().lower() in ("true", "1", "yes", "y"):
+        return True
+    if isinstance(v, (int, float)) and v == 1:
+        return True
+    return False
+
+
+def _normalize_download_url_candidate(raw: Any) -> str:
+    """Return absolute http(s) URL; join relative paths to ``API_BASE_URL``."""
+    s = str(raw).strip() if raw is not None else ""
+    if not s:
+        return ""
+    if s.startswith(("http://", "https://")):
+        return s
+    if s.startswith("//"):
+        return "https:" + s
+    base = API_BASE_URL.rstrip("/")
+    if s.startswith("/"):
+        return f"{base}{s}"
+    return f"{base}/{s}"
+
+
 def _resolve_app_update_package_type(payload: dict[str, Any], dl_url: Any) -> str:
-    """Return ``\"setup\"`` (Inno-style .exe installer) or ``\"zip\"`` (onedir archive).
+    """Return ``\"setup\"`` (Inno-style .exe), ``\"zip\"`` (onedir archive), or ``\"dmg\"`` (macOS disk image).
 
     Server may send ``packageType`` / ``package_type`` / ``artifact`` / ``downloadType``
-    with values like ``setup``, ``inno``, ``installer``, ``zip``, ``archive``, ``portable``.
-    If omitted, the download URL path ending in ``.zip`` implies ``zip``; otherwise ``setup``.
+    with values like ``setup``, ``inno``, ``installer``, ``zip``, ``archive``, ``portable``, ``dmg``.
+    If omitted, the download URL path ending in ``.zip`` or ``.dmg`` implies that type; otherwise ``setup``.
     """
     raw = (
         payload.get("packageType")
@@ -3527,6 +3617,8 @@ def _resolve_app_update_package_type(payload: dict[str, Any], dl_url: Any) -> st
         s = str(raw).strip().lower()
         if s in ("zip", "archive", "portable", "onedir"):
             return "zip"
+        if s in ("dmg", "diskimage", "macos", "mac"):
+            return "dmg"
         if s in ("setup", "inno", "installer"):
             return "setup"
         if s == "auto":
@@ -3540,21 +3632,31 @@ def _resolve_app_update_package_type(payload: dict[str, Any], dl_url: Any) -> st
         path = ""
     if path.endswith(".zip"):
         return "zip"
+    if path.endswith(".dmg"):
+        return "dmg"
     return "setup"
 
 
 def api_check_app_version(*, current_version: str, token: str | None = None) -> dict[str, Any]:
     """GET app/version?currentVersion=... — latest build info. Requires JWT.
 
+    The client flattens one level of nesting from ``data``, ``result``, ``content``,
+    ``payload``, ``body``, or ``response`` so fields can live inside those objects.
+
     Expected JSON fields (typical):
 
-    - ``version``: latest semver string
-    - ``downloadUrl`` / ``download_url``: HTTPS URL to **Inno Setup** ``MY_ETLZONE_Setup_*.exe``
-      (recommended) or, for legacy flows, a ``.zip`` of the PyInstaller onedir folder
+    - ``version`` / ``latestVersion`` / ``newVersion`` / ``targetVersion`` / …: latest semver
+    - ``downloadUrl`` / ``download_url`` / ``downloadURL`` / ``fileUrl`` / ``installerUrl`` / …
+    - ``downloadWindowsUrl`` / ``download_windows_url`` and
+      ``downloadMacUrl`` / ``download_mac_url``: platform-specific URLs
+    - Relative download paths are resolved against :data:`core.config.API_BASE_URL`
     - ``updateAvailable`` / ``update_available``: optional bool
     - ``checksum`` / ``sha256`` / …: optional hex SHA-256 of the **downloaded** file
-    - ``packageType`` / ``package_type`` / ``artifact`` / ``downloadType``: optional
-      ``\"setup\"`` | ``\"zip\"`` | ``\"auto\"`` — see :func:`_resolve_app_update_package_type`
+    - ``packageType`` / … — see :func:`_resolve_app_update_package_type`
+
+    If the server version is newer than ``currentVersion`` but no download URL is present,
+    the result includes ``needsUpdateNoDownloadUrl: True`` (UI shows an error instead of
+    falsely reporting up to date).
     """
     if not token or not str(token).strip():
         return {"success": False, "message": "Please sign in to check for updates."}
@@ -3576,26 +3678,92 @@ def api_check_app_version(*, current_version: str, token: str | None = None) -> 
         _log_api("GET", url, response=payload, status=status)
         if not isinstance(payload, dict):
             return {"success": False, "message": "Unexpected response from server."}
+        flat = _flatten_app_version_envelope(payload)
         chk = (
-            payload.get("checksum")
-            or payload.get("sha256")
-            or payload.get("sha256sum")
-            or payload.get("hash")
+            flat.get("checksum")
+            or flat.get("sha256")
+            or flat.get("sha256sum")
+            or flat.get("hash")
         )
         chk_str = str(chk).strip() if chk is not None else ""
-        dl_url = payload.get("downloadUrl") or payload.get("download_url")
-        package_type = _resolve_app_update_package_type(payload, dl_url)
+        legacy_s = _normalize_download_url_candidate(
+            _pick_non_empty_str(
+                flat.get("downloadUrl"),
+                flat.get("download_url"),
+                flat.get("downloadURL"),
+                flat.get("fileUrl"),
+                flat.get("file_url"),
+                flat.get("installerUrl"),
+                flat.get("installer_url"),
+                flat.get("setupUrl"),
+                flat.get("setup_url"),
+                flat.get("exeUrl"),
+                flat.get("exe_url"),
+                flat.get("windowsDownloadUrl"),
+                flat.get("windows_download_url"),
+                flat.get("artifactUrl"),
+                flat.get("artifact_url"),
+            )
+        )
+        win_u = _normalize_download_url_candidate(
+            _pick_non_empty_str(
+                flat.get("downloadWindowsUrl"),
+                flat.get("download_windows_url"),
+                flat.get("windowsInstallerUrl"),
+                flat.get("windows_installer_url"),
+            )
+        )
+        mac_u = _normalize_download_url_candidate(
+            _pick_non_empty_str(
+                flat.get("downloadMacUrl"),
+                flat.get("download_mac_url"),
+                flat.get("macDownloadUrl"),
+                flat.get("dmgUrl"),
+                flat.get("dmg_url"),
+            )
+        )
+        # Prefer platform-specific URL when present; fall back to legacy downloadUrl.
+        if sys.platform == "darwin":
+            dl_effective = mac_u or legacy_s or win_u
+        else:
+            dl_effective = win_u or legacy_s or mac_u
+        dl_url = dl_effective if dl_effective else None
+        package_type = _resolve_app_update_package_type(flat, dl_url)
+        has_dl = bool(dl_url)
+        server_ver = _server_version_string(flat) or _pick_non_empty_str(flat.get("version"))
+        msg = str(flat.get("message") or "").strip()
+        cv = (current_version or "").strip()
+        newer = bool(server_ver and _is_version_newer(server_ver, cv))
+        same_strings = (
+            server_ver.strip("vV").lower() == cv.strip("vV").lower() if server_ver and cv else True
+        )
+        explicit_update = _truthy_flag(flat.get("updateAvailable")) or _truthy_flag(
+            flat.get("update_available")
+        )
+        needs_no_download = False
+        if not has_dl:
+            if newer:
+                needs_no_download = True
+            elif explicit_update and server_ver and not same_strings:
+                needs_no_download = True
+            elif explicit_update and not server_ver:
+                needs_no_download = True
         return {
             "success": True,
-            "version": payload.get("version"),
+            "version": server_ver or flat.get("version"),
             "downloadUrl": dl_url,
-            "message": str(payload.get("message") or "").strip(),
+            "downloadWindowsUrl": win_u or None,
+            "downloadMacUrl": mac_u or None,
+            "message": msg,
             "checksum": chk_str or None,
             "packageType": package_type,
+            "needsUpdateNoDownloadUrl": needs_no_download,
             "updateAvailable": bool(
-                payload.get("updateAvailable")
-                or payload.get("update_available")
-                or (str(dl_url or "").strip() != "")
+                explicit_update
+                or has_dl
+                or bool(win_u or mac_u)
+                or newer
+                or needs_no_download,
             ),
         }
     except HTTPError as exc:
@@ -5019,15 +5187,18 @@ def api_update_validation_comment_by_id(
 
 
 def api_delete_validation_comment_by_id(
-    api_validation_id: int | str,
+    comment_id: int | str,
     *,
     token: str | None = None,
 ) -> dict[str, Any]:
-    """DELETE {COMMENT_DELETE_BY_ID_PATH}/{api_validation_id}."""
+    """DELETE /comment/delete-by-id/{id} (comment id)."""
     tk = _normalize_bearer_token(token)
     if not tk:
         return {"success": False, "message": "Session expired. Please log in again."}
-    url = _api_url(f"{COMMENT_DELETE_BY_ID_PATH}/{_api_path_id_segment(api_validation_id)}")
+    seg = _api_path_id_segment(comment_id)
+    if not seg:
+        return {"success": False, "message": "Invalid comment id."}
+    url = _api_url(f"{COMMENT_DELETE_BY_ID_PATH}/{seg}")
     headers: dict[str, str] = {
         "Accept": "application/json",
         "User-Agent": "MY-ETLZONE-App/1.0",

@@ -1,15 +1,17 @@
 """Modal flow: prompt → download with progress → launch installer or extracted build and quit.
 
 **Primary (recommended):** ``downloadUrl`` points to your **Inno Setup** build
-``MY_ETLZONE_Setup_x.y.z.exe`` (see ``installer/MY_ETLZONE_App.iss``). With
+``Etlzone-windows.exe`` (see ``installer/MY_ETLZONE_App.iss``). With
 ``inno_silent_install=True`` and ``update_package=\"setup\"`` (default), the app downloads
 to temp, quits, and runs the installer with ``/VERYSILENT`` / ``/CLOSEAPPLICATIONS``;
 the ``.iss`` ``[Run]`` entry restarts the application.
 
-**Legacy / optional:** a **``.zip``** of the PyInstaller **onedir** folder
-(``MY_ETLZONE_App.exe`` + ``_internal``). Use ``update_package=\"zip\"`` (or server
-``packageType: zip``). The app extracts to a temp folder, finds the main ``.exe``, and
-starts it detached without Inno switches.
+**macOS:** a **``.dmg``** URL with ``packageType: dmg`` (or a path ending in ``.dmg``). After
+download the app runs ``open`` on the image, then quits; the user drags the ``.app`` into
+**Applications** (not a silent in-place install like Inno).
+
+**Legacy / optional:** a **``.zip``** of the PyInstaller **onedir** folder (Windows). Use
+``update_package=\"zip\"`` (or server ``packageType: zip``).
 
 Optional env ``ETL_UPDATE_MAIN_EXE`` if the executable inside a zip has another name.
 
@@ -18,7 +20,7 @@ Integration example::
     AutoUpdateDialog(
         parent_window,
         new_version=\"1.0.2\",
-        download_url=\"https://.../MY_ETLZONE_Setup_1.0.2.exe\",
+        download_url=\"https://.../Etlzone-windows.exe\",
         checksum=optional_sha256_of_the_downloaded_file,
         extra_message=server_message,
         update_package=\"setup\",
@@ -30,10 +32,11 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 from urllib.parse import unquote, urlparse
 
-from PySide6.QtCore import QThread, Qt, Slot
+from PySide6.QtCore import QThread, Slot
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QDialog,
@@ -50,6 +53,7 @@ from PySide6.QtWidgets import (
 from core.app_updater import (
     DownloadUpdateWorker,
     launch_installer_and_quit,
+    log_relaunch_stage,
     make_temp_download_path,
     resolve_launch_path,
     verify_file_sha256,
@@ -105,7 +109,12 @@ class AutoUpdateDialog(QDialog):
         self._main_exe_name = (main_exe_name or "").strip() or None
         self._inno_silent_install = inno_silent_install
         pkg = (update_package or "setup").strip().lower()
-        self._update_package = "zip" if pkg == "zip" else "setup"
+        if pkg == "zip":
+            self._update_package = "zip"
+        elif pkg == "dmg":
+            self._update_package = "dmg"
+        else:
+            self._update_package = "setup"
         self._cancel_event = threading.Event()
         self._thread: QThread | None = None
         self._worker: DownloadUpdateWorker | None = None
@@ -126,6 +135,12 @@ class AutoUpdateDialog(QDialog):
             prompt = (
                 f"A new version ({self._version}) is available. "
                 "Download the update package (.zip)? The app will extract it and start the new build."
+            )
+        elif self._update_package == "dmg":
+            prompt = (
+                f"A new version ({self._version}) is available. "
+                "Download the macOS disk image (.dmg)? After download, the image will open so you can drag "
+                "the app into Applications to replace the current version."
             )
         else:
             prompt = (
@@ -293,14 +308,26 @@ class AutoUpdateDialog(QDialog):
             return
 
         self._status_lbl.setText("Ready to start new version.")
-        run_inno_silent = self._inno_silent_install and os.path.normpath(
-            os.path.abspath(launch_path)
-        ) == os.path.normpath(os.path.abspath(path))
+        norm_launch = os.path.normpath(os.path.abspath(launch_path))
+        norm_dl = os.path.normpath(os.path.abspath(path))
+        is_dmg = launch_path.lower().endswith(".dmg")
+        run_inno_silent = (
+            self._inno_silent_install
+            and sys.platform == "win32"
+            and norm_launch == norm_dl
+            and launch_path.lower().endswith(".exe")
+        )
         if run_inno_silent:
             body = (
                 "Download complete. The update installer will run silently, replace the "
                 "previous version, and start the new application. This window will close.\n\n"
                 "Save your work before continuing."
+            )
+        elif is_dmg:
+            body = (
+                "Download complete. The disk image will open in Finder. Drag the application into "
+                "Applications to replace the old version, then launch it from Applications.\n\n"
+                "This window will close. Save your work before continuing."
             )
         else:
             body = (
@@ -322,7 +349,29 @@ class AutoUpdateDialog(QDialog):
         logger.info("User confirmed update; launching %s (inno_silent=%s)", launch_path, run_inno_silent)
         AutoUpdateDialog._download_in_progress = False
         self.accept()
-        launch_installer_and_quit(launch_path, inno_silent=run_inno_silent)
+        relaunch_exe: str | None = None
+        if run_inno_silent and sys.platform == "win32":
+            env_override = (os.environ.get("ETL_RELAUNCH_EXE") or "").strip().strip('"')
+            if env_override and os.path.isfile(env_override):
+                relaunch_exe = env_override
+            else:
+                ex = (sys.executable or "").strip()
+                if ex.lower().endswith(".exe") and os.path.isfile(ex):
+                    if os.path.basename(ex).lower() not in ("python.exe", "pythonw.exe"):
+                        relaunch_exe = ex
+        log_relaunch_stage(
+            f"[ui] install_confirmed inno_silent={run_inno_silent} "
+            f"download={path!r} launch={launch_path!r}"
+        )
+        if relaunch_exe:
+            log_relaunch_stage(f"[ui] relaunch_exe={relaunch_exe!r}")
+        elif run_inno_silent and sys.platform == "win32":
+            log_relaunch_stage("[ui] relaunch_exe=(none; resolved inside launch_installer_and_quit)")
+        launch_installer_and_quit(
+            launch_path,
+            inno_silent=run_inno_silent,
+            relaunch_exe=relaunch_exe,
+        )
 
     @Slot(str)
     def _on_download_failed(self, message: str) -> None:

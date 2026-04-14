@@ -227,12 +227,28 @@ def themed_list_page_header_stylesheet(
     button_color: str,
     button_hover: str,
     button_pressed: str,
+    title_font_px: int | None = None,
+    button_font_px: int | None = None,
+    button_padding_v_px: int | None = None,
+    button_padding_h_px: int | None = None,
 ) -> str:
-    """List / dashboard navy toolbar QSS (typography from module constants, colors from args)."""
-    t = LIST_PAGE_HEADER_TITLE_FONT_PX
-    b = LIST_PAGE_HEADER_BUTTON_FONT_PX
-    pv = LIST_PAGE_HEADER_BUTTON_PADDING_V_PX
-    ph = LIST_PAGE_HEADER_BUTTON_PADDING_H_PX
+    """List / dashboard navy toolbar QSS (typography from module constants, colors from args).
+
+    Optional ``*_px`` overrides shrink toolbars on specific pages (e.g. API: All in One)
+    without changing global list headers.
+    """
+    t = LIST_PAGE_HEADER_TITLE_FONT_PX if title_font_px is None else title_font_px
+    b = LIST_PAGE_HEADER_BUTTON_FONT_PX if button_font_px is None else button_font_px
+    pv = (
+        LIST_PAGE_HEADER_BUTTON_PADDING_V_PX
+        if button_padding_v_px is None
+        else button_padding_v_px
+    )
+    ph = (
+        LIST_PAGE_HEADER_BUTTON_PADDING_H_PX
+        if button_padding_h_px is None
+        else button_padding_h_px
+    )
     return (
         f"QWidget {{ background: {widget_bg}; }} "
         f"QLabel {{ color: {label_color}; font-size: {t}px; font-weight: 600; }} "
@@ -242,6 +258,22 @@ def themed_list_page_header_stylesheet(
         f"}} "
         f"QPushButton:hover {{ background: {button_hover}; }} "
         f"QPushButton:pressed {{ background: {button_pressed}; }} "
+    )
+
+
+def list_page_header_push_button_stylesheet() -> str:
+    """QPushButton only — same chrome as Refresh / Create / Filters on list headers (e.g. API: Projects)."""
+    t = Theme
+    b = LIST_PAGE_HEADER_BUTTON_FONT_PX
+    pv = LIST_PAGE_HEADER_BUTTON_PADDING_V_PX
+    ph = LIST_PAGE_HEADER_BUTTON_PADDING_H_PX
+    return (
+        f"QPushButton {{ "
+        f"background: {t.HEADER_ACCENT}; color: {t.PANEL_TEXT_BRIGHT}; border: none; border-radius: 6px; "
+        f"padding: {pv}px {ph}px; font-size: {b}px; font-weight: 500; "
+        f"}} "
+        f"QPushButton:hover {{ background: {t.HEADER_ACCENT_HOVER}; }} "
+        f"QPushButton:pressed {{ background: {t.HEADER_ACCENT_PRESSED}; }} "
     )
 
 

@@ -2,8 +2,8 @@
 
 import traceback
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal, Slot
+from PySide6.QtGui import QAction, QCloseEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -73,6 +73,7 @@ from app.org_management.org.org_list import OrgListPage
 from app.org_management.org.org_view import ViewOrgPage
 from app.user_profile.profile_view import ViewProfilePage
 from core.api import api_check_app_version
+from core.app_branding import apply_window_icon
 from core.app_version import APP_VERSION
 from core.reminders_ws_client import AppUpdatesWebSocketClient
 from core.ws_notification import WsNotificationPayload
@@ -87,7 +88,6 @@ from core.user_context import (
 from ui.widgets.app_left_panel import (
     API_MANAGEMENT_SUB_OPTIONS,
     API_SUB_OPTIONS,
-    APP_ACCESS_CONTROL_SUB_OPTIONS,
     AppLeftPanel,
     ORG_MANAGEMENT_SUB_OPTIONS,
     USER_MANAGEMENT_SUB_OPTIONS,
@@ -108,17 +108,6 @@ from ui.version_check_dialog import (
     show_version_check_up_to_date,
 )
 
-# When GET app/version returns no custom "message", explain setup .exe vs .zip to the user.
-_UPDATE_HELP_EXTRA_SETUP = (
-    "You will download the Windows setup program (Inno Setup). It upgrades the installed "
-    "copy and restarts the new version (silent install when possible)."
-)
-_UPDATE_HELP_EXTRA_ZIP = (
-    "You will download a .zip of the application folder. The app extracts it automatically, "
-    "starts the new build, then exits — no separate installer."
-)
-
-
 class _AppVersionCheckWorker(QObject):
     finished = Signal(object)
 
@@ -131,14 +120,87 @@ class _AppVersionCheckWorker(QObject):
         self.finished.emit(api_check_app_version(current_version=APP_VERSION, token=self._token))
 
 
+def _version_check_banner_payload(result: dict) -> WsNotificationPayload | None:
+    """Build WS-style strip content for a version API result; None when no UI is needed (up to date)."""
+    if not result.get("success"):
+        msg = str(result.get("message") or "Could not check for updates.").strip()
+        return WsNotificationPayload(
+            window_title="App update",
+            header_title="Check for updates",
+            headline=msg,
+            body="",
+            meta=(),
+            action_url=None,
+            action_label="Open link",
+        )
+    dl = result.get("downloadUrl")
+    dl_str = str(dl).strip() if dl is not None else ""
+    msg = str(result.get("message") or "").strip()
+    server_ver = result.get("version")
+    latest_raw = str(server_ver).strip() if server_ver is not None else ""
+    if dl_str.startswith(("http://", "https://")):
+        headline = msg or "A new app update is available."
+        meta_rows: list[tuple[str, str]] = []
+        if latest_raw:
+            meta_rows.append(("Version", latest_raw))
+        meta_rows.append(("Your version", APP_VERSION))
+        return WsNotificationPayload(
+            window_title="App update",
+            header_title="App update",
+            headline=headline,
+            body="",
+            meta=tuple(meta_rows),
+            action_url=dl_str,
+            action_label="Install",
+        )
+    if result.get("needsUpdateNoDownloadUrl"):
+        hint = (
+            msg
+            or f"A newer version ({latest_raw or 'from server'}) is available, "
+            "but no download link was provided."
+        )
+        meta_rows: list[tuple[str, str]] = []
+        if latest_raw:
+            meta_rows.append(("Version", latest_raw))
+        return WsNotificationPayload(
+            window_title="App update",
+            header_title="App update",
+            headline=hint,
+            body="",
+            meta=tuple(meta_rows),
+            action_url=None,
+            action_label="Open link",
+        )
+    return None
+
+
+def _ws_payload_suggests_app_update(payload: WsNotificationPayload) -> bool:
+    """True when the push looks like an app update — use the same banner as post-login (version API)."""
+    url = (payload.action_url or "").strip()
+    if url.lower().startswith(("http://", "https://")):
+        return True
+    blob = f"{payload.headline} {payload.body} {payload.header_title} {payload.window_title}".lower()
+    if "update" in blob and any(
+        x in blob for x in ("app", "version", "etl", "install", "build", "release")
+    ):
+        return True
+    for label, _ in payload.meta:
+        if label.lower().replace(" ", "") in ("version", "latestversion", "newversion", "targetversion"):
+            return True
+    return False
+
+
 class DashboardWindow(QMainWindow):
     def __init__(self, on_sign_out=None) -> None:
         super().__init__()
-        self.setWindowTitle("MY ETLZONE App")
+        self.setWindowTitle("Etlzone")
+        apply_window_icon(self)
         self.resize(1280, 800)
         self.on_sign_out = on_sign_out
         self._version_check_thread: QThread | None = None
         self._version_check_worker: _AppVersionCheckWorker | None = None
+        self._version_check_banner_only = False
+        self._version_check_wait_cursor = False
         self._reminders_ws = AppUpdatesWebSocketClient(self)
         self._reminders_ws.notification.connect(self._on_ws_notification)
         self._create_menu_bar()
@@ -149,8 +211,8 @@ class DashboardWindow(QMainWindow):
         root_outer.setContentsMargins(0, 0, 0, 0)
         root_outer.setSpacing(0)
 
-        self._ws_update_banner = WsUpdateBanner(root)
-        root_outer.addWidget(self._ws_update_banner)
+        self._ws_update_banner = WsUpdateBanner(self)
+        self._ws_update_banner.install_requested.connect(self._check_for_latest_version)
 
         content_row = QWidget()
         root_layout = QHBoxLayout(content_row)
@@ -404,12 +466,6 @@ class DashboardWindow(QMainWindow):
             self.stack.addWidget(page)
             self._org_pages[name] = page
 
-        self._app_access_pages = {}
-        for name in APP_ACCESS_CONTROL_SUB_OPTIONS:
-            page = self._make_placeholder_page(name)
-            self.stack.addWidget(page)
-            self._app_access_pages[name] = page
-
         self._api_mgmt_pages = {}
         for name in API_MANAGEMENT_SUB_OPTIONS:
             if name == "API: App Id":
@@ -536,7 +592,16 @@ class DashboardWindow(QMainWindow):
         root_layout.addWidget(self.stack, 1)
         root_outer.addWidget(content_row, 1)
         self.left_panel.set_current_item("Dashboard")
+        # WebSocket + floating notification bar only after sign-in (this window is post-login).
+        # Help → Check for update uses the same session and is only available here.
         self._reminders_ws.start()
+        # Silent API check after sign-in: show the WS-style strip only when there is news (no modal).
+        QTimer.singleShot(0, self._run_post_login_version_banner_check)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if self._ws_update_banner.isVisible():
+            self._ws_update_banner.position_overlay()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._reminders_ws.stop()
@@ -544,6 +609,10 @@ class DashboardWindow(QMainWindow):
 
     @Slot(WsNotificationPayload)
     def _on_ws_notification(self, payload: WsNotificationPayload) -> None:
+        # Match post-login strip: same copy and meta from GET app/version (not raw WS parsing).
+        if _ws_payload_suggests_app_update(payload):
+            self._check_for_latest_version(banner_only=True)
+            return
         self._ws_update_banner.show_payload(payload)
 
     def _make_placeholder_page(self, title: str) -> QWidget:
@@ -580,9 +649,6 @@ class DashboardWindow(QMainWindow):
             self.left_panel.set_current_item("Settings")
         elif item_name in self._org_pages:
             self.stack.setCurrentWidget(self._org_pages[item_name])
-            self.left_panel.set_current_item(item_name)
-        elif item_name in self._app_access_pages:
-            self.stack.setCurrentWidget(self._app_access_pages[item_name])
             self.left_panel.set_current_item(item_name)
         elif item_name in self._api_mgmt_pages:
             self.stack.setCurrentWidget(self._api_mgmt_pages[item_name])
@@ -1105,7 +1171,10 @@ class DashboardWindow(QMainWindow):
             f"MY ETLZONE App\nVersion {APP_VERSION}",
         )
 
-    def _check_for_latest_version(self) -> None:
+    def _run_post_login_version_banner_check(self) -> None:
+        self._check_for_latest_version(banner_only=True)
+
+    def _check_for_latest_version(self, _menu_checked: bool = False, *, banner_only: bool = False) -> None:
         profile = get_user_profile()
         token = (
             profile.get("token")
@@ -1115,11 +1184,15 @@ class DashboardWindow(QMainWindow):
         )
         token = str(token) if token else None
         if not token:
-            show_version_check_needs_sign_in(self)
+            if not banner_only:
+                show_version_check_needs_sign_in(self)
             return
         if self._version_check_thread is not None and self._version_check_thread.isRunning():
             return
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self._version_check_banner_only = banner_only
+        self._version_check_wait_cursor = not banner_only
+        if self._version_check_wait_cursor:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self._version_check_thread = QThread(self)
         self._version_check_worker = _AppVersionCheckWorker(token)
         self._version_check_worker.moveToThread(self._version_check_thread)
@@ -1134,6 +1207,24 @@ class DashboardWindow(QMainWindow):
 
     @Slot()
     def _on_version_check_finished(self, result: object) -> None:
+        banner_only = self._version_check_banner_only
+        self._version_check_banner_only = False
+        if banner_only:
+            if isinstance(result, dict):
+                payload = _version_check_banner_payload(result)
+            else:
+                payload = WsNotificationPayload(
+                    window_title="App update",
+                    header_title="Check for updates",
+                    headline="Unexpected response while checking for updates.",
+                    body="",
+                    meta=(),
+                    action_url=None,
+                    action_label="Open link",
+                )
+            if payload is not None:
+                self._ws_update_banner.show_payload(payload)
+            return
         if not isinstance(result, dict):
             show_version_check_unexpected(self)
             return
@@ -1152,20 +1243,27 @@ class DashboardWindow(QMainWindow):
             checksum = result.get("checksum")
             cs = str(checksum).strip() if checksum is not None else ""
             pkg = str(result.get("packageType") or "setup").strip().lower()
-            if pkg != "zip":
+            if pkg not in ("zip", "dmg"):
                 pkg = "setup"
-            extra = msg or (
-                _UPDATE_HELP_EXTRA_ZIP if pkg == "zip" else _UPDATE_HELP_EXTRA_SETUP
-            )
             AutoUpdateDialog(
                 self,
                 new_version=latest_raw or "?",
                 download_url=dl_str,
                 checksum=cs or None,
-                extra_message=extra,
+                extra_message="",
                 update_package=pkg,
-                inno_silent_install=pkg != "zip",
+                inno_silent_install=(pkg == "setup"),
             ).exec()
+            return
+        if result.get("needsUpdateNoDownloadUrl"):
+            hint = (
+                msg
+                or f"A newer version ({latest_raw or 'from server'}) is available, "
+                "but the response did not include a download URL. "
+                "Ensure the API returns downloadUrl or downloadWindowsUrl "
+                "(or nest those fields under data / result)."
+            )
+            show_version_check_error(self, hint)
             return
         show_version_check_up_to_date(
             self,
@@ -1174,7 +1272,9 @@ class DashboardWindow(QMainWindow):
         )
 
     def _cleanup_version_check_thread(self) -> None:
-        QApplication.restoreOverrideCursor()
+        if self._version_check_wait_cursor:
+            QApplication.restoreOverrideCursor()
+            self._version_check_wait_cursor = False
         if self._version_check_worker is not None:
             self._version_check_worker.deleteLater()
             self._version_check_worker = None

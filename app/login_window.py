@@ -4,15 +4,18 @@ import sys
 from pathlib import Path
 
 
-def _enable_auto_reload(app):
-    """Enable auto-reload during development if ETL_DISABLE_AUTORELOAD is not set."""
-    if os.getenv("ETL_DISABLE_AUTORELOAD") == "1":
-        return None
-    try:
-        from dev.auto_reload import enable_auto_reload
-        return enable_auto_reload(app)
-    except ImportError:
-        return None
+# def _enable_auto_reload(app):
+#     """Enable auto-reload during development if ETL_DISABLE_AUTORELOAD is not set."""
+#     if os.getenv("ETL_DISABLE_AUTORELOAD") == "1":
+#         return None
+#     # Packaged app: never attach file watcher (would look like a full restart on any .py touch).
+#     if getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None) is not None:
+#         return None
+#     try:
+#         from dev.auto_reload import enable_auto_reload
+#         return enable_auto_reload(app)
+#     except ImportError:
+#         return None
 
 from PySide6.QtCore import QObject, QThread, Qt, QRect, Signal
 from PySide6.QtGui import (
@@ -41,6 +44,12 @@ from PySide6.QtWidgets import (
 
 from app.dashboard_window import DashboardWindow
 from core.api import api_get_app_step_list, api_login, api_sign_out, session_has_sadmin_role
+from core.app_branding import (
+    app_logo_path,
+    app_window_icon,
+    apply_window_icon,
+    apply_windows_taskbar_app_id,
+)
 from core.app_version import APP_VERSION
 from ui.widgets.password_edit import PasswordLineEdit
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
@@ -120,11 +129,32 @@ class _LoginWorker(QObject):
         self.finished.emit(response)
 
 
+class _PostLoginWorker(QObject):
+    """Fetches nav access (getAppStepList) off the GUI thread after login."""
+
+    finished = Signal(object)  # emits step list API result dict
+
+    def __init__(self, token: str) -> None:
+        super().__init__()
+        self._token = token
+
+    def run(self) -> None:
+        try:
+            res = api_get_app_step_list(self._token)
+        except Exception:
+            res = {"success": False, "message": "Request failed.", "steps": []}
+        self.finished.emit(res)
+
+
 class LoginWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("MY ETLZONE App")
+        self.setWindowTitle("Etlzone")
+        apply_window_icon(self)
         self.dashboard_window = None
+        self._post_login_thread: QThread | None = None
+        self._post_login_worker: _PostLoginWorker | None = None
+        self._post_login_response: dict | None = None
 
         self.base_pixmap = self._load_login_image()
 
@@ -416,36 +446,40 @@ class LoginWindow(QMainWindow):
             self._login_thread.deleteLater()
             self._login_thread = None
 
+    def _cleanup_post_login_thread(self) -> None:
+        if self._post_login_worker is not None:
+            self._post_login_worker.deleteLater()
+            self._post_login_worker = None
+        if self._post_login_thread is not None:
+            self._post_login_thread.deleteLater()
+            self._post_login_thread = None
+
+    def _finalize_login_and_open_dashboard(self) -> None:
+        from core.app_preferences import get_timezone, set_display_timezone
+
+        set_display_timezone("")
+        tz = get_timezone()
+        set_display_timezone(tz)
+        self._open_dashboard_after_workspace_prep()
+
+    def _on_post_login_worker_finished(self, step_res: dict) -> None:
+        response = self._post_login_response
+        self._post_login_response = None
+        if response is None:
+            return
+        if step_res.get("success"):
+            set_nav_access_steps(step_res.get("steps") or [])
+        else:
+            set_nav_access_steps(None)
+        self._finalize_login_and_open_dashboard()
+
     def _on_login_finished(self, response: dict) -> None:
         self._login_in_progress = False
-        self.login_button.setEnabled(True)
-        self.clear_button.setEnabled(True)
         username = self.username_input.text().strip()
 
-        if response.get("success"):
-            set_user_role(_session_role_string(response))
-            set_user_email(response.get("email", username))
-            set_user_profile(response)
-            if session_has_sadmin_role(response):
-                # Super-admin: full left nav; skip getAppStepList filtering.
-                set_nav_access_steps(None)
-            else:
-                tok = _token_from_login_result(response)
-                if tok:
-                    step_res = api_get_app_step_list(tok)
-                    if step_res.get("success"):
-                        set_nav_access_steps(step_res.get("steps") or [])
-                    else:
-                        set_nav_access_steps(None)
-                else:
-                    set_nav_access_steps(None)
-            from core.app_preferences import get_timezone, set_display_timezone
-            set_display_timezone("")
-            tz = get_timezone()
-            set_display_timezone(tz)
-            self._set_status(response["message"], error=False)
-            self.open_dashboard()
-        else:
+        if not response.get("success"):
+            self.login_button.setEnabled(True)
+            self.clear_button.setEnabled(True)
             set_user_role("")
             set_user_email("")
             set_user_profile({})
@@ -453,6 +487,35 @@ class LoginWindow(QMainWindow):
             self._set_status(
                 response.get("message", "Invalid username or password."), error=True
             )
+            return
+
+        set_user_role(_session_role_string(response))
+        set_user_email(response.get("email", username))
+        set_user_profile(response)
+
+        if session_has_sadmin_role(response):
+            set_nav_access_steps(None)
+            self._finalize_login_and_open_dashboard()
+            return
+
+        tok = _token_from_login_result(response)
+        if not tok:
+            set_nav_access_steps(None)
+            self._finalize_login_and_open_dashboard()
+            return
+
+        self._post_login_response = response
+        self._post_login_thread = QThread()
+        self._post_login_worker = _PostLoginWorker(tok)
+        self._post_login_worker.moveToThread(self._post_login_thread)
+        self._post_login_thread.started.connect(self._post_login_worker.run)
+        self._post_login_worker.finished.connect(
+            self._on_post_login_worker_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._post_login_worker.finished.connect(self._post_login_thread.quit)
+        self._post_login_thread.finished.connect(self._cleanup_post_login_thread)
+        self._post_login_thread.start()
 
     def _set_status(self, text: str, *, error: bool) -> None:
         color = COLOR_ERROR if error else COLOR_SUCCESS
@@ -464,18 +527,21 @@ class LoginWindow(QMainWindow):
             style_sheet=f"color: {color};",
         )
 
-    def open_dashboard(self) -> None:
+    def _open_dashboard_after_workspace_prep(self) -> None:
         try:
             self.dashboard_window = DashboardWindow(on_sign_out=self.handle_sign_out)
-            self.hide()
-            self.dashboard_window.showMaximized()
-            self.dashboard_window.raise_()
-            self.dashboard_window.activateWindow()
-            QApplication.processEvents()
         except Exception as e:
             self.login_button.setEnabled(True)
             self.clear_button.setEnabled(True)
             self._set_status(f"Failed to open dashboard: {e}", error=True)
+            return
+        # Show dashboard before hiding login so there is no gap with zero top-level windows
+        # (avoids taskbar icon disappearing / looking like the app restarted).
+        self.dashboard_window.showMaximized()
+        self.dashboard_window.raise_()
+        self.dashboard_window.activateWindow()
+        self.hide()
+        QApplication.processEvents()
 
     def handle_sign_out(self) -> None:
         api_sign_out()
@@ -485,13 +551,17 @@ class LoginWindow(QMainWindow):
         set_nav_access_steps(None)
         from core.app_preferences import set_display_timezone
         set_display_timezone("")
-        if self.dashboard_window is not None:
-            self.dashboard_window.close()
-            self.dashboard_window = None
         self.password_input.clear()
         cancel_auto_hide_message(self, self.status_label)
         self.status_label.setText("")
+        self.login_button.setEnabled(True)
+        self.clear_button.setEnabled(True)
         self.showMaximized()
+        self.raise_()
+        self.activateWindow()
+        if self.dashboard_window is not None:
+            self.dashboard_window.close()
+            self.dashboard_window = None
 
 
 def run_app() -> None:
@@ -502,41 +572,74 @@ def run_app() -> None:
             format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
             datefmt="%H:%M:%S",
         )
+    apply_windows_taskbar_app_id()
     app = QApplication(sys.argv)
+    _ico = app_window_icon()
+    if not _ico.isNull():
+        app.setWindowIcon(_ico)
     apply_app_theme(app)
-    reloader = _enable_auto_reload(app)
-    if reloader is not None:
-        app._reloader = reloader
+    # reloader = _enable_auto_reload(app)
+    # if reloader is not None:
+    #     app._reloader = reloader
     splash_pix = QPixmap(520, 320)
     splash_pix.fill(QColor("#0f2340"))
     sp = splash_pix.rect()
     sp_painter = QPainter(splash_pix)
-    title = "MY ETLZONE App"
     ver = f"v{APP_VERSION}"
-    title_f = QFont("Segoe UI", 22, QFont.Weight.Bold)
-    ver_f = QFont("Segoe UI", 11, QFont.Weight.Normal)
-    fm_t = QFontMetrics(title_f)
-    fm_v = QFontMetrics(ver_f)
-    th, vh = fm_t.height(), fm_v.height()
-    gap = 10
-    cy = sp.center().y()
-    y_title = cy - (th + gap + vh) // 2
-    sp_painter.setFont(title_f)
-    sp_painter.setPen(QColor("#f1f5f9"))
-    sp_painter.drawText(
-        QRect(sp.left(), y_title, sp.width(), th),
-        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
-        title,
-    )
-    sp_painter.setFont(ver_f)
-    sp_painter.setPen(QColor("#e2e8f0"))
-    sp_painter.drawText(
-        QRect(sp.left(), y_title + th + gap, sp.width(), vh),
-        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
-        ver,
-    )
-    sp_painter.end()
+    _lp = app_logo_path()
+    if _lp is not None:
+        _lg = QPixmap(str(_lp))
+        if not _lg.isNull():
+            _sc = _lg.scaled(
+                400,
+                220,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            _x = (sp.width() - _sc.width()) // 2
+            _y = (sp.height() - _sc.height()) // 2 - 18
+            sp_painter.drawPixmap(_x, max(20, _y), _sc)
+            ver_f = QFont("Segoe UI", 11, QFont.Weight.Normal)
+            sp_painter.setFont(ver_f)
+            sp_painter.setPen(QColor("#e2e8f0"))
+            fm_v = QFontMetrics(ver_f)
+            vh = fm_v.height()
+            sp_painter.drawText(
+                QRect(sp.left(), sp.bottom() - vh - 16, sp.width(), vh),
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                ver,
+            )
+            sp_painter.end()
+        else:
+            _lp = None
+    if _lp is None:
+        title = "Etlzone"
+        title_f = QFont("Segoe UI", 22, QFont.Weight.Bold)
+        ver_f = QFont("Segoe UI", 11, QFont.Weight.Normal)
+        fm_t = QFontMetrics(title_f)
+        fm_v = QFontMetrics(ver_f)
+        th, vh = fm_t.height(), fm_v.height()
+        gap = 10
+        cy = sp.center().y()
+        y_title = cy - (th + gap + vh) // 2
+        sp_painter.setFont(title_f)
+        sp_painter.setPen(QColor("#f1f5f9"))
+        sp_painter.drawText(
+            QRect(sp.left(), y_title, sp.width(), th),
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+            title,
+        )
+        sp_painter.setFont(ver_f)
+        sp_painter.setPen(QColor("#e2e8f0"))
+        sp_painter.drawText(
+            QRect(sp.left(), y_title + th + gap, sp.width(), vh),
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+            ver,
+        )
+        sp_painter.end()
     splash = QSplashScreen(splash_pix)
+    if not _ico.isNull():
+        splash.setWindowIcon(_ico)
     splash.show()
     QApplication.processEvents()
     window = LoginWindow()

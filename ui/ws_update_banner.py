@@ -1,38 +1,48 @@
-"""Non-blocking top banner for WebSocket notifications (IDE-style update strip)."""
+"""Full-width strip below the menu bar for WebSocket notifications (no layout shift)."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFontMetrics, QShowEvent
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QVBoxLayout,
     QWidget,
 )
 
 from core.ws_notification import WsNotificationPayload
+from ui.form_page_styles import list_page_header_push_button_stylesheet
 from ui.theme import Theme
+
+# Compact bar height (single row, professional IDE-style strip).
+_BAR_HEIGHT_PX = 40
+
+# Match API: Projects (and other list headers) — Refresh / Create button width.
+_BANNER_ACTION_BTN_WIDTH_PX = 100
 
 
 class WsUpdateBanner(QFrame):
-    """Full-width strip below the menu bar; does not block interaction."""
+    """Edge-to-edge bar under the menu bar; shown only on the signed-in dashboard."""
 
     dismissed = Signal()
+    # Install on strip: same flow as Help → Check for update (AutoUpdateDialog, not browser download).
+    install_requested = Signal()
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("wsUpdateBanner")
         self.setVisible(False)
         self._url: str | None = None
+        self._full_line: str = ""
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setFixedHeight(_BAR_HEIGHT_PX)
         self.setStyleSheet(
             f"#wsUpdateBanner {{"
-            f"background: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
-            f" stop:0 #1e3a5f, stop:1 #0f2340);"
+            f"background-color: #1e293b;"
             f"border: none;"
-            f"border-bottom: 1px solid #2d4a73;"
+            f"border-bottom: 1px solid #334155;"
             f"}}"
         )
 
@@ -41,103 +51,118 @@ class WsUpdateBanner(QFrame):
         outer.setSpacing(0)
 
         accent = QFrame()
-        accent.setFixedWidth(4)
+        accent.setFixedWidth(3)
         accent.setStyleSheet(
             f"QFrame {{ background: {Theme.WARNING}; border: none; }}"
         )
         outer.addWidget(accent)
 
-        inner = QWidget()
-        inner.setStyleSheet("background: transparent;")
-        il = QVBoxLayout(inner)
-        il.setContentsMargins(14, 10, 12, 10)
-        il.setSpacing(2)
-
-        self._title = QLabel()
-        self._title.setWordWrap(True)
-        self._title.setStyleSheet(
-            "color: #f8fafc; font-size: 14px; font-weight: 600; "
-            "background: transparent; border: none; line-height: 1.35;"
+        self._text = QLabel()
+        self._text.setWordWrap(False)
+        self._text.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
         )
-        il.addWidget(self._title)
-
-        self._subtitle = QLabel()
-        self._subtitle.setWordWrap(True)
-        self._subtitle.setStyleSheet(
-            "color: #94a3b8; font-size: 12px; font-weight: 400; "
-            "background: transparent; border: none; line-height: 1.4;"
+        self._text.setStyleSheet(
+            "color: #e2e8f0; font-size: 12px; font-weight: 500; "
+            "background: transparent; border: none; padding: 0 12px;"
         )
-        il.addWidget(self._subtitle)
+        outer.addWidget(self._text, 1)
 
-        outer.addWidget(inner, 1)
+        btn_wrap = QWidget()
+        btn_wrap.setStyleSheet("background: transparent;")
+        br = QHBoxLayout(btn_wrap)
+        br.setContentsMargins(0, 0, 10, 0)
+        br.setSpacing(6)
 
-        btn_row = QWidget()
-        btn_row.setStyleSheet("background: transparent;")
-        br = QHBoxLayout(btn_row)
-        br.setContentsMargins(0, 8, 12, 8)
-        br.setSpacing(8)
+        _header_btn_style = list_page_header_push_button_stylesheet()
+        self._install_btn = QPushButton("Install")
+        self._install_btn.setFixedWidth(_BANNER_ACTION_BTN_WIDTH_PX)
+        self._install_btn.setAutoDefault(False)
+        self._install_btn.setDefault(False)
+        self._install_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._install_btn.setStyleSheet(_header_btn_style)
+        self._install_btn.clicked.connect(self._on_install)
+        self._install_btn.setVisible(False)
+        br.addWidget(self._install_btn)
 
-        self._action_btn = QPushButton("Open")
-        self._action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._action_btn.setStyleSheet(
-            f"QPushButton {{"
-            f"background: {Theme.WARNING}; color: #0f172a; border: none; "
-            f"border-radius: 5px; font-size: 12px; font-weight: 700; "
-            f"padding: 6px 14px; min-height: 18px;"
-            f"}}"
-            f"QPushButton:hover {{ background: #fbbf24; }}"
-            f"QPushButton:pressed {{ background: #d97706; color: #fff; }}"
-        )
-        self._action_btn.clicked.connect(self._on_action)
-        br.addWidget(self._action_btn)
+        self._dismiss_btn = QPushButton("Dismiss")
+        self._dismiss_btn.setFixedWidth(_BANNER_ACTION_BTN_WIDTH_PX)
+        self._dismiss_btn.setAutoDefault(False)
+        self._dismiss_btn.setDefault(False)
+        self._dismiss_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._dismiss_btn.setStyleSheet(_header_btn_style)
+        self._dismiss_btn.clicked.connect(self._on_dismiss)
+        br.addWidget(self._dismiss_btn)
 
-        dismiss = QPushButton("Dismiss")
-        dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
-        dismiss.setStyleSheet(
-            "QPushButton {"
-            "background: rgba(255,255,255,0.12); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.22); "
-            "border-radius: 5px; font-size: 12px; font-weight: 600; "
-            "padding: 6px 14px; min-height: 18px; }"
-            "QPushButton:hover { background: rgba(255,255,255,0.2); }"
-            "QPushButton:pressed { background: rgba(255,255,255,0.08); }"
-        )
-        dismiss.clicked.connect(self._on_dismiss)
-        br.addWidget(dismiss)
+        outer.addWidget(btn_wrap, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        outer.addWidget(btn_row, 0, Qt.AlignmentFlag.AlignTop)
+    def position_overlay(self) -> None:
+        """Full width, directly under the menu bar."""
+        mw = self.parentWidget()
+        if mw is None:
+            return
+        mb = mw.menuBar()
+        y_off = mb.height() if mb is not None and mb.isVisible() else 0
+        w = mw.width()
+        self.setFixedWidth(w)
+        self.setFixedHeight(_BAR_HEIGHT_PX)
+        self.move(0, y_off)
+        self.raise_()
+        self._apply_elided_text()
+
+    def _apply_elided_text(self) -> None:
+        raw = self._full_line
+        if not raw:
+            self._text.setText("")
+            return
+        reserve = 3 + 12 + 10  # accent, text left pad, btn row right margin
+        for btn in (self._install_btn, self._dismiss_btn):
+            if btn.isVisible():
+                reserve += btn.sizeHint().width() + 6
+        avail = max(80, self.width() - reserve - 12)
+        fm = QFontMetrics(self._text.font())
+        self._text.setText(fm.elidedText(raw, Qt.TextElideMode.ElideRight, avail))
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._apply_elided_text()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_elided_text()
 
     def show_payload(self, payload: WsNotificationPayload) -> None:
         self._url = payload.action_url
         header = (payload.header_title or "Notification").strip()
         headline = (payload.headline or "").strip()
-        self._title.setText(headline or header)
+        primary = headline or header
 
-        sub_parts: list[str] = []
+        parts: list[str] = [primary]
         if header and headline and header.lower() not in headline.lower():
-            sub_parts.append(header)
+            parts.append(header)
         if payload.body.strip():
-            sub_parts.append(payload.body.strip())
-        for label, value in payload.meta[:4]:
-            sub_parts.append(f"{label}: {value}")
-        self._subtitle.setText(" · ".join(sub_parts) if sub_parts else "")
-        self._subtitle.setVisible(bool(sub_parts))
+            parts.append(payload.body.strip())
+        for label, value in payload.meta[:3]:
+            parts.append(f"{label}: {value}")
+        self._full_line = " · ".join(p for p in parts if p)
 
-        self._action_btn.setVisible(bool(self._url))
-        if self._url:
-            self._action_btn.setText(payload.action_label or "Open link")
+        self._install_btn.setVisible(bool(self._url))
 
-        tip_lines = [payload.headline, payload.body]
+        tip_lines = [payload.headline, payload.body, header]
         tip_lines.extend(f"{a}: {b}" for a, b in payload.meta)
         self.setToolTip("\n".join(x for x in tip_lines if x))
 
         self.setVisible(True)
+        self.position_overlay()
+        self._apply_elided_text()
 
-    def _on_action(self) -> None:
+    def _on_install(self) -> None:
         if self._url:
-            QDesktopServices.openUrl(QUrl(self._url))
+            self.install_requested.emit()
 
     def _on_dismiss(self) -> None:
         self._url = None
+        self._full_line = ""
         self.setVisible(False)
         self.setToolTip("")
         self.dismissed.emit()
