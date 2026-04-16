@@ -39,3 +39,9 @@ API_SUB_OPTIONS = [
     "API: Validations",
     "API: All in One",
 ]
+
+# DMT Tracker sub-options
+OBJECT_TRACKER_SUB_OPTIONS = [
+    "DMT - Category",
+    "DMT - Module",
+]

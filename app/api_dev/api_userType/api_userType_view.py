@@ -22,9 +22,10 @@ from PySide6.QtWidgets import (
 )
 
 from core.api import api_update_user_type_in_api_project_by_id
+from core.nav_access import collect_allowed_action_names, nav_action_visible
 from core.app_preferences import format_datetime_display, is_datetime_field
 from ui.blank_display import is_blank_display_value
-from core.user_context import get_user_profile
+from core.user_context import get_nav_access_steps, get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
 from ui.form_page_styles import (
     FORM_ERROR_LABEL_STYLE,
@@ -109,6 +110,7 @@ class ViewUserTypePage(QWidget):
         self._record: dict[str, Any] = {}
         self._field_edits: dict[str, QLineEdit] = {}
         self._editable_keys: list[str] = []
+        self._can_edit_action = True
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -190,7 +192,14 @@ class ViewUserTypePage(QWidget):
         self._edit_btn = QPushButton("Edit")
         self._edit_btn.setFixedWidth(100)
         self._edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._edit_btn.setStyleSheet(FORM_PRIMARY_BUTTON_STYLESHEET)
+        self._edit_btn.setStyleSheet(
+            FORM_PRIMARY_BUTTON_STYLESHEET
+            + " QPushButton:disabled {"
+            + " background-color: #e5e7eb;"
+            + " color: #6b7280;"
+            + " border: 1px solid #cbd5e1;"
+            + "}"
+        )
         self._edit_btn.clicked.connect(self._handle_edit)
 
         self._cancel_btn = QPushButton("Cancel")
@@ -251,11 +260,24 @@ class ViewUserTypePage(QWidget):
 
     def set_record(self, record: dict[str, Any], edit_mode: bool = False) -> None:
         self._record = dict(record)
+        self._refresh_edit_action_access()
         self._refresh_values()
-        if edit_mode and self._record:
+        if edit_mode and self._record and self._can_edit_action:
             self._handle_edit()
         else:
             self._switch_to_view_mode()
+
+    def _refresh_edit_action_access(self) -> None:
+        steps = get_nav_access_steps()
+        if steps is None:
+            self._can_edit_action = True
+        else:
+            allowed_actions = collect_allowed_action_names(steps)
+            self._can_edit_action = nav_action_visible(
+                "API: User Involved", "edit", allowed_actions
+            )
+        self._edit_btn.setEnabled(self._can_edit_action)
+        self._edit_btn.setToolTip("" if self._can_edit_action else "Require Permission.")
 
     def _refresh_values(self) -> None:
         for label_text, keys in _USER_FIELD_GROUPS:
@@ -289,6 +311,9 @@ class ViewUserTypePage(QWidget):
         return ""
 
     def _handle_edit(self) -> None:
+        if not self._can_edit_action:
+            self._show_error("Require Permission.")
+            return
         self._clear_error()
         for key in self._editable_keys:
             edit = self._field_edits.get(key)

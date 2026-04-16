@@ -17,7 +17,8 @@ from app.api_dev.api_dev_all_in_one.details_list_panel import APIDetailsListPane
 from app.api_dev.api_dev_all_in_one.validation_comment_panel import ValidationCommentPanel
 from app.api_dev.api_dev_all_in_one.validations_list_panel import APIValidationsListPanel
 from core.api import api_get_all_api_details_all_in_one
-from core.user_context import get_user_profile
+from core.nav_access import nav_action_visible_from_steps
+from core.user_context import get_nav_access_steps, get_user_profile
 from ui.form_page_styles import (
     LIST_PAGE_HEADER_HEIGHT_PX,
     LIST_PAGE_HEADER_LAYOUT_MARGINS,
@@ -94,6 +95,7 @@ class ApiDevAllInOnePage(QWidget):
         self._loading = False
         self._pending_refresh = False
         self._lower_split_applied = False
+        self._can_display_all_in_one = True
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -108,11 +110,11 @@ class ApiDevAllInOnePage(QWidget):
         title = QLabel("API: All in One")
         header_layout.addWidget(title)
         header_layout.addStretch()
-        refresh_btn = QPushButton("Refresh")
-        refresh_btn.setFixedWidth(100)
-        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        refresh_btn.clicked.connect(self.refresh)
-        header_layout.addWidget(refresh_btn)
+        self._refresh_btn = QPushButton("Refresh")
+        self._refresh_btn.setFixedWidth(100)
+        self._refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._refresh_btn.clicked.connect(self.refresh)
+        header_layout.addWidget(self._refresh_btn)
         layout.addWidget(header)
 
         self._lower_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -166,6 +168,11 @@ class ApiDevAllInOnePage(QWidget):
         return str(token) if token else None
 
     def _refresh_combined(self) -> None:
+        self._refresh_display_access()
+        if not self._can_display_all_in_one:
+            self._details_page.reset_after_parent_load_failure("Require Permission.")
+            self._validations_page.apply_rows_from_parent_load([])
+            return
         if self._loading:
             self._pending_refresh = True
             return
@@ -221,6 +228,7 @@ class ApiDevAllInOnePage(QWidget):
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
+        self._refresh_display_access()
         self._refresh_combined()
         if not self._lower_split_applied:
             QTimer.singleShot(0, self._maybe_apply_lower_split_50_50)
@@ -241,3 +249,16 @@ class ApiDevAllInOnePage(QWidget):
 
     def refresh_validations(self) -> None:
         self._refresh_combined()
+
+    def _refresh_display_access(self) -> None:
+        steps = get_nav_access_steps()
+        if steps is None:
+            self._can_display_all_in_one = True
+        else:
+            self._can_display_all_in_one = nav_action_visible_from_steps(
+                "API: All in One", "display", steps
+            )
+        self._refresh_btn.setEnabled(self._can_display_all_in_one)
+        self._refresh_btn.setToolTip(
+            "" if self._can_display_all_in_one else "Require Permission."
+        )

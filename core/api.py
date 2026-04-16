@@ -626,8 +626,8 @@ def api_sign_out() -> dict[str, bool]:
 def api_get_app_step_list(token: str | None = None) -> dict[str, Any]:
     """GET api-access/getAppStepList — left-nav access. Requires Bearer JWT.
 
-    Returns ``success``, ``message``, and ``steps`` (list of dicts). On failure,
-    ``steps`` is ``[]`` so callers can treat as "do not restrict" via separate logic.
+    Returns ``success``, ``message``, and ``steps`` (list of dicts). On failure, ``steps`` is
+    ``[]`` so callers can apply strict left-nav filtering (no matching descriptions).
     """
     tok = _normalize_bearer_token(token)
     if not tok:
@@ -5699,3 +5699,409 @@ def api_user_hierarchy_get_subordinates(user_id: int | str, *, token: str | None
         }
     except (URLError, TimeoutError, ValueError):
         return {"success": False, "message": "Backend not reachable.", "data": []}
+
+
+def api_get_all_categories(*, token: str | None = None) -> dict[str, Any]:
+    """GET api/categories. Returns {'success': bool, 'data': list, 'message': str}."""
+    tk = _normalize_bearer_token(token)
+    if not tk:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    url = _api_url("api/categories")
+    headers: dict[str, str] = {
+        "Accept": "application/json",
+        "User-Agent": "MY-ETLZONE-App/1.0",
+        "Authorization": f"Bearer {tk}",
+    }
+    try:
+        _log_api("GET", url)
+        req = Request(url, headers=headers, method="GET")
+        with urlopen(req, timeout=10.0) as resp:
+            raw = resp.read()
+            status = getattr(resp, "status", None)
+        payload = json.loads(raw.decode("utf-8")) if raw else []
+        _log_api("GET", url, response=payload, status=status)
+        if isinstance(payload, list):
+            return {"success": True, "data": payload, "message": ""}
+        if isinstance(payload, dict):
+            rows = payload.get("data")
+            if isinstance(rows, list):
+                return {"success": True, "data": rows, "message": str(payload.get("message") or "")}
+            if payload.get("success") is False:
+                return {"success": False, "message": _extract_error_message(payload, "Failed to load categories.")}
+        return {"success": False, "message": "Unexpected response."}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Failed to load categories ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_create_category(
+    category_name: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """POST api/categories with JSON {'categoryName': '...'}."""
+    tk = _normalize_bearer_token(token)
+    if not tk:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    name = (category_name or "").strip()
+    if not name:
+        return {"success": False, "message": "Category name is required."}
+    url = _api_url("api/categories")
+    body: dict[str, Any] = {"categoryName": name}
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "MY-ETLZONE-App/1.0",
+        "Authorization": f"Bearer {tk}",
+    }
+    try:
+        _log_api("POST", url, body=body)
+        req = Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+        with urlopen(req, timeout=10.0) as resp:
+            raw = resp.read()
+            status = getattr(resp, "status", None)
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        _log_api("POST", url, body=body, response=payload, status=status)
+        if isinstance(payload, dict):
+            if payload.get("success") is False:
+                return {"success": False, "message": _extract_error_message(payload, "Create category failed.")}
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            return {
+                "success": True,
+                "message": str(payload.get("message") or "Category created successfully."),
+                "data": data,
+            }
+        return {"success": False, "message": "Unexpected response."}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Create category failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_delete_category(
+    category_id: int | str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """DELETE api/categories/{id}."""
+    tk = _normalize_bearer_token(token)
+    if not tk:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(category_id)
+    if not seg:
+        return {"success": False, "message": "Category ID is required."}
+    url = _api_url(f"api/categories/{seg}")
+    headers: dict[str, str] = {
+        "Accept": "application/json",
+        "User-Agent": "MY-ETLZONE-App/1.0",
+        "Authorization": f"Bearer {tk}",
+    }
+    try:
+        _log_api("DELETE", url)
+        req = Request(url, headers=headers, method="DELETE")
+        with urlopen(req, timeout=10.0) as resp:
+            raw = resp.read()
+            status = getattr(resp, "status", None)
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        _log_api("DELETE", url, response=payload, status=status)
+        if isinstance(payload, dict):
+            if payload.get("success") is False:
+                return {"success": False, "message": _extract_error_message(payload, "Delete category failed.")}
+            return {"success": True, "message": str(payload.get("message") or "Category deleted successfully.")}
+        return {"success": True, "message": "Category deleted successfully."}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Delete category failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_update_category(
+    category_id: int | str,
+    category_name: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """PUT api/categories/{id} with JSON {'categoryName': '...'}."""
+    tk = _normalize_bearer_token(token)
+    if not tk:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(category_id)
+    if not seg:
+        return {"success": False, "message": "Category ID is required."}
+    name = (category_name or "").strip()
+    if not name:
+        return {"success": False, "message": "Category name is required."}
+    url = _api_url(f"api/categories/{seg}")
+    body: dict[str, Any] = {"categoryName": name}
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "MY-ETLZONE-App/1.0",
+        "Authorization": f"Bearer {tk}",
+    }
+    try:
+        _log_api("PUT", url, body=body)
+        req = Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="PUT")
+        with urlopen(req, timeout=10.0) as resp:
+            raw = resp.read()
+            status = getattr(resp, "status", None)
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        _log_api("PUT", url, body=body, response=payload, status=status)
+        if isinstance(payload, dict):
+            if payload.get("success") is False:
+                return {"success": False, "message": _extract_error_message(payload, "Update category failed.")}
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            return {
+                "success": True,
+                "message": str(payload.get("message") or "Category updated successfully."),
+                "data": data,
+            }
+        return {"success": False, "message": "Unexpected response."}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Update category failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_get_all_modules(*, token: str | None = None) -> dict[str, Any]:
+    """GET api/modules. Returns {'success': bool, 'data': list, 'message': str}."""
+    tk = _normalize_bearer_token(token)
+    if not tk:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    url = _api_url("api/modules")
+    headers: dict[str, str] = {
+        "Accept": "application/json",
+        "User-Agent": "MY-ETLZONE-App/1.0",
+        "Authorization": f"Bearer {tk}",
+    }
+    try:
+        _log_api("GET", url)
+        req = Request(url, headers=headers, method="GET")
+        with urlopen(req, timeout=10.0) as resp:
+            raw = resp.read()
+            status = getattr(resp, "status", None)
+        payload = json.loads(raw.decode("utf-8")) if raw else []
+        _log_api("GET", url, response=payload, status=status)
+        if isinstance(payload, list):
+            return {"success": True, "data": payload, "message": ""}
+        if isinstance(payload, dict):
+            rows = payload.get("data")
+            if isinstance(rows, list):
+                return {"success": True, "data": rows, "message": str(payload.get("message") or "")}
+            if payload.get("success") is False:
+                return {"success": False, "message": _extract_error_message(payload, "Failed to load modules.")}
+        return {"success": False, "message": "Unexpected response."}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Failed to load modules ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_create_module(
+    module_name: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """POST api/modules with JSON {'moduleName': '...'}."""
+    tk = _normalize_bearer_token(token)
+    if not tk:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    name = (module_name or "").strip()
+    if not name:
+        return {"success": False, "message": "Module name is required."}
+    url = _api_url("api/modules")
+    body: dict[str, Any] = {"moduleName": name}
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "MY-ETLZONE-App/1.0",
+        "Authorization": f"Bearer {tk}",
+    }
+    try:
+        _log_api("POST", url, body=body)
+        req = Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+        with urlopen(req, timeout=10.0) as resp:
+            raw = resp.read()
+            status = getattr(resp, "status", None)
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        _log_api("POST", url, body=body, response=payload, status=status)
+        if isinstance(payload, dict):
+            if payload.get("success") is False:
+                return {"success": False, "message": _extract_error_message(payload, "Create module failed.")}
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            return {
+                "success": True,
+                "message": str(payload.get("message") or payload.get("msg") or "Module created successfully."),
+                "data": data,
+            }
+        return {"success": False, "message": "Unexpected response."}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Create module failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_update_module(
+    module_id: int | str,
+    module_name: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """PUT api/modules/{id} with JSON {'moduleName': '...'}."""
+    tk = _normalize_bearer_token(token)
+    if not tk:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(module_id)
+    if not seg:
+        return {"success": False, "message": "Module ID is required."}
+    name = (module_name or "").strip()
+    if not name:
+        return {"success": False, "message": "Module name is required."}
+    url = _api_url(f"api/modules/{seg}")
+    body: dict[str, Any] = {"moduleName": name}
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "MY-ETLZONE-App/1.0",
+        "Authorization": f"Bearer {tk}",
+    }
+    try:
+        _log_api("PUT", url, body=body)
+        req = Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="PUT")
+        with urlopen(req, timeout=10.0) as resp:
+            raw = resp.read()
+            status = getattr(resp, "status", None)
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        _log_api("PUT", url, body=body, response=payload, status=status)
+        if isinstance(payload, dict):
+            if payload.get("success") is False:
+                return {"success": False, "message": _extract_error_message(payload, "Update module failed.")}
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            return {
+                "success": True,
+                "message": str(payload.get("message") or payload.get("msg") or "Module updated successfully."),
+                "data": data,
+            }
+        return {"success": False, "message": "Unexpected response."}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Update module failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_delete_module(
+    module_id: int | str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """DELETE api/modules/{id}."""
+    tk = _normalize_bearer_token(token)
+    if not tk:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(module_id)
+    if not seg:
+        return {"success": False, "message": "Module ID is required."}
+    url = _api_url(f"api/modules/{seg}")
+    headers: dict[str, str] = {
+        "Accept": "application/json",
+        "User-Agent": "MY-ETLZONE-App/1.0",
+        "Authorization": f"Bearer {tk}",
+    }
+    try:
+        _log_api("DELETE", url)
+        req = Request(url, headers=headers, method="DELETE")
+        with urlopen(req, timeout=10.0) as resp:
+            raw = resp.read()
+            status = getattr(resp, "status", None)
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        _log_api("DELETE", url, response=payload, status=status)
+        if isinstance(payload, dict):
+            if payload.get("success") is False:
+                return {"success": False, "message": _extract_error_message(payload, "Delete module failed.")}
+            return {"success": True, "message": str(payload.get("message") or payload.get("msg") or "Module deleted successfully.")}
+        return {"success": True, "message": "Module deleted successfully."}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Delete module failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}

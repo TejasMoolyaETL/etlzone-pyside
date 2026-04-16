@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QL
 from core.left_panel_nav_items import (
     API_MANAGEMENT_SUB_OPTIONS,
     API_SUB_OPTIONS,
+    OBJECT_TRACKER_SUB_OPTIONS,
     ORG_MANAGEMENT_SUB_OPTIONS,
     USER_MANAGEMENT_SUB_OPTIONS,
 )
@@ -32,7 +33,7 @@ def _make_tinted_icon(path: Path, r: int, g: int, b: int) -> QIcon | None:
     return QIcon(QPixmap.fromImage(img))
 
 # Order: Dashboard, Org Management, User Management, API Management,
-#        API Development, DB Design Project (last before View Profile / Settings / Sign out)
+#        API Development, DB Design Project, DMT Tracker (last main sections before bottom actions)
 DEFAULT_PANEL_ITEMS = ["Dashboard", "DB Design Project"]
 
 # Bottom section items (pinned at bottom)
@@ -310,7 +311,7 @@ class AppLeftPanel(QWidget):
         self._api_sub_container.setMinimumHeight(0)
         self._api_sub_container.set_content_height(len(API_SUB_OPTIONS) * 36 + 20)
 
-        # 6. DB Design Project (single button) — last main nav item before bottom actions
+        # 6. DB Design Project (single button)
         self._db_design_btn = QPushButton("DB Design Project")
         self._db_design_btn.setStyleSheet(_sub_btn_style)
         self._db_design_btn.clicked.connect(
@@ -318,6 +319,28 @@ class AppLeftPanel(QWidget):
         )
         self._nav_buttons["DB Design Project"] = self._db_design_btn
         content_layout.addWidget(self._db_design_btn)
+
+        # 7. DMT Tracker (collapsible, start collapsed)
+        self._object_tracker_toggle = QPushButton("DMT Tracker")
+        self._object_tracker_toggle.setCheckable(True)
+        self._object_tracker_toggle.setChecked(False)
+        self._object_tracker_toggle.setStyleSheet(_toggle_style)
+        self._object_tracker_toggle.clicked.connect(self._on_object_tracker_toggle)
+        content_layout.addWidget(self._object_tracker_toggle)
+        self._object_tracker_sub_container = _CollapsibleWidget()
+        self._object_tracker_sub_container.setMaximumHeight(0)
+        object_tracker_layout = QVBoxLayout(self._object_tracker_sub_container)
+        object_tracker_layout.setContentsMargins(20, 4, 0, 8)
+        object_tracker_layout.setSpacing(6)
+        for opt in OBJECT_TRACKER_SUB_OPTIONS:
+            btn = QPushButton(opt)
+            btn.setStyleSheet(_sub_btn_style)
+            btn.clicked.connect(lambda checked=False, name=opt: self.navigation_requested.emit(name))
+            self._nav_buttons[opt] = btn
+            object_tracker_layout.addWidget(btn)
+        content_layout.addWidget(self._object_tracker_sub_container)
+        self._object_tracker_sub_container.setMinimumHeight(0)
+        self._object_tracker_sub_container.set_content_height(len(OBJECT_TRACKER_SUB_OPTIONS) * 36 + 20)
 
         content_layout.addStretch()
 
@@ -429,6 +452,10 @@ class AppLeftPanel(QWidget):
             self._collapse_others_except(self._api_toggle)
             self._api_toggle.setChecked(True)
             self._api_sub_container.expand()
+        elif item_name in OBJECT_TRACKER_SUB_OPTIONS:
+            self._collapse_others_except(self._object_tracker_toggle)
+            self._object_tracker_toggle.setChecked(True)
+            self._object_tracker_sub_container.expand()
         else:
             self.collapse_all_sections()
 
@@ -442,6 +469,8 @@ class AppLeftPanel(QWidget):
         self._api_mgmt_sub_container.collapse()
         self._api_toggle.setChecked(False)
         self._api_sub_container.collapse()
+        self._object_tracker_toggle.setChecked(False)
+        self._object_tracker_sub_container.collapse()
 
     def _collapse_others_except(self, except_toggle: QPushButton) -> None:
         """Collapse all sections except the one whose toggle is given (accordion: only one open)."""
@@ -457,6 +486,9 @@ class AppLeftPanel(QWidget):
         if except_toggle is not self._api_toggle:
             self._api_toggle.setChecked(False)
             self._api_sub_container.collapse()
+        if except_toggle is not self._object_tracker_toggle:
+            self._object_tracker_toggle.setChecked(False)
+            self._object_tracker_sub_container.collapse()
 
     def _on_org_mgmt_toggle(self) -> None:
         if self._org_mgmt_toggle.isChecked():
@@ -485,3 +517,10 @@ class AppLeftPanel(QWidget):
             self._api_sub_container.expand()
         else:
             self._api_sub_container.collapse()
+
+    def _on_object_tracker_toggle(self) -> None:
+        if self._object_tracker_toggle.isChecked():
+            self._collapse_others_except(self._object_tracker_toggle)
+            self._object_tracker_sub_container.expand()
+        else:
+            self._object_tracker_sub_container.collapse()

@@ -420,7 +420,7 @@ class _AssignRoleDialog(QDialog):
         self.default_chk.setChecked(
             _default_role_checked_from_assignment(
                 self.assignment,
-                fallback=True if not is_edit else False,
+                fallback=False,
             )
         )
         _add_view_user_form_row(bottom_form, "Default role", self.default_chk)
@@ -696,7 +696,7 @@ class _AssignRoleDialog(QDialog):
                 if parsed_vt.isValid():
                     self.valid_to.setDate(parsed_vt)
             self.default_chk.setChecked(
-                _default_role_checked_from_assignment(self.assignment, fallback=True)
+                _default_role_checked_from_assignment(self.assignment, fallback=False)
             )
             st_raw = (
                 self.assignment.get("status")

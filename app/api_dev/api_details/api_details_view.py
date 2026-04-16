@@ -28,9 +28,10 @@ from PySide6.QtWidgets import (
 
 from app.api_dev.api_details.api_method_combo import configure_api_method_combo
 from core.api import api_get_all_projects, api_update_api_detail_by_id
+from core.nav_access import collect_allowed_action_names, nav_action_visible
 from core.app_preferences import format_datetime_display, is_datetime_field
 from ui.blank_display import is_blank_display_value
-from core.user_context import get_user_profile
+from core.user_context import get_nav_access_steps, get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
 from ui.form_combobox_style import FORM_COMBOBOX_STYLE, apply_form_combobox_field
 from ui.form_page_styles import (
@@ -144,6 +145,7 @@ class ViewAPIDetailPage(QWidget):
         self._record: dict[str, Any] = {}
         self._field_edits: dict[str, QLineEdit | QPlainTextEdit | QComboBox] = {}
         self._editable_keys: list[str] = []
+        self._can_edit_action = True
         self._edit_baseline: dict[str, str] = {}
         self._localhost_path_icon: QToolButton | None = None
         self._server_path_icon: QToolButton | None = None
@@ -151,11 +153,22 @@ class ViewAPIDetailPage(QWidget):
 
     def set_record(self, record: dict[str, Any], edit_mode: bool = False) -> None:
         self._record = dict(record)
+        self._refresh_edit_action_access()
         self._refresh_values()
-        if edit_mode and self._record:
+        if edit_mode and self._record and self._can_edit_action:
             self._handle_edit()
         else:
             self._switch_to_view_mode()
+
+    def _refresh_edit_action_access(self) -> None:
+        steps = get_nav_access_steps()
+        if steps is None:
+            self._can_edit_action = True
+        else:
+            allowed_actions = collect_allowed_action_names(steps)
+            self._can_edit_action = nav_action_visible("API: Details", "edit", allowed_actions)
+        self._edit_btn.setEnabled(self._can_edit_action)
+        self._edit_btn.setToolTip("" if self._can_edit_action else "Require Permission.")
 
     def _refresh_values(self) -> None:
         for _label_text, keys in _DETAIL_FIELD_GROUPS:
@@ -354,7 +367,14 @@ class ViewAPIDetailPage(QWidget):
         self._edit_btn = QPushButton("Edit")
         self._edit_btn.setFixedWidth(100)
         self._edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._edit_btn.setStyleSheet(FORM_PRIMARY_BUTTON_STYLESHEET)
+        self._edit_btn.setStyleSheet(
+            FORM_PRIMARY_BUTTON_STYLESHEET
+            + " QPushButton:disabled {"
+            + " background-color: #e5e7eb;"
+            + " color: #6b7280;"
+            + " border: 1px solid #cbd5e1;"
+            + "}"
+        )
         self._edit_btn.clicked.connect(self._handle_edit)
 
         self._cancel_btn = QPushButton("Cancel")
@@ -429,6 +449,9 @@ class ViewAPIDetailPage(QWidget):
         self._error_label.setVisible(False)
 
     def _handle_edit(self) -> None:
+        if not self._can_edit_action:
+            self._show_error("Require Permission.")
+            return
         self._clear_error()
         self._edit_baseline = {}
         for key in self._editable_keys:

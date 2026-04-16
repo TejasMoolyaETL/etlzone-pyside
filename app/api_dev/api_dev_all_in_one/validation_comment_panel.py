@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import html
 import json
+import math
 import re
 from datetime import datetime, timedelta, timezone
 from functools import partial
@@ -20,9 +21,12 @@ from PySide6.QtGui import (
     QIcon,
     QPainter,
     QPen,
+    QPalette,
     QTextCharFormat,
     QTextCursor,
+    QTextDocument,
     QTextListFormat,
+    QTextOption,
     QPixmap,
 )
 from PySide6.QtWidgets import (
@@ -32,7 +36,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QStackedWidget,
+    QSizePolicy,
     QTextEdit,
     QToolButton,
     QVBoxLayout,
@@ -47,7 +51,8 @@ from core.api import (
     api_get_all_validation_comments_by_id,
     api_update_validation_comment_by_id,
 )
-from core.user_context import get_user_email, get_user_profile
+from core.nav_access import collect_allowed_action_names, nav_action_visible
+from core.user_context import get_nav_access_steps, get_user_email, get_user_profile
 from ui.form_page_styles import (
     APP_FONT_SIZE_PX,
     FORM_ERROR_LABEL_STYLE,
@@ -60,30 +65,126 @@ _COMMENT_PANEL_HEADER_HEIGHT_PX = 22
 _COMMENT_PANEL_HEADER_MARGINS = (5, 0, 5, 0)
 _COMMENT_PANEL_HEADER_SPACING = 3
 _COMMENT_AUX_LABEL_STYLE = "color: #64748b; font-size: 9px; font-weight: 500;"
-# Message body / edit surfaces — same white as chat viewport (QScrollArea background).
-_COMMENT_BLOCK_BG = "#ffffff"
+# Section canvas matches data table / Theme.BG_WHITE (not Theme.BG_APP — scroll viewport is often transparent in QSS).
+_COMMENT_SECTION_BG = Theme.BG_WHITE
+_COMMENT_BLOCK_BG = "#F3F3F6"
 _COMMENT_BLOCK_BORDER = "#e2e8f0"
 
 
-def _comment_message_label_stylesheet(font_size_px: int) -> str:
-    # Tight vertical inset (top/bottom); horizontal keeps text off the border.
-    return (
-        f"QLabel {{ color: #0f172a; font-size: {font_size_px}px; "
-        f"background-color: {_COMMENT_BLOCK_BG}; padding: 1px 8px; "
-        f"border: 1px solid {_COMMENT_BLOCK_BORDER}; border-radius: 6px; }}"
-    )
+def _force_widget_window_bg(widget: QWidget, hex_color: str) -> None:
+    """Solid background; QScrollArea viewport often ignores QSS-only fills and shows QStackedWidget BG_APP."""
+    widget.setAutoFillBackground(True)
+    pal = widget.palette()
+    pal.setColor(QPalette.ColorRole.Window, QColor(hex_color))
+    widget.setPalette(pal)
+
+
+def _force_textedit_surface_bg(editor: QTextEdit, hex_color: str) -> None:
+    """QTextEdit often uses Base for the document area; match QSS so placeholder row is white on Windows."""
+    editor.setAutoFillBackground(True)
+    pal = editor.palette()
+    c = QColor(hex_color)
+    pal.setColor(QPalette.ColorRole.Base, c)
+    pal.setColor(QPalette.ColorRole.Window, c)
+    editor.setPalette(pal)
 
 
 def _comment_message_text_only_stylesheet(font_size_px: int) -> str:
     return f"QLabel {{ color: #0f172a; font-size: {font_size_px}px; background: transparent; border: none; }}"
 
 
-def _comment_message_textedit_stylesheet(font_size_px: int, *, padding: str = "1px 8px") -> str:
+def _comment_message_textedit_stylesheet(
+    font_size_px: int, *, padding: str = "1px 8px", bg: str | None = None
+) -> str:
+    fill = bg if bg is not None else _COMMENT_BLOCK_BG
     return (
         f"QTextEdit {{ color: #0f172a; font-size: {font_size_px}px; "
-        f"background-color: {_COMMENT_BLOCK_BG}; padding: {padding}; "
+        f"background-color: {fill}; padding: {padding}; "
         f"border: 1px solid {_COMMENT_BLOCK_BORDER}; border-radius: 6px; }}"
     )
+
+
+_COMMENT_BODY_MIN_HEIGHT_PX = 18
+
+
+class _RichCommentBodyLabel(QLabel):
+    """Rich-text comment body that keeps a compact single-line height, then grows with wrapping."""
+
+    def __init__(self, font_size_px: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._fs = max(9, int(font_size_px))
+        self.setWordWrap(True)
+        self.setTextFormat(Qt.TextFormat.RichText)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    def setText(self, text: str) -> None:
+        super().setText(text)
+        QTimer.singleShot(0, self._sync_height)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._sync_height()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._sync_height()
+
+    def _sync_height(self) -> None:
+        # During first layout passes, contentsRect width can be 0 even though the widget already
+        # has a reasonable outer width — falling back prevents "stuck tall" default QLabel sizing.
+        w = int(self.contentsRect().width())
+        if w <= 1:
+            w = int(self.width())
+        if w <= 1:
+            pw = self.parentWidget()
+            if pw is not None:
+                w = int(pw.width())
+        if w <= 1:
+            return
+        # Stylesheet padding/border on QLabel is not always reflected in contentsRect the same way
+        # across styles; keep a safety margin that covers 4px top + 4px bottom padding plus border.
+        horiz_extra = 18
+        vert_extra = 10
+        text_w = max(1, w - horiz_extra)
+
+        raw = self.text() or ""
+        fm = QFontMetrics(self.font())
+        line_h = max(1, fm.height())
+
+        if not _looks_like_rich_html(raw):
+            flags = Qt.TextFlag.TextWordWrap
+            br = fm.boundingRect(
+                0,
+                0,
+                text_w,
+                10_000,
+                flags,
+                raw.replace("\r\n", "\n"),
+            )
+            h = int(math.ceil(br.height())) + vert_extra
+            lines = max(1, int(round(br.height() / float(line_h))) if line_h else 1)
+        else:
+            doc = QTextDocument()
+            doc.setDefaultFont(self.font())
+            doc.setDocumentMargin(0.0)
+            doc.setHtml(raw)
+            doc.setTextWidth(float(text_w))
+            opt = QTextOption()
+            opt.setWrapMode(QTextOption.WrapMode.WordWrap)
+            doc.setDefaultTextOption(opt)
+            doc_h = float(doc.size().height())
+            h = int(math.ceil(doc_h)) + vert_extra
+            # Rich HTML from QTextEdit can report a slightly taller single-line doc due to tag/layout
+            # overhead; use a looser threshold so one-line comments keep the same compact bubble height.
+            lines = 1 if doc_h <= float(line_h) * 1.6 else max(2, int(math.ceil(doc_h / float(line_h))))
+
+        if lines <= 1:
+            # Keep one-line rich HTML and one-line plain text at the same visual height.
+            one_line_target = max(_COMMENT_BODY_MIN_HEIGHT_PX, line_h + vert_extra)
+            h = one_line_target
+        self.setMinimumHeight(h)
+        self.setMaximumHeight(h)
 
 
 def _looks_like_rich_html(s: str) -> bool:
@@ -612,15 +713,15 @@ class _CommentMessageHoverRow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._actions = actions
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 1, 8, 1)
-        lay.setSpacing(6)
-        lay.addWidget(body, 1)
+        lay.setContentsMargins(6, 2, 6, 2)
+        lay.setSpacing(3)
+        lay.addWidget(body, 1, Qt.AlignmentFlag.AlignTop)
         lay.addWidget(actions, 0, Qt.AlignmentFlag.AlignTop)
         actions.setVisible(False)
         self.setStyleSheet(
-            "QWidget#commentMessageBubble { background-color: #ffffff; border: 1px solid #e2e8f0; "
-            "border-radius: 6px; }"
-            "QWidget#commentMessageBubble:hover { background-color: #ffffff; border: 1px solid #e2e8f0; }"
+            f"QWidget#commentMessageBubble {{ background-color: {_COMMENT_BLOCK_BG}; border: 1px solid {_COMMENT_BLOCK_BORDER}; "
+            "border-radius: 6px; }}"
+            f"QWidget#commentMessageBubble:hover {{ background-color: {_COMMENT_BLOCK_BG}; border: 1px solid {_COMMENT_BLOCK_BORDER}; }}"
         )
 
     def enterEvent(self, event: QEnterEvent) -> None:
@@ -644,6 +745,7 @@ class _OwnCommentChatRow(QWidget):
         when_suffix: str,
         text: str,
         pencil_enabled: bool,
+        can_delete: bool,
     ) -> None:
         super().__init__(panel)
         self._panel = panel
@@ -666,23 +768,21 @@ class _OwnCommentChatRow(QWidget):
         meta_row.addWidget(meta, 1)
         outer.addLayout(meta_row)
 
-        self._body = QLabel()
-        self._body.setWordWrap(True)
-        self._body.setTextFormat(Qt.TextFormat.RichText)
+        self._body = _RichCommentBodyLabel(fs, self)
+        self._body.setMargin(0)
         self._body.setText(_comment_body_display_html(text))
-        self._body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._body.setStyleSheet(_comment_message_text_only_stylesheet(fs))
 
         actions_host = QWidget()
         actions_host.setStyleSheet("background: transparent; border: none;")
         al = QHBoxLayout(actions_host)
-        al.setContentsMargins(0, 1, 0, 0)
+        al.setContentsMargins(0, 0, 0, 0)
         al.setSpacing(0)
         icon_px = _comment_row_action_icon_px()
-        icon_side = max(26, icon_px + 10)
+        icon_side = max(18, icon_px + 4)
         action_style = (
             "QToolButton { background: transparent; border: none; border-radius: 4px; "
-            "padding: 2px; }"
+            "padding: 0px; }"
             "QToolButton:hover { background: transparent; }"
             "QToolButton:pressed { background: transparent; }"
             "QToolButton:disabled { background: transparent; }"
@@ -700,31 +800,35 @@ class _OwnCommentChatRow(QWidget):
             edit_btn.setAutoRaise(True)
             edit_btn.clicked.connect(self._on_edit_clicked)
 
-        del_btn = QToolButton()
-        del_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        del_btn.setIcon(_comment_row_delete_icon())
-        del_btn.setIconSize(QSize(icon_px, icon_px))
-        del_btn.setFixedSize(icon_side, icon_side)
-        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        del_btn.setToolTip("Delete this message")
-        del_btn.setStyleSheet(action_style)
-        del_btn.setAutoRaise(True)
-        del_btn.clicked.connect(partial(self._panel._request_delete_comment, dict(row)))
+        del_btn: QToolButton | None = None
+        if can_delete:
+            del_btn = QToolButton()
+            del_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            del_btn.setIcon(_comment_row_delete_icon())
+            del_btn.setIconSize(QSize(icon_px, icon_px))
+            del_btn.setFixedSize(icon_side, icon_side)
+            del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            del_btn.setToolTip("Delete this message")
+            del_btn.setStyleSheet(action_style)
+            del_btn.setAutoRaise(True)
+            del_btn.clicked.connect(partial(self._panel._request_delete_comment, dict(row)))
 
         if pencil_enabled:
             al.addWidget(edit_btn)
-        al.addWidget(del_btn)
+        if del_btn is not None:
+            al.addWidget(del_btn)
 
         self._view_page = _CommentMessageHoverRow(self._body, actions_host, self)
 
         edit_wrap = QWidget()
+        edit_wrap.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         ev = QVBoxLayout(edit_wrap)
         ev.setContentsMargins(0, 0, 0, 0)
         ev.setSpacing(2)
         self._inline_editor = QTextEdit()
         self._inline_editor.setAcceptRichText(True)
         self._inline_editor.document().setDocumentMargin(0)
-        self._inline_editor.setMinimumHeight(40)
+        self._inline_editor.setMinimumHeight(30)
         self._inline_editor.setMaximumHeight(200)
         self._inline_editor.setStyleSheet(_comment_message_textedit_stylesheet(fs))
         btn_row = QHBoxLayout()
@@ -762,16 +866,34 @@ class _OwnCommentChatRow(QWidget):
         ev.addWidget(self._inline_editor)
         ev.addLayout(btn_row)
 
-        self._stack = QStackedWidget()
-        self._stack.addWidget(self._view_page)
-        self._stack.addWidget(edit_wrap)
-        outer.addWidget(self._stack)
+        # Avoid QStackedWidget sizing to the tallest page: the editor has a non-trivial minimum height,
+        # which was keeping the whole chat row tall even in read-only bubble mode.
+        self._mode_stack = QWidget()
+        ms = QVBoxLayout(self._mode_stack)
+        ms.setContentsMargins(0, 0, 0, 0)
+        ms.setSpacing(0)
+        ms.addWidget(self._view_page)
+        ms.addWidget(edit_wrap)
+        outer.addWidget(self._mode_stack)
+
+        self._edit_wrap = edit_wrap
+        self._collapse_edit_ui()
+
+    def _expand_edit_ui(self) -> None:
+        self._view_page.setVisible(False)
+        self._edit_wrap.setVisible(True)
+        self._edit_wrap.setMaximumHeight(16777215)
+
+    def _collapse_edit_ui(self) -> None:
+        self._edit_wrap.setVisible(False)
+        self._edit_wrap.setMaximumHeight(0)
+        self._view_page.setVisible(True)
 
     def _on_edit_clicked(self) -> None:
-        if not self._pencil_enabled:
+        if not self._pencil_enabled or not self._panel._can_comment_edit:
             return
         self._panel._register_inline_edit(self)
-        self._stack.setCurrentIndex(1)
+        self._expand_edit_ui()
         raw = str(self._row.get("comment", "") or "")
         if _looks_like_rich_html(raw):
             self._inline_editor.setHtml(raw)
@@ -780,8 +902,8 @@ class _OwnCommentChatRow(QWidget):
         QTimer.singleShot(0, lambda: self._inline_editor.setFocus())
 
     def cancel_edit(self) -> None:
-        if self._stack.currentIndex() == 1:
-            self._stack.setCurrentIndex(0)
+        if self._edit_wrap.isVisible():
+            self._collapse_edit_ui()
         if getattr(self._panel, "_inline_edit_row", None) is self:
             self._panel._inline_edit_row = None
 
@@ -791,6 +913,10 @@ class _OwnCommentChatRow(QWidget):
         self._btn_cancel.setEnabled(not busy)
 
     def _on_save_clicked(self) -> None:
+        if not self._panel._can_comment_edit:
+            self._panel._flash_status("Require Permission.", error=True)
+            self.cancel_edit()
+            return
         if not self._panel._is_edit_window_open(self._created_at):
             self._panel._flash_status("Edit time expired (5 min).", error=True)
             self.cancel_edit()
@@ -847,6 +973,10 @@ class ValidationCommentPanel(QWidget):
         self._chat_loading = False
         self._inline_edit_row: _OwnCommentChatRow | None = None
         self._pending_delete_comment_id: Any = None
+        self._can_comment_display = True
+        self._can_comment_create = True
+        self._can_comment_edit = True
+        self._can_comment_delete = True
 
         self._load_timer = QTimer(self)
         self._load_timer.setSingleShot(True)
@@ -856,6 +986,13 @@ class ValidationCommentPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
+
+        self.setObjectName("validationCommentPanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(
+            f"QWidget#validationCommentPanel {{ background-color: {_COMMENT_SECTION_BG}; }}"
+        )
+        _force_widget_window_bg(self, _COMMENT_SECTION_BG)
 
         header = QWidget()
         header.setStyleSheet(_comment_panel_header_stylesheet())
@@ -879,8 +1016,10 @@ class ValidationCommentPanel(QWidget):
 
         self._format_bar = QWidget()
         self._format_bar.setObjectName("commentFormatBar")
+        self._format_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        _force_widget_window_bg(self._format_bar, _COMMENT_SECTION_BG)
         self._format_bar.setStyleSheet(
-            "QWidget#commentFormatBar { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 3px; }"
+            f"QWidget#commentFormatBar {{ background: {_COMMENT_SECTION_BG}; border: 1px solid #e2e8f0; border-radius: 3px; }}"
             f"QWidget#commentFormatBar QToolButton {{ background: transparent; border: 1px solid transparent; "
             f"border-radius: 2px; padding: 0px 2px; color: #334155; font-size: {APP_FONT_SIZE_PX}px; "
             f"min-width: {APP_FONT_SIZE_PX + 5}px; max-height: {APP_FONT_SIZE_PX + 5}px; }}"
@@ -992,15 +1131,23 @@ class ValidationCommentPanel(QWidget):
         self._format_bar.setEnabled(False)
 
         self._chat_scroll = QScrollArea()
+        self._chat_scroll.setObjectName("commentChatScroll")
         self._chat_scroll.setWidgetResizable(True)
+        self._chat_scroll.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._chat_scroll.setStyleSheet(
-            "QScrollArea { border: 1px solid #e2e8f0; border-radius: 3px; background: #ffffff; }"
+            f"QScrollArea#commentChatScroll {{ border: 1px solid #e2e8f0; border-radius: 3px; "
+            f"background-color: {_COMMENT_SECTION_BG}; }}"
+            f"QScrollArea#commentChatScroll > QWidget > QWidget {{ background-color: {_COMMENT_SECTION_BG}; "
+            "border: none; }}"
         )
         self._chat_host = QWidget()
+        self._chat_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        _force_widget_window_bg(self._chat_host, _COMMENT_SECTION_BG)
         self._chat_layout = QVBoxLayout(self._chat_host)
         self._chat_layout.setContentsMargins(2, 2, 2, 2)
         self._chat_layout.setSpacing(1)
         self._chat_scroll.setWidget(self._chat_host)
+        _force_widget_window_bg(self._chat_scroll.viewport(), _COMMENT_SECTION_BG)
         layout.addWidget(self._chat_scroll, 1)
 
         input_row = QHBoxLayout()
@@ -1012,8 +1159,11 @@ class ValidationCommentPanel(QWidget):
         self._editor.setMinimumHeight(28)
         self._editor.setMaximumHeight(44)
         self._editor.setStyleSheet(
-            _comment_message_textedit_stylesheet(max(9, APP_FONT_SIZE_PX - 3), padding="1px 6px")
+            _comment_message_textedit_stylesheet(
+                max(9, APP_FONT_SIZE_PX - 3), padding="1px 6px", bg=_COMMENT_SECTION_BG
+            )
         )
+        _force_textedit_surface_bg(self._editor, _COMMENT_SECTION_BG)
         self._editor.installEventFilter(self)
         self._editor.cursorPositionChanged.connect(self._sync_format_toolbar)
         self._editor.selectionChanged.connect(self._sync_format_toolbar)
@@ -1047,9 +1197,32 @@ class ValidationCommentPanel(QWidget):
         layout.addWidget(self._status)
 
         self._vp.table.itemSelectionChanged.connect(self._on_selection_changed)
+        self._refresh_comment_access()
         self._update_context()
         self._render_chat()
         self._sync_format_toolbar()
+
+    def _refresh_comment_access(self) -> None:
+        steps = get_nav_access_steps()
+        if steps is None:
+            self._can_comment_display = True
+            self._can_comment_create = True
+            self._can_comment_edit = True
+            self._can_comment_delete = True
+            return
+        allowed_actions = collect_allowed_action_names(steps)
+        self._can_comment_display = nav_action_visible(
+            "API: All in One", "comment_display", allowed_actions
+        )
+        self._can_comment_create = nav_action_visible(
+            "API: All in One", "comment_create", allowed_actions
+        )
+        self._can_comment_edit = nav_action_visible(
+            "API: All in One", "comment_edit", allowed_actions
+        )
+        self._can_comment_delete = nav_action_visible(
+            "API: All in One", "comment_delete", allowed_actions
+        )
 
     def _list_format_at_cursor(self) -> QTextListFormat | None:
         b = self._editor.textCursor().block()
@@ -1164,9 +1337,9 @@ class ValidationCommentPanel(QWidget):
     def _update_context(self) -> None:
         vid = self._current_validation_id()
         enabled = vid is not None and not self._busy
-        self._btn_send.setEnabled(enabled)
-        self._btn_refresh.setEnabled(enabled)
-        self._format_bar.setEnabled(enabled)
+        self._btn_send.setEnabled(enabled and self._can_comment_create)
+        self._btn_refresh.setEnabled(enabled and self._can_comment_display)
+        self._format_bar.setEnabled(enabled and self._can_comment_create)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if watched is self._editor and event.type() == QEvent.Type.KeyPress:
@@ -1186,6 +1359,7 @@ class ValidationCommentPanel(QWidget):
         return super().eventFilter(watched, event)
 
     def _on_selection_changed(self) -> None:
+        self._refresh_comment_access()
         ir = self._inline_edit_row
         if ir is not None:
             ir.cancel_edit()
@@ -1207,11 +1381,19 @@ class ValidationCommentPanel(QWidget):
             self._render_chat()
 
     def _on_refresh_clicked(self) -> None:
+        if not self._can_comment_display:
+            self._flash_status("Require Permission.", error=True)
+            return
         self._show_loading_on_next_get = False
         self._start_load_comments()
 
     def _start_load_comments(self) -> None:
         if self._busy:
+            return
+        if not self._can_comment_display:
+            self._chat_rows = []
+            self._chat_loading = False
+            self._render_chat()
             return
         vid = self._current_validation_id()
         if vid is None:
@@ -1225,6 +1407,9 @@ class ValidationCommentPanel(QWidget):
         self._show_loading_on_next_get = False
 
     def _on_send_clicked(self) -> None:
+        if not self._can_comment_create:
+            self._flash_status("Require Permission.", error=True)
+            return
         vid = self._current_validation_id()
         if vid is None:
             return
@@ -1359,6 +1544,9 @@ class ValidationCommentPanel(QWidget):
         self._inline_edit_row = row_widget
 
     def _request_delete_comment(self, row: dict[str, Any]) -> None:
+        if not self._can_comment_delete:
+            self._flash_status("Require Permission.", error=True)
+            return
         cid = _comment_id_from_row(row)
         if cid is None:
             self._flash_status("Unable to delete this message.", error=True)
@@ -1391,6 +1579,12 @@ class ValidationCommentPanel(QWidget):
             self._chat_layout.addWidget(blank)
             self._chat_layout.addStretch(1)
             return
+        if not self._can_comment_display:
+            blank = QLabel("Require Permission.")
+            blank.setStyleSheet(_COMMENT_AUX_LABEL_STYLE)
+            self._chat_layout.addWidget(blank)
+            self._chat_layout.addStretch(1)
+            return
         if self._chat_loading:
             loading = QLabel("Loading chat...")
             loading.setStyleSheet(_COMMENT_AUX_LABEL_STYLE)
@@ -1419,7 +1613,9 @@ class ValidationCommentPanel(QWidget):
         cid = _comment_id_from_row(row)
         window_open = self._is_edit_window_open(when_raw)
         show_row_actions = _author_is_current_user(author, self._my_identities) and cid is not None
-        pencil_enabled = show_row_actions and window_open
+        can_edit = show_row_actions and self._can_comment_edit
+        can_delete = show_row_actions and self._can_comment_delete
+        pencil_enabled = can_edit and window_open
         text = str(row.get("comment", "") or "")
 
         if show_row_actions:
@@ -1434,6 +1630,7 @@ class ValidationCommentPanel(QWidget):
                 when_suffix=when_suffix,
                 text=text,
                 pencil_enabled=pencil_enabled,
+                can_delete=can_delete,
             )
 
         wrap = QWidget()
@@ -1450,13 +1647,20 @@ class ValidationCommentPanel(QWidget):
         meta_row.addWidget(meta, 1)
         outer.addLayout(meta_row)
 
-        body = QLabel()
-        body.setWordWrap(True)
-        body.setTextFormat(Qt.TextFormat.RichText)
+        fs = max(9, APP_FONT_SIZE_PX - 3)
+        body = _RichCommentBodyLabel(fs, wrap)
+        body.setMargin(0)
         body.setText(_comment_body_display_html(text))
-        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        body.setStyleSheet(_comment_message_label_stylesheet(max(9, APP_FONT_SIZE_PX - 3)))
-        outer.addWidget(body)
+        # Use the same text-only body + bubble wrapper as own rows so heights stay consistent.
+        body.setStyleSheet(_comment_message_text_only_stylesheet(fs))
+
+        actions_host = QWidget()
+        actions_host.setStyleSheet("background: transparent; border: none;")
+        al = QHBoxLayout(actions_host)
+        al.setContentsMargins(0, 0, 0, 0)
+        al.setSpacing(0)
+        bubble = _CommentMessageHoverRow(body, actions_host, wrap)
+        outer.addWidget(bubble)
 
         return wrap
 

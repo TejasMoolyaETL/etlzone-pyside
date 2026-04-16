@@ -6,14 +6,16 @@ Each API row may include ``appIdDescription``. Rows with a missing or empty
 * **Sections** (collapsible headers) show if at least one child sub-item is allowed.
 * **Sub-items** show if ``allowed`` intersects :data:`LEFT_PANEL_NAV_ITEM_APP_ID_KEYS` for that label.
 
-Each tuple lists accepted ``appIdDescription`` values (OR). Include parent section codes as
-fallbacks so a single broad row (e.g. ``API_DEV_PROJECT``) can still unlock all API Dev subs
-until the backend sends finer-grained codes.
+Each tuple lists accepted ``appIdDescription`` values (OR). Values match the App Id → Desc
+table from ``getAppStepList`` (one primary code per nav item; no coarse section fallbacks).
 
-If the step list is ``None`` (API error / not loaded, or **SADMIN** after login), nothing is
-filtered. If the step list is ``[]`` or no descriptions match, gated UI hides.
+If the step list is ``None`` (**SADMIN** only), gated nav is not filtered (everything allowed).
 
-SADMIN bypass is applied in :func:`app.login_window` by leaving ``set_nav_access_steps(None)`` and
+If the step list is a ``list`` (including ``[]`` from getAppStepList failure or an empty grant),
+each gated submenu is shown only when its configured ``appIdDescription`` value appears in at
+least one step row; otherwise it is hidden.
+
+SADMIN bypass is applied in :func:`app.login_window` via ``set_nav_access_steps(None)`` and
 skipping the getAppStepList call.
 
 Print a sectioned tag list: ``print(core.nav_access.format_nav_app_id_descriptions_by_section())``
@@ -33,118 +35,65 @@ from core.left_panel_nav_items import (
 )
 
 # Exact nav label (as emitted by the left panel) → appIdDescription values that show that item.
-# Backend can return any one of the tuple entries. Sub-specific codes are listed first; section
-# fallbacks last so coarse grants still work.
+# Backend returns ``appIdDescription`` matching the App Id → Desc reference table (OR within tuple).
 LEFT_PANEL_NAV_ITEM_APP_ID_KEYS: dict[str, tuple[str, ...]] = {
-    # Org Management
-    "Organizations": (
-        "ORG_ORGANIZATIONS",
-        "ORG_MANAGEMENT",
-        "ORG_MGMT",
-        "ORGANIZATION_MANAGEMENT",
-    ),
-    "Business Units": (
-        "ORG_BUSINESS_UNITS",
-        "ORG_MANAGEMENT",
-        "ORG_MGMT",
-        "ORGANIZATION_MANAGEMENT",
-    ),
-    "Departments": (
-        "ORG_DEPARTMENTS",
-        "ORG_MANAGEMENT",
-        "ORG_MGMT",
-        "ORGANIZATION_MANAGEMENT",
-    ),
-    "Positions": (
-        "ORG_POSITIONS",
-        "ORG_MANAGEMENT",
-        "ORG_MGMT",
-        "ORGANIZATION_MANAGEMENT",
-    ),
-    "Roles": (
-        "ORG_ROLES",
-        "ORG_MANAGEMENT",
-        "ORG_MGMT",
-        "ORGANIZATION_MANAGEMENT",
-    ),
+    # Organization Management
+    "Organizations": ("ORG_MGMT_ORGANIZATIONS",),
+    "Business Units": ("ORG_MGMT_BUSINESS_UNITS",),
+    "Departments": ("ORG_MGMT_DEPARTMENTS",),
+    "Positions": ("ORG_MGMT_POSITIONS",),
+    "Roles": ("ORG_MGMT_ROLES",),
     # User Management
-    "Users": (
-        "USER_USERS",
-        "USER_MANAGEMENT",
-        "USER_MGMT",
-    ),
-    "Reporting Manager": (
-        "USER_REPORTING_MANAGER",
-        "USER_MANAGEMENT",
-        "USER_MGMT",
-    ),
-    "User-Roles Assignment": (
-        "USER_ROLES_ASSIGNMENT",
-        "USER_MANAGEMENT",
-        "USER_MGMT",
-    ),
-    "Reset User Password": (
-        "USER_RESET_PASSWORD",
-        "USER_MANAGEMENT",
-        "USER_MGMT",
-    ),
+    "Users": ("USER",),
+    "Reporting Manager": ("USER_REPORTING_MANAGER",),
+    "User-Roles Assignment": ("USER_ROLES_ASSIGNMENT",),
+    "Reset User Password": ("USER_RESET_PASSWORD",),
     # API Management
-    "API: App Id": (
-        "API_MGMT_APP_ID",
-        "API_MANAGEMENT",
-        "API_MGMT",
-    ),
-    "API: List": (
-        "API_MGMT_LIST",
-        "API_MANAGEMENT",
-        "API_MGMT",
-    ),
-    "API: API-Role Assignment": (
-        "API_MGMT_ROLE_ASSIGNMENT",
-        "API_MANAGEMENT",
-        "API_MGMT",
-    ),
-    "API: Role-API Assignment": (
-        "API_MGMT_ROLE_API_ASSIGNMENT",
-        "API_MANAGEMENT",
-        "API_MGMT",
-    ),
-    "API: Audit Logs": (
-        "API_MGMT_AUDIT_LOGS",
-        "API_MANAGEMENT",
-        "API_MGMT",
-    ),
+    "API: App Id": ("API_MGMT_APP_ID",),
+    "API: List": ("API_MGMT_API_LIST",),
+    "API: API-Role Assignment": ("API_MGMT_API_TO_ROLE_ASSIGNMENT",),
+    "API: Role-API Assignment": ("API_MGMT_ROLE_TO_API_ASSIGNMENT",),
+    "API: Audit Logs": ("API_MGMT_AUDIT_LOGS",),
     # DB Design (single top-level item)
-    "DB Design Project": (
-        "DB_DESIGN_PROJECT",
-        "DB_DESIGN",
-    ),
+    "DB Design Project": ("DB_DESIGN_PROJECT",),
     # API Development
-    "API: Projects": (
-        "API_DEV_PROJECTS",
-        "API_DEV_PROJECT",
-        "API_DEVELOPMENT",
-    ),
-    "API: User Involved": (
-        "API_DEV_USER_INVOLVED",
-        "API_DEV_PROJECT",
-        "API_DEVELOPMENT",
-    ),
-    "API: Details": (
-        "API_DEV_DETAILS",
-        "API_DEV_PROJECT",
-        "API_DEVELOPMENT",
-    ),
-    "API: Validations": (
-        "API_DEV_VALIDATIONS",
-        "API_DEV_PROJECT",
-        "API_DEVELOPMENT",
-    ),
-    "API: All in One": (
-        "API_DEV_ALL_IN_ONE",
-        "API_DEV_PROJECT",
-        "API_DEVELOPMENT",
-    ),
+    "API: Projects": ("API_DEV_PROJECTS", "API_DEV_PROJECT"),
+    "API: User Involved": ("API_DEV_USER_INVOLVED",),
+    "API: Details": ("API_DEV_DETAILS",),
+    "API: Validations": ("API_DEV_VALIDATIONS",),
+    "API: All in One": ("API_DEV_ALL_IN_ONE",),
+}
+
+# Per-submenu actions (step-level) keyed by action name -> accepted stepIdDescription/apiName values.
+# The backend currently sends these action codes via ``apiName`` in getAppStepList rows.
+LEFT_PANEL_ACTION_STEP_ID_KEYS: dict[str, dict[str, tuple[str, ...]]] = {
+    "API: Projects": {
+        "create": ("api-dev-projects-create",),
+        "edit": ("api-dev-projects-edit",),
+        "delete": ("api-dev-projects-delete",),
+    },
+    "API: User Involved": {
+        "create": ("api-dev-user-involved-create",),
+        "edit": ("api-dev-user-involved-edit",),
+        "delete": ("api-dev-user-involved-delete",),
+    },
+    "API: Details": {
+        "create": ("api-dev-details-create",),
+        "edit": ("api-dev-details-edit",),
+        "delete": ("api-dev-details-delete",),
+    },
+    "API: Validations": {
+        "create": ("api-dev-validations-create",),
+        "edit": ("api-dev-validations-edit",),
+        "delete": ("api-dev-validations-delete",),
+    },
+    "API: All in One": {
+        "display": ("api-dev-all-in-one-display",),
+        "comment_create": ("api-dev-comment-create",),
+        "comment_display": ("api-dev-comment-display",),
+        "comment_edit": ("api-dev-comment-edit",),
+        "comment_delete": ("api-dev-comment-delete",),
+    },
 }
 
 
@@ -187,11 +136,37 @@ def _row_description(row: Any) -> str | None:
     return s if s else None
 
 
+def _row_action_name(row: Any) -> str | None:
+    """Action code from step rows (e.g. ``apiName``/``stepIdDescription``)."""
+    if not isinstance(row, dict):
+        return None
+    v = (
+        row.get("apiName")
+        or row.get("api_name")
+        or row.get("stepIdDescription")
+        or row.get("step_id_description")
+    )
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s if s else None
+
+
 def collect_allowed_descriptions(steps: Iterable[Any]) -> set[str]:
     """Unique non-empty ``appIdDescription`` values from the step list."""
     out: set[str] = set()
     for row in steps:
         s = _row_description(row)
+        if s:
+            out.add(s)
+    return out
+
+
+def collect_allowed_action_names(steps: Iterable[Any]) -> set[str]:
+    """Unique non-empty action names (apiName / stepIdDescription) from the step list."""
+    out: set[str] = set()
+    for row in steps:
+        s = _row_action_name(row)
         if s:
             out.add(s)
     return out
@@ -203,6 +178,38 @@ def nav_item_visible(label: str, allowed: set[str]) -> bool:
     if not keys:
         return True
     return bool(allowed.intersection(keys))
+
+
+def nav_action_visible(label: str, action: str, allowed_actions: set[str]) -> bool:
+    """True if a submenu action should be enabled for given step action codes."""
+    action_map = LEFT_PANEL_ACTION_STEP_ID_KEYS.get(label, {})
+    keys = action_map.get(action, ())
+    if not keys:
+        return True
+    return bool(allowed_actions.intersection(keys))
+
+
+def nav_action_visible_from_steps(label: str, action: str, steps: Iterable[Any]) -> bool:
+    """True when at least one step row matches both submenu appIdDescription and action apiName.
+
+    This enforces row-level pairing: the same ``getAppStepList`` row must carry
+    the submenu's ``appIdDescription`` and the action code (``apiName`` / step id).
+    """
+    app_keys = LEFT_PANEL_NAV_ITEM_APP_ID_KEYS.get(label, ())
+    action_map = LEFT_PANEL_ACTION_STEP_ID_KEYS.get(label, {})
+    action_keys = action_map.get(action, ())
+    if not action_keys:
+        return True
+    if not app_keys:
+        return False
+    for row in steps:
+        app_desc = _row_description(row)
+        action_name = _row_action_name(row)
+        if not app_desc or not action_name:
+            continue
+        if app_desc in app_keys and action_name in action_keys:
+            return True
+    return False
 
 
 @dataclass(frozen=True)

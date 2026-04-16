@@ -467,10 +467,9 @@ class LoginWindow(QMainWindow):
         self._post_login_response = None
         if response is None:
             return
-        if step_res.get("success"):
-            set_nav_access_steps(step_res.get("steps") or [])
-        else:
-            set_nav_access_steps(None)
+        # Always apply a list from getAppStepList so left nav is strict: each submenu is visible
+        # only if its hardcoded appIdDescription appears in steps. On failure, steps is [] → hide gated items.
+        set_nav_access_steps(step_res.get("steps") or [])
         self._finalize_login_and_open_dashboard()
 
     def _on_login_finished(self, response: dict) -> None:
@@ -500,7 +499,8 @@ class LoginWindow(QMainWindow):
 
         tok = _token_from_login_result(response)
         if not tok:
-            set_nav_access_steps(None)
+            # No JWT: cannot load getAppStepList; treat as no steps so gated menus stay hidden.
+            set_nav_access_steps([])
             self._finalize_login_and_open_dashboard()
             return
 

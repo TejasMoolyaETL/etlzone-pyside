@@ -56,6 +56,8 @@ from app.db_management.db_design_project_page import DbDesignProjectPage
 from app.user_profile.settings_page import SettingsPage
 from app.user_management.users.user_list import UsersPage
 from app.user_management.user_timepass.user_reset_password import ResetUserPasswordPage
+from app.object_tracker.category import CategoryListPage, CreateCategoryPage, ViewCategoryPage
+from app.object_tracker.module import CreateModulePage, ModuleListPage, ViewModulePage
 from app.org_management.bu.bu_create import CreateBuPage
 from app.org_management.bu.bu_list import BuListPage
 from app.org_management.bu.bu_view import ViewBuPage
@@ -89,6 +91,7 @@ from ui.widgets.app_left_panel import (
     API_MANAGEMENT_SUB_OPTIONS,
     API_SUB_OPTIONS,
     AppLeftPanel,
+    OBJECT_TRACKER_SUB_OPTIONS,
     ORG_MANAGEMENT_SUB_OPTIONS,
     USER_MANAGEMENT_SUB_OPTIONS,
 )
@@ -340,6 +343,27 @@ class DashboardWindow(QMainWindow):
         self.db_design_project_page = DbDesignProjectPage()
         self.stack.addWidget(self.db_design_project_page)
 
+        self.create_category_page = CreateCategoryPage(
+            on_back=self._show_object_tracker_category,
+            on_create_success=None,
+        )
+        self.stack.addWidget(self.create_category_page)
+        self.view_category_page = ViewCategoryPage(
+            on_back=self._show_object_tracker_category,
+            on_update_success=None,
+        )
+        self.stack.addWidget(self.view_category_page)
+        self.create_module_page = CreateModulePage(
+            on_back=self._show_object_tracker_module,
+            on_create_success=None,
+        )
+        self.stack.addWidget(self.create_module_page)
+        self.view_module_page = ViewModulePage(
+            on_back=self._show_object_tracker_module,
+            on_update_success=None,
+        )
+        self.stack.addWidget(self.view_module_page)
+
         # Create User page
         self.create_user_page = CreateUserPage(on_back=self._show_users)
         self.stack.addWidget(self.create_user_page)
@@ -589,6 +613,28 @@ class DashboardWindow(QMainWindow):
             self.stack.addWidget(page)
             self._api_pages[name] = page
 
+        # DMT Tracker sub-option pages
+        self._object_tracker_pages: dict[str, QWidget] = {}
+        for name in OBJECT_TRACKER_SUB_OPTIONS:
+            if name == "DMT - Category":
+                page = CategoryListPage(
+                    on_create_clicked=self._show_create_category,
+                    on_edit_clicked=lambda c, e: self._show_view_category(c, e),
+                )
+                self.create_category_page.on_create_success = page.refresh
+                self.view_category_page.on_update_success = page.refresh
+            elif name == "DMT - Module":
+                page = ModuleListPage(
+                    on_create_clicked=self._show_create_module,
+                    on_edit_clicked=lambda m, e: self._show_view_module(m, e),
+                )
+                self.create_module_page.on_create_success = page.refresh
+                self.view_module_page.on_update_success = page.refresh
+            else:
+                page = self._make_placeholder_page(name)
+            self.stack.addWidget(page)
+            self._object_tracker_pages[name] = page
+
         root_layout.addWidget(self.stack, 1)
         root_outer.addWidget(content_row, 1)
         self.left_panel.set_current_item("Dashboard")
@@ -641,6 +687,9 @@ class DashboardWindow(QMainWindow):
         elif item_name == "DB Design Project":
             self.stack.setCurrentWidget(self.db_design_project_page)
             self.left_panel.set_current_item("DB Design Project")
+        elif item_name in self._object_tracker_pages:
+            self.stack.setCurrentWidget(self._object_tracker_pages[item_name])
+            self.left_panel.set_current_item(item_name)
         elif item_name == "View Profile":
             self.stack.setCurrentWidget(self.view_profile_page)
             self.left_panel.set_current_item("View Profile")
@@ -972,6 +1021,36 @@ class DashboardWindow(QMainWindow):
                     return True
                 return False
             return True
+        # View Category page - edit mode
+        if self.stack.currentWidget() is self.view_category_page:
+            if self.view_category_page.is_edit_mode():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.view_category_page._handle_cancel()
+                    return True
+                return False
+            return True
+        # View Module page - edit mode
+        if self.stack.currentWidget() is self.view_module_page:
+            if self.view_module_page.is_edit_mode():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.view_module_page._handle_cancel()
+                    return True
+                return False
+            return True
         return True
 
     def _create_menu_bar(self) -> None:
@@ -1163,6 +1242,26 @@ class DashboardWindow(QMainWindow):
 
     def _show_view_profile(self) -> None:
         self.stack.setCurrentWidget(self.view_profile_page)
+
+    def _show_object_tracker_category(self) -> None:
+        self.stack.setCurrentWidget(self._object_tracker_pages["DMT - Category"])
+
+    def _show_create_category(self) -> None:
+        self.stack.setCurrentWidget(self.create_category_page)
+
+    def _show_view_category(self, category: dict, edit_mode: bool = False) -> None:
+        self.view_category_page.set_category(category, edit_mode=edit_mode)
+        self.stack.setCurrentWidget(self.view_category_page)
+
+    def _show_object_tracker_module(self) -> None:
+        self.stack.setCurrentWidget(self._object_tracker_pages["DMT - Module"])
+
+    def _show_create_module(self) -> None:
+        self.stack.setCurrentWidget(self.create_module_page)
+
+    def _show_view_module(self, module: dict, edit_mode: bool = False) -> None:
+        self.view_module_page.set_module(module, edit_mode=edit_mode)
+        self.stack.setCurrentWidget(self.view_module_page)
 
     def _show_about_dialog(self) -> None:
         QMessageBox.information(

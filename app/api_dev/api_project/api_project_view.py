@@ -24,7 +24,8 @@ from PySide6.QtWidgets import (
 
 from core.api import api_update_project
 from core.app_preferences import format_datetime_display, is_datetime_field
-from core.user_context import get_user_profile
+from core.nav_access import collect_allowed_action_names, nav_action_visible
+from core.user_context import get_nav_access_steps, get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
 from ui.blank_display import is_blank_display_value
 from ui.form_combobox_style import FORM_COMBOBOX_STYLE, apply_form_combobox_field
@@ -120,6 +121,7 @@ class ViewProjectPage(QWidget):
         self._project: dict[str, Any] = {}
         self._field_edits: dict[str, QLineEdit | QComboBox] = {}
         self._editable_keys: list[str] = []
+        self._can_edit_action = True
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -223,6 +225,14 @@ class ViewProjectPage(QWidget):
         self._edit_btn.setFixedWidth(100)
         self._edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._edit_btn.setStyleSheet(FORM_PRIMARY_BUTTON_STYLESHEET)
+        self._edit_btn.setStyleSheet(
+            FORM_PRIMARY_BUTTON_STYLESHEET
+            + " QPushButton:disabled {"
+            + " background-color: #e5e7eb;"
+            + " color: #6b7280;"
+            + " border: 1px solid #cbd5e1;"
+            + "}"
+        )
         self._edit_btn.clicked.connect(self._handle_edit)
 
         self._cancel_btn = QPushButton("Cancel")
@@ -284,11 +294,24 @@ class ViewProjectPage(QWidget):
     def set_project(self, project: dict[str, Any] | None, *, edit_mode: bool = False) -> None:
         """Load and display the given project record. If edit_mode=True, open in edit mode."""
         self._project = dict(project) if project else {}
+        self._refresh_edit_action_access()
         self._refresh_values()
-        if edit_mode and self._project:
+        if edit_mode and self._project and self._can_edit_action:
             self._handle_edit()
         else:
             self._switch_to_view_mode()
+
+    def _refresh_edit_action_access(self) -> None:
+        steps = get_nav_access_steps()
+        if steps is None:
+            self._can_edit_action = True
+        else:
+            allowed_actions = collect_allowed_action_names(steps)
+            self._can_edit_action = nav_action_visible(
+                "API: Projects", "edit", allowed_actions
+            )
+        self._edit_btn.setEnabled(self._can_edit_action)
+        self._edit_btn.setToolTip("" if self._can_edit_action else "Require Permission.")
 
     def _refresh_values(self) -> None:
         """Sync field values from _project."""
@@ -332,6 +355,9 @@ class ViewProjectPage(QWidget):
         return ""
 
     def _handle_edit(self) -> None:
+        if not self._can_edit_action:
+            self._show_error("Require Permission.")
+            return
         self._clear_error()
         for key in self._editable_keys:
             edit = self._field_edits.get(key)

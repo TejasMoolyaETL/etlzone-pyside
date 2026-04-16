@@ -139,7 +139,7 @@ class CreateUserRoleAssignmentPage(QWidget):
         )
 
         self.default_role_chk = QCheckBox("Default Role")
-        self.default_role_chk.setChecked(True)
+        self.default_role_chk.setChecked(False)
         self.default_role_chk.setStyleSheet(
             f"font-size: {FORM_PAGE_FONT_SIZE_PX}px; color: #0f172a;"
         )
@@ -247,14 +247,14 @@ class CreateUserRoleAssignmentPage(QWidget):
             return True
         if self.role_input.text().strip():
             return True
-        if self.default_role_chk.isChecked() is not True:
+        if self.default_role_chk.isChecked():
             return True
         return False
 
     def reset_to_default(self) -> None:
         self.user_input.clear()
         self.role_input.clear()
-        self.default_role_chk.setChecked(True)
+        self.default_role_chk.setChecked(False)
         self.valid_from_edit.setDateTime(QDateTime.currentDateTime())
         self.valid_to_edit.setDateTime(QDateTime.currentDateTime().addYears(1))
 

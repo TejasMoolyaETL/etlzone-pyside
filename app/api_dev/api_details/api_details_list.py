@@ -23,8 +23,9 @@ from PySide6.QtWidgets import (
 
 from core.api import api_delete_api_detail_by_id, api_get_all_api_details
 from core.app_preferences import format_datetime_display, is_datetime_field
+from core.nav_access import collect_allowed_action_names, nav_action_visible
 from ui.blank_display import is_blank_display_value
-from core.user_context import get_user_profile
+from core.user_context import get_nav_access_steps, get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
 from ui.form_page_styles import (
     LIST_PAGE_HEADER_HEIGHT_PX,
@@ -149,6 +150,11 @@ class APIDetailsPage(QWidget):
         self._filter_apply_timer.setSingleShot(True)
         self._filter_apply_timer.setInterval(200)
         self._filter_apply_timer.timeout.connect(self._apply_column_filters_refresh)
+        self._can_create = True
+        self._can_display = True
+        self._can_edit = True
+        self._can_delete = True
+        self._create_btn: QPushButton | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -177,11 +183,18 @@ class APIDetailsPage(QWidget):
             self._filter_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
             self._filter_toggle.toggled.connect(self._on_filter_toggle)
             header_layout.addWidget(self._filter_toggle)
-            add_btn = QPushButton("Create")
-            add_btn.setFixedWidth(100)
-            add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            add_btn.clicked.connect(self._emit_add)
-            header_layout.addWidget(add_btn)
+            self._create_btn = QPushButton("Create")
+            self._create_btn.setFixedWidth(100)
+            self._create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._create_btn.setStyleSheet(
+                "QPushButton:disabled {"
+                " background-color: #e5e7eb;"
+                " color: #6b7280;"
+                " border: 1px solid #cbd5e1;"
+                "}"
+            )
+            self._create_btn.clicked.connect(self._emit_add)
+            header_layout.addWidget(self._create_btn)
             layout.addWidget(header)
 
         content = QWidget()
@@ -209,8 +222,28 @@ class APIDetailsPage(QWidget):
         layout.addWidget(content)
 
     def _emit_add(self) -> None:
+        if not self._can_create:
+            self._show_message("Require Permission.", error=True)
+            return
         if self.on_create_clicked:
             self.on_create_clicked()
+
+    def _refresh_action_access(self) -> None:
+        steps = get_nav_access_steps()
+        if steps is None:
+            self._can_create = True
+            self._can_display = True
+            self._can_edit = True
+            self._can_delete = True
+        else:
+            allowed_actions = collect_allowed_action_names(steps)
+            self._can_create = nav_action_visible("API: Details", "create", allowed_actions)
+            self._can_display = nav_action_visible("API: Details", "display", allowed_actions)
+            self._can_edit = nav_action_visible("API: Details", "edit", allowed_actions)
+            self._can_delete = nav_action_visible("API: Details", "delete", allowed_actions)
+        if self._create_btn is not None:
+            self._create_btn.setEnabled(self._can_create)
+            self._create_btn.setToolTip("" if self._can_create else "Require Permission.")
 
     def _data_row_offset(self) -> int:
         return 1 if self._filter_visible else 0
@@ -411,17 +444,23 @@ class APIDetailsPage(QWidget):
             self.table.setCurrentCell(clicked_item.row(), clicked_item.column())
             self.table.selectRow(clicked_item.row())
         menu = QMenu(self)
-        menu.setStyleSheet(CONTEXT_MENU_STYLESHEET)
+        menu.setStyleSheet(
+            CONTEXT_MENU_STYLESHEET
+            + " QMenu::item:disabled { background: #e5e7eb; color: #6b7280; }"
+            + " QMenu::item:disabled:selected, QMenu::item:disabled:hover {"
+            + " background: #e5e7eb; color: #6b7280; }"
+        )
         add_action = menu.addAction("Add API Detail")
         display_action = menu.addAction("Display Selected API Detail")
         edit_action = menu.addAction("Edit Selected API Detail")
         remove_action = menu.addAction("Remove Selected API Detail")
+        add_action.setEnabled(self._can_create)
         has_data = self._has_data_row_selection() or (
             clicked_item is not None and self._is_data_table_row(clicked_item.row())
         )
-        display_action.setEnabled(has_data and self.on_edit_clicked is not None)
-        edit_action.setEnabled(has_data and self.on_edit_clicked is not None)
-        remove_action.setEnabled(has_data)
+        display_action.setEnabled(has_data and self.on_edit_clicked is not None and self._can_display)
+        edit_action.setEnabled(has_data and self.on_edit_clicked is not None and self._can_edit)
+        remove_action.setEnabled(has_data and self._can_delete)
         action = menu.exec(QCursor.pos())
         if action == add_action:
             self._emit_add()
@@ -441,10 +480,16 @@ class APIDetailsPage(QWidget):
         rec = row_item.data(Qt.ItemDataRole.UserRole)
         if not isinstance(rec, dict):
             return
+        if not self._can_display:
+            self._show_message("Require Permission.", error=True)
+            return
         if self.on_edit_clicked:
             self.on_edit_clicked(rec, False)
 
     def _display_selected(self) -> None:
+        if not self._can_display:
+            self._show_message("Require Permission.", error=True)
+            return
         rec = self._selected_row()
         if not rec:
             self._show_message("Select a row to display.", error=True)
@@ -453,6 +498,9 @@ class APIDetailsPage(QWidget):
             self.on_edit_clicked(rec, False)
 
     def _edit_selected(self) -> None:
+        if not self._can_edit:
+            self._show_message("Require Permission.", error=True)
+            return
         rec = self._selected_row()
         if not rec:
             self._show_message("Select a row to edit.", error=True)
@@ -464,6 +512,9 @@ class APIDetailsPage(QWidget):
             self.on_edit_clicked(rec, True)
 
     def _remove_selected(self) -> None:
+        if not self._can_delete:
+            self._show_message("Require Permission.", error=True)
+            return
         rec = self._selected_row()
         if not rec:
             self._show_message("Select a row to remove.", error=True)
@@ -498,6 +549,7 @@ class APIDetailsPage(QWidget):
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
+        self._refresh_action_access()
         if not self._auto_refresh_on_show:
             return
         try:

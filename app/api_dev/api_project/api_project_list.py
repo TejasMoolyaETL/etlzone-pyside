@@ -23,7 +23,8 @@ from PySide6.QtWidgets import (
 
 from core.api import api_delete_project, api_get_all_projects
 from core.app_preferences import format_datetime_display, is_datetime_field
-from core.user_context import get_user_profile
+from core.nav_access import collect_allowed_action_names, nav_action_visible
+from core.user_context import get_nav_access_steps, get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
 from ui.blank_display import is_blank_display_value
 from ui.form_page_styles import (
@@ -139,6 +140,10 @@ class APIProjectsPage(QWidget):
         self._filter_apply_timer.setSingleShot(True)
         self._filter_apply_timer.setInterval(200)
         self._filter_apply_timer.timeout.connect(self._apply_column_filters_refresh)
+        self._can_create_project = True
+        self._can_display_project = True
+        self._can_edit_project = True
+        self._can_delete_project = True
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -166,11 +171,18 @@ class APIProjectsPage(QWidget):
         self._filter_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self._filter_toggle.toggled.connect(self._on_filter_toggle)
         header_layout.addWidget(self._filter_toggle)
-        add_btn = QPushButton("Create")
-        add_btn.setFixedWidth(100)
-        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_btn.clicked.connect(self._emit_add)
-        header_layout.addWidget(add_btn)
+        self._create_btn = QPushButton("Create")
+        self._create_btn.setFixedWidth(100)
+        self._create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._create_btn.setStyleSheet(
+            "QPushButton:disabled {"
+            " background-color: #9ca3af;"
+            " color: #6b7280;"
+            " border: 1px solid #9ca3af;"
+            "}"
+        )
+        self._create_btn.clicked.connect(self._emit_add)
+        header_layout.addWidget(self._create_btn)
         layout.addWidget(header)
 
         content = QWidget()
@@ -198,8 +210,41 @@ class APIProjectsPage(QWidget):
         layout.addWidget(content)
 
     def _emit_add(self) -> None:
+        if not self._can_create_project:
+            self._show_message(
+                "Create disabled: missing step access api-dev-projects-create.",
+                error=True,
+            )
+            return
         if self.on_create_clicked:
             self.on_create_clicked()
+
+    def _refresh_action_access(self) -> None:
+        steps = get_nav_access_steps()
+        if steps is None:
+            # SADMIN / unrestricted mode.
+            self._can_create_project = True
+            self._can_display_project = True
+            self._can_edit_project = True
+            self._can_delete_project = True
+        else:
+            allowed_actions = collect_allowed_action_names(steps)
+            self._can_create_project = nav_action_visible(
+                "API: Projects", "create", allowed_actions
+            )
+            self._can_display_project = nav_action_visible(
+                "API: Projects", "display", allowed_actions
+            )
+            self._can_edit_project = nav_action_visible(
+                "API: Projects", "edit", allowed_actions
+            )
+            self._can_delete_project = nav_action_visible(
+                "API: Projects", "delete", allowed_actions
+            )
+        self._create_btn.setEnabled(self._can_create_project)
+        self._create_btn.setToolTip(
+            "" if self._can_create_project else "Require Permission."
+        )
 
     def _data_row_offset(self) -> int:
         return data_row_offset(self._filter_visible)
@@ -400,17 +445,27 @@ class APIProjectsPage(QWidget):
             self.table.setCurrentCell(clicked_item.row(), clicked_item.column())
             self.table.selectRow(clicked_item.row())
         menu = QMenu(self)
-        menu.setStyleSheet(CONTEXT_MENU_STYLESHEET)
+        menu.setStyleSheet(
+            CONTEXT_MENU_STYLESHEET
+            + " QMenu::item:disabled { background: #9ca3af; color: #6b7280; }"
+            + " QMenu::item:disabled:selected, QMenu::item:disabled:hover {"
+            + " background: #9ca3af; color: #6b7280; }"
+        )
         add_action = menu.addAction("Add Project")
         display_action = menu.addAction("Display Selected Project")
         edit_action = menu.addAction("Edit Selected Project")
         remove_action = menu.addAction("Remove Selected Project")
+        add_action.setEnabled(self._can_create_project)
         has_selected = self._has_data_row_selection() or (
             clicked_item is not None and self._is_data_table_row(clicked_item.row())
         )
-        display_action.setEnabled(has_selected and self.on_edit_clicked is not None)
-        edit_action.setEnabled(has_selected and self.on_edit_clicked is not None)
-        remove_action.setEnabled(has_selected)
+        display_action.setEnabled(
+            has_selected and self.on_edit_clicked is not None and self._can_display_project
+        )
+        edit_action.setEnabled(
+            has_selected and self.on_edit_clicked is not None and self._can_edit_project
+        )
+        remove_action.setEnabled(has_selected and self._can_delete_project)
         action = menu.exec(QCursor.pos())
         if action == add_action:
             self._emit_add()
@@ -430,10 +485,16 @@ class APIProjectsPage(QWidget):
         rec = row_item.data(Qt.ItemDataRole.UserRole)
         if not isinstance(rec, dict):
             return
+        if not self._can_display_project:
+            self._show_message("Require Permission.", error=True)
+            return
         if self.on_edit_clicked:
             self.on_edit_clicked(rec, False)
 
     def _display_selected_project(self) -> None:
+        if not self._can_display_project:
+            self._show_message("Require Permission.", error=True)
+            return
         rec = self._selected_project_row()
         if not rec:
             self._show_message("Select a project to display.", error=True)
@@ -442,6 +503,9 @@ class APIProjectsPage(QWidget):
             self.on_edit_clicked(rec, False)
 
     def _edit_selected_project(self) -> None:
+        if not self._can_edit_project:
+            self._show_message("Require Permission.", error=True)
+            return
         rec = self._selected_project_row()
         if not rec:
             self._show_message("Select a project to edit.", error=True)
@@ -453,6 +517,9 @@ class APIProjectsPage(QWidget):
             self.on_edit_clicked(rec, True)
 
     def _remove_selected_project(self) -> None:
+        if not self._can_delete_project:
+            self._show_message("Require Permission.", error=True)
+            return
         rec = self._selected_project_row()
         if not rec:
             self._show_message("Select a project to remove.", error=True)
@@ -489,6 +556,7 @@ class APIProjectsPage(QWidget):
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         try:
+            self._refresh_action_access()
             self.refresh()
         except Exception:
             traceback.print_exc()
