@@ -1,5 +1,7 @@
 """View Profile page — layout aligned with Create User (header, scroll, card, two-column fields)."""
 
+from __future__ import annotations
+
 import json
 import re
 import ast

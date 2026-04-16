@@ -1,5 +1,7 @@
 """Simple dashboard shown after login."""
 
+from __future__ import annotations
+
 import traceback
 
 from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal, Slot

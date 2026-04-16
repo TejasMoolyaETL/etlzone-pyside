@@ -6,7 +6,8 @@ Call :func:`apply_app_theme` once after creating :class:`QApplication`.
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import QApplication, QStyleFactory
 
 from ui.form_page_styles import (
     APP_FONT_SIZE_PX,
@@ -55,6 +56,51 @@ CONTEXT_MENU_STYLESHEET = (
 )
 
 
+def _fusion_light_palette() -> QPalette:
+    """Palette that keeps system dark mode from bleeding into the app."""
+    t = Theme
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(t.BG_APP))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(t.TEXT_PRIMARY))
+    palette.setColor(QPalette.ColorRole.Base, QColor(t.BG_WHITE))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(t.BG_PAGE_ALT))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(t.BG_WHITE))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(t.TEXT_PRIMARY))
+    palette.setColor(QPalette.ColorRole.Text, QColor(t.TEXT_PRIMARY))
+    palette.setColor(QPalette.ColorRole.Button, QColor(t.BG_WHITE))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(t.TEXT_PRIMARY))
+    palette.setColor(QPalette.ColorRole.BrightText, QColor(t.BG_WHITE))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor("#cfe3ff"))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(t.TEXT_PRIMARY))
+    palette.setColor(QPalette.ColorRole.Link, QColor("#2563eb"))
+    palette.setColor(QPalette.ColorRole.LinkVisited, QColor("#1d4ed8"))
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(INPUT_PLACEHOLDER_COLOR))
+    palette.setColor(QPalette.ColorRole.Light, QColor("#ffffff"))
+    palette.setColor(QPalette.ColorRole.Midlight, QColor("#edf2f7"))
+    palette.setColor(QPalette.ColorRole.Mid, QColor(t.BORDER_DEFAULT))
+    palette.setColor(QPalette.ColorRole.Dark, QColor("#94a3b8"))
+    palette.setColor(QPalette.ColorRole.Shadow, QColor("#64748b"))
+
+    disabled_text = QColor(t.TEXT_SECONDARY)
+    disabled_base = QColor(t.BG_PAGE_ALT)
+    for role in (
+        QPalette.ColorRole.WindowText,
+        QPalette.ColorRole.Text,
+        QPalette.ColorRole.ButtonText,
+        QPalette.ColorRole.HighlightedText,
+    ):
+        palette.setColor(QPalette.ColorGroup.Disabled, role, disabled_text)
+    for role in (
+        QPalette.ColorRole.Base,
+        QPalette.ColorRole.Button,
+        QPalette.ColorRole.Window,
+    ):
+        palette.setColor(QPalette.ColorGroup.Disabled, role, disabled_base)
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Highlight, QColor("#dbeafe"))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.PlaceholderText, QColor(INPUT_PLACEHOLDER_COLOR))
+    return palette
+
+
 def global_application_stylesheet() -> str:
     """Base stylesheet applied to :class:`QApplication` for consistent shell colors.
 
@@ -64,17 +110,52 @@ def global_application_stylesheet() -> str:
     """
     t = Theme
     return f"""
+    QWidget {{
+        color: {t.TEXT_PRIMARY};
+    }}
     QMainWindow {{
         background-color: {t.BG_APP};
     }}
+    QDialog {{
+        background-color: {t.BG_WHITE};
+        color: {t.TEXT_PRIMARY};
+    }}
     QStackedWidget {{
         background-color: {t.BG_APP};
+    }}
+    QAbstractScrollArea {{
+        background-color: {t.BG_WHITE};
+        color: {t.TEXT_PRIMARY};
+    }}
+    QTextEdit,
+    QPlainTextEdit,
+    QListView,
+    QTreeView,
+    QTableView,
+    QTableWidget {{
+        background-color: {t.BG_WHITE};
+        color: {t.TEXT_PRIMARY};
+        alternate-background-color: {t.BG_PAGE_ALT};
+        selection-background-color: #cfe3ff;
+        selection-color: {t.TEXT_PRIMARY};
+    }}
+    QHeaderView::section {{
+        background-color: #f8fafc;
+        color: #475569;
     }}
     QToolTip {{
         background-color: {t.BG_WHITE};
         color: {t.TEXT_PRIMARY};
         border: 1px solid {t.BORDER_DEFAULT};
         padding: 4px;
+    }}
+    QMenuBar {{
+        background-color: {t.BG_WHITE};
+        color: {t.TEXT_PRIMARY};
+    }}
+    QMenuBar::item:selected {{
+        background-color: {t.BG_APP};
+        color: {t.TEXT_PRIMARY};
     }}
     QMenu {{
         background-color: {t.BG_WHITE};
@@ -103,8 +184,28 @@ def global_application_stylesheet() -> str:
         color: {t.TEXT_PRIMARY};
         spacing: 6px;
     }}
-    QComboBox {{
+    QRadioButton {{
         font-size: {APP_FONT_SIZE_PX}px;
+        color: {t.TEXT_PRIMARY};
+        spacing: 6px;
+    }}
+    QLineEdit,
+    QTextEdit,
+    QPlainTextEdit,
+    QComboBox {{
+        background-color: {t.BG_WHITE};
+        color: {t.TEXT_INPUT};
+        border: 1px solid {t.BORDER_DEFAULT};
+        font-size: {APP_FONT_SIZE_PX}px;
+    }}
+    QComboBox QAbstractItemView {{
+        background-color: {t.BG_WHITE};
+        color: {t.TEXT_PRIMARY};
+        selection-background-color: #cfe3ff;
+        selection-color: {t.TEXT_PRIMARY};
+    }}
+    QPushButton {{
+        color: {t.TEXT_PRIMARY};
     }}
     QLineEdit::placeholder {{
         color: {INPUT_PLACEHOLDER_COLOR};
@@ -120,5 +221,9 @@ def global_application_stylesheet() -> str:
 
 
 def apply_app_theme(app: QApplication) -> None:
-    """Apply :func:`global_application_stylesheet` to the running application."""
+    """Apply app styling and neutralize system dark-theme palette leakage."""
+    fusion = QStyleFactory.create("Fusion")
+    if fusion is not None:
+        app.setStyle(fusion)
+    app.setPalette(_fusion_light_palette())
     app.setStyleSheet(global_application_stylesheet())

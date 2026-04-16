@@ -1,5 +1,7 @@
 """Left panel with navigation options (DM_Tool style)."""
 
+from __future__ import annotations
+
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, Signal
