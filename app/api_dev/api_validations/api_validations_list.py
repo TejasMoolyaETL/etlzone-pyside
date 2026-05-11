@@ -49,7 +49,7 @@ from ui.styles import CONTEXT_MENU_STYLESHEET
 _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "jwt"})
 
 _API_VALIDATION_COLUMN_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("API Validation Id (Internal)", ("id", "internalId", "internal_id")),
+    ("API Validation Id", ("id", "internalId", "internal_id")),
     ("Project Id", ("projectId", "projectid", "project_id")),
     ("Project Name", ("projectName", "project_name", "name")),
     ("API Id", ("apiId", "api_id")),

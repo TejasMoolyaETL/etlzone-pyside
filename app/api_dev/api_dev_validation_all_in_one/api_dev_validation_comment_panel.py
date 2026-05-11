@@ -43,8 +43,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.api_dev.api_dev_all_in_one.details_list_panel import _format_cell
-from app.api_dev.api_dev_all_in_one.validations_list_panel import APIValidationsListPanel
+from app.api_dev.api_dev_validation_all_in_one.api_dev_validation_details_list_panel import (
+    _format_cell,
+)
+from app.api_dev.api_dev_validation_all_in_one.api_dev_validation_list_panel import (
+    APIValidationsListPanel,
+)
 from core.api import (
     api_add_validation_comment,
     api_delete_validation_comment_by_id,
@@ -1137,8 +1141,6 @@ class ValidationCommentPanel(QWidget):
         self._chat_scroll.setStyleSheet(
             f"QScrollArea#commentChatScroll {{ border: 1px solid #e2e8f0; border-radius: 3px; "
             f"background-color: {_COMMENT_SECTION_BG}; }}"
-            f"QScrollArea#commentChatScroll > QWidget > QWidget {{ background-color: {_COMMENT_SECTION_BG}; "
-            "border: none; }}"
         )
         self._chat_host = QWidget()
         self._chat_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -1196,7 +1198,13 @@ class ValidationCommentPanel(QWidget):
         self._status.setVisible(False)
         layout.addWidget(self._status)
 
-        self._vp.table.itemSelectionChanged.connect(self._on_selection_changed)
+        table = getattr(self._vp, "table", None)
+        if table is not None and hasattr(table, "itemSelectionChanged"):
+            table.itemSelectionChanged.connect(self._on_selection_changed)
+        else:
+            register_listener = getattr(self._vp, "register_comment_context_listener", None)
+            if callable(register_listener):
+                register_listener(self._on_selection_changed)
         self._refresh_comment_access()
         self._update_context()
         self._render_chat()

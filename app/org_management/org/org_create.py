@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -17,7 +18,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.api import api_create_org
+from core.api import (
+    api_create_org,
+    api_get_master_key_by_app_id_field_name,
+    master_key_row_display_label,
+    master_key_row_seq_value,
+)
 from core.user_context import get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
 from ui.form_combobox_style import apply_form_combobox_field
@@ -37,7 +43,21 @@ from ui.form_page_styles import (
 from ui.post_save_navigation import schedule_after_success
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
-_ORG_STATUS = ("ACTIVE", "INACTIVE", "DISABLE", "COMPLETE")
+_ORG_STATUS_FIELD_NAME = "org_status"
+
+
+def _coerce_master_seq_to_int(seq_val: Any) -> int:
+    """Send master-key seq as integer in JSON payload."""
+    if isinstance(seq_val, bool):
+        return int(seq_val)
+    if isinstance(seq_val, int):
+        return seq_val
+    if isinstance(seq_val, float) and seq_val == int(seq_val):
+        return int(seq_val)
+    s = str(seq_val).strip()
+    if s.isdigit():
+        return int(s)
+    raise ValueError(f"Not a whole number: {seq_val!r}")
 
 
 class CreateOrgPage(QWidget):
@@ -113,11 +133,8 @@ class CreateOrgPage(QWidget):
         card_layout.addWidget(labeled_field_block(label_industry, self.industry_edit))
 
         # Status
-        label_status = QLabel("Status:")
-        label_status.setStyleSheet(LABEL_STYLE)
+        label_status = field_caption_label("Status*", LABEL_STYLE)
         self.status_combo = QComboBox()
-        self.status_combo.addItems(_ORG_STATUS)
-        self.status_combo.setCurrentText("ACTIVE")
         apply_form_combobox_field(self.status_combo, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX)
         card_layout.addWidget(labeled_field_block(label_status, self.status_combo))
 
@@ -153,6 +170,14 @@ class CreateOrgPage(QWidget):
         content_layout.addStretch()
         layout.addWidget(content)
 
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._populate_master_key_seq_combo(
+            self.status_combo,
+            _ORG_STATUS_FIELD_NAME,
+            "Select status…",
+        )
+
     def _show_error(self, message: str) -> None:
         show_auto_hiding_message(self, self.error_label, message, error=True)
 
@@ -164,12 +189,52 @@ class CreateOrgPage(QWidget):
         self.error_label.setText("")
         self.error_label.setVisible(False)
 
+    def _token(self) -> str | None:
+        profile = get_user_profile()
+        token = (
+            profile.get("token")
+            or profile.get("accessToken")
+            or profile.get("access_token")
+            or profile.get("jwt")
+        )
+        return str(token) if token else None
+
+    def _populate_master_key_seq_combo(
+        self,
+        combo: QComboBox | None,
+        field_name: str,
+        placeholder: str,
+    ) -> None:
+        if combo is None:
+            return
+        result = api_get_master_key_by_app_id_field_name(
+            field_name=field_name,
+            token=self._token(),
+        )
+        rows = result.get("data") if result.get("success") else []
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(placeholder, None)
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                seq_val = master_key_row_seq_value(row)
+                if seq_val is None:
+                    continue
+                label = master_key_row_display_label(row).strip()
+                if not label:
+                    continue
+                combo.addItem(label, seq_val)
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
     def _get_default_values(self) -> dict[str, str]:
         return {
             "org_name": "",
             "org_code": "",
             "industry": "",
-            "status": "ACTIVE",
+            "status": "",
         }
 
     def is_dirty(self) -> bool:
@@ -178,14 +243,14 @@ class CreateOrgPage(QWidget):
             self.org_name_edit.text().strip() != d["org_name"]
             or self.org_code_edit.text().strip() != d["org_code"]
             or self.industry_edit.text().strip() != d["industry"]
-            or self.status_combo.currentText() != d["status"]
+            or self.status_combo.currentIndex() > 0
         )
 
     def reset_to_default(self) -> None:
         self.org_name_edit.clear()
         self.org_code_edit.clear()
         self.industry_edit.clear()
-        self.status_combo.setCurrentText("ACTIVE")
+        self.status_combo.setCurrentIndex(0)
 
     def _handle_back(self) -> None:
         if not self.is_dirty():
@@ -218,23 +283,28 @@ class CreateOrgPage(QWidget):
         if not industry:
             self._show_error("Industry is required.")
             return
-        status = self.status_combo.currentText() or "ACTIVE"
-
-        profile = get_user_profile()
-        token = (
-            profile.get("token")
-            or profile.get("accessToken")
-            or profile.get("access_token")
-            or profile.get("jwt")
-        )
-        token = str(token) if token else None
+        if self.status_combo.currentIndex() <= 0:
+            self._show_error("Status is required.")
+            self.status_combo.setFocus()
+            return
+        status_raw = self.status_combo.currentData()
+        if status_raw is None:
+            self._show_error("Status is required.")
+            self.status_combo.setFocus()
+            return
+        try:
+            status = _coerce_master_seq_to_int(status_raw)
+        except ValueError:
+            self._show_error("Status must be a valid selection.")
+            self.status_combo.setFocus()
+            return
 
         result = api_create_org(
             org_name=org_name,
             org_code=org_code,
             industry=industry,
             status=status,
-            token=token,
+            token=self._token(),
         )
 
         if result.get("success"):

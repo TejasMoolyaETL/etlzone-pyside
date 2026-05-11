@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import traceback
 from pathlib import Path
 
 
@@ -19,7 +20,7 @@ from pathlib import Path
 #     except ImportError:
 #         return None
 
-from PySide6.QtCore import QObject, QThread, Qt, QRect, Signal
+from PySide6.QtCore import QObject, QThread, Qt, QRect, Signal, Slot
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -46,6 +47,7 @@ from PySide6.QtWidgets import (
 
 from app.dashboard_window import DashboardWindow
 from core.api import api_get_app_step_list, api_login, api_sign_out, session_has_sadmin_role
+from core.nav_access import build_left_panel_access_state
 from core.app_branding import (
     app_logo_path,
     app_window_icon,
@@ -68,6 +70,7 @@ from ui.styles import COLOR_ERROR, COLOR_SUCCESS, apply_app_theme
 from ui.theme import Theme
 from ui.widgets.required_label import field_caption_label
 from core.user_context import (
+    get_nav_access_steps,
     set_nav_access_steps,
     set_user_email,
     set_user_profile,
@@ -88,6 +91,23 @@ def _token_from_login_result(login_result: dict) -> str | None:
         return None
     s = str(t).strip()
     return s if s else None
+
+
+def _login_response_successful(response: object) -> bool:
+    """True when api_login (or worker fallback) indicates a successful sign-in."""
+    if not isinstance(response, dict):
+        return False
+    if response.get("success") is True:
+        return True
+    if response.get("success") is False:
+        return False
+    s = response.get("success")
+    if isinstance(s, str) and s.strip().lower() in ("true", "1", "yes"):
+        return True
+    st = str(response.get("status") or response.get("Status") or "").strip().upper()
+    if st in ("SUCCESS", "OK", "SUCCEEDED"):
+        return True
+    return bool(_token_from_login_result(response))
 
 
 def _session_role_string(login_result: dict) -> str:
@@ -111,41 +131,56 @@ def _session_role_string(login_result: dict) -> str:
     return ""
 
 
-class _LoginWorker(QObject):
-    """Runs api_login in a background thread so the UI stays responsive."""
-    finished = Signal(object)  # emits response dict
+class _LoginThread(QThread):
+    """Runs api_login in QThread.run() — reliable on all PySide builds (no moveToThread + started)."""
 
-    def __init__(self, username: str, password: str) -> None:
-        super().__init__()
+    login_done = Signal(object)
+
+    def __init__(self, username: str, password: str, parent: QObject | None = None) -> None:
+        super().__init__(parent)
         self._username = username
         self._password = password
 
     def run(self) -> None:
+        log = logging.getLogger(__name__)
+        log.info("[login] thread: calling api_login")
         try:
             response = api_login(self._username, self._password)
-        except Exception as e:
+        except Exception as exc:
+            log.exception("[login] thread: api_login raised")
             response = {
                 "success": False,
-                "message": f"Login failed ({type(e).__name__}). Check your network and try again.",
+                "message": f"Login failed ({type(exc).__name__}). Check your network and try again.",
             }
-        self.finished.emit(response)
+        accepted = isinstance(response, dict) and response.get("success") is True
+        log.info(
+            "[login] thread: api_login finished response_is_dict=%s server_accepted_login=%s",
+            isinstance(response, dict),
+            accepted,
+        )
+        self.login_done.emit(response)
 
 
-class _PostLoginWorker(QObject):
-    """Fetches nav access (getAppStepList) off the GUI thread after login."""
+class _PostLoginNavThread(QThread):
+    """Fetches get-app-id-step-id-list in QThread.run(); main thread applies steps to the left panel."""
 
-    finished = Signal(object)  # emits step list API result dict
+    steps_ready = Signal(object, int)
 
-    def __init__(self, token: str) -> None:
-        super().__init__()
+    def __init__(self, token: str, attempt_id: int, parent: QObject | None = None) -> None:
+        super().__init__(parent)
         self._token = token
+        self._attempt_id = attempt_id
 
     def run(self) -> None:
+        log = logging.getLogger(__name__)
+        log.info("[login] nav thread: calling get-app-id-step-id-list")
         try:
             res = api_get_app_step_list(self._token)
         except Exception:
+            log.exception("[login] nav thread: get-app-id-step-id-list raised")
             res = {"success": False, "message": "Request failed.", "steps": []}
-        self.finished.emit(res)
+        log.info("[login] nav thread: get-app-id-step-id-list finished")
+        self.steps_ready.emit(res, self._attempt_id)
 
 
 class LoginWindow(QMainWindow):
@@ -155,8 +190,7 @@ class LoginWindow(QMainWindow):
         apply_window_icon(self)
         self.dashboard_window = None
         self._post_login_thread: QThread | None = None
-        self._post_login_worker: _PostLoginWorker | None = None
-        self._post_login_response: dict | None = None
+        self._post_login_attempt: int = 0
 
         self.base_pixmap = self._load_login_image()
 
@@ -334,7 +368,6 @@ class LoginWindow(QMainWindow):
 
         self._login_in_progress = False
         self._login_thread: QThread | None = None
-        self._login_worker: _LoginWorker | None = None
 
         self._update_image()
 
@@ -422,41 +455,36 @@ class LoginWindow(QMainWindow):
 
         if self._login_in_progress:
             return
+        if self._post_login_thread is not None and self._post_login_thread.isRunning():
+            self._set_status("Still signing you in. Please wait…", error=False)
+            return
         self._login_in_progress = True
         self.login_button.setEnabled(False)
         self.clear_button.setEnabled(False)
         self._set_status("Signing in...", error=False)
 
-        # Run login in background thread so UI stays responsive
-        self._login_thread = QThread()
-        self._login_worker = _LoginWorker(username, password)
-        self._login_worker.moveToThread(self._login_thread)
-        self._login_thread.started.connect(self._login_worker.run)
-        self._login_worker.finished.connect(
+        # Run login in QThread.run() (reliable); see _LoginThread.
+        self._login_thread = _LoginThread(username, password, self)
+        self._login_thread.login_done.connect(
             self._on_login_finished,
             Qt.ConnectionType.QueuedConnection,
         )
-        self._login_worker.finished.connect(self._login_thread.quit)
         self._login_thread.finished.connect(self._cleanup_login_thread)
         self._login_thread.start()
 
     def _cleanup_login_thread(self) -> None:
-        if self._login_worker is not None:
-            self._login_worker.deleteLater()
-            self._login_worker = None
         if self._login_thread is not None:
             self._login_thread.deleteLater()
             self._login_thread = None
 
     def _cleanup_post_login_thread(self) -> None:
-        if self._post_login_worker is not None:
-            self._post_login_worker.deleteLater()
-            self._post_login_worker = None
         if self._post_login_thread is not None:
             self._post_login_thread.deleteLater()
             self._post_login_thread = None
 
     def _finalize_login_and_open_dashboard(self) -> None:
+        log = logging.getLogger(__name__)
+        log.info("[login] main: _finalize_login_and_open_dashboard")
         from core.app_preferences import get_timezone, set_display_timezone
 
         set_display_timezone("")
@@ -464,29 +492,46 @@ class LoginWindow(QMainWindow):
         set_display_timezone(tz)
         self._open_dashboard_after_workspace_prep()
 
-    def _on_post_login_worker_finished(self, step_res: dict) -> None:
-        response = self._post_login_response
-        self._post_login_response = None
-        if response is None:
+    @Slot(object, int)
+    def _on_post_login_worker_finished(self, step_res: object, attempt_id: int) -> None:
+        """Apply get-app-id-step-id-list to left nav (dashboard already open — avoids thread/signal races)."""
+        if attempt_id != self._post_login_attempt:
             return
-        # Always apply a list from getAppStepList so left nav is strict: each submenu is visible
-        # only if its hardcoded appIdDescription appears in steps. On failure, steps is [] → hide gated items.
-        set_nav_access_steps(step_res.get("steps") or [])
-        self._finalize_login_and_open_dashboard()
+        steps: list = []
+        if isinstance(step_res, dict):
+            raw = step_res.get("steps")
+            if isinstance(raw, list):
+                steps = raw
+        set_nav_access_steps(steps)
+        dw = self.dashboard_window
+        if dw is None:
+            return
+        try:
+            dw.left_panel.apply_nav_access_state(
+                build_left_panel_access_state(get_nav_access_steps())
+            )
+        except Exception:
+            traceback.print_exc()
 
     def _on_login_finished(self, response: dict) -> None:
-        self._login_in_progress = False
+        log = logging.getLogger(__name__)
+        log.info("[login] main: _on_login_finished received type=%s", type(response).__name__)
         username = self.username_input.text().strip()
 
-        if not response.get("success"):
+        if not _login_response_successful(response):
+            self._login_in_progress = False
             self.login_button.setEnabled(True)
             self.clear_button.setEnabled(True)
             set_user_role("")
             set_user_email("")
             set_user_profile({})
             set_nav_access_steps(None)
+            msg = response.get("message", "Invalid username or password.")
+            log.info("[login] main: server rejected login — %s", msg)
             self._set_status(
-                response.get("message", "Invalid username or password."), error=True
+                msg,
+                error=True,
+                clear_on_user_activity=False,
             )
             return
 
@@ -495,31 +540,44 @@ class LoginWindow(QMainWindow):
         set_user_profile(response)
 
         if session_has_sadmin_role(response):
+            log.info("[login] main: SADMIN path → open dashboard")
+            self._login_in_progress = False
             set_nav_access_steps(None)
             self._finalize_login_and_open_dashboard()
             return
 
         tok = _token_from_login_result(response)
         if not tok:
-            # No JWT: cannot load getAppStepList; treat as no steps so gated menus stay hidden.
+            log.info("[login] main: no JWT → open dashboard (empty nav steps)")
+            self._login_in_progress = False
+            # No JWT: cannot load get-app-id-step-id-list; treat as no steps so gated menus stay hidden.
             set_nav_access_steps([])
             self._finalize_login_and_open_dashboard()
             return
 
-        self._post_login_response = response
-        self._post_login_thread = QThread()
-        self._post_login_worker = _PostLoginWorker(tok)
-        self._post_login_worker.moveToThread(self._post_login_thread)
-        self._post_login_thread.started.connect(self._post_login_worker.run)
-        self._post_login_worker.finished.connect(
+        # Open dashboard immediately; refresh left nav when get-app-id-step-id-list returns (avoids races
+        # where thread.quit / finished ordering prevented the slot from opening the dashboard).
+        log.info("[login] main: standard user → open dashboard then get-app-id-step-id-list")
+        set_nav_access_steps([])
+        self._set_status("Loading workspace…", error=False)
+        self._finalize_login_and_open_dashboard()
+        self._post_login_attempt += 1
+        attempt = self._post_login_attempt
+        self._post_login_thread = _PostLoginNavThread(tok, attempt, self)
+        self._post_login_thread.steps_ready.connect(
             self._on_post_login_worker_finished,
             Qt.ConnectionType.QueuedConnection,
         )
-        self._post_login_worker.finished.connect(self._post_login_thread.quit)
         self._post_login_thread.finished.connect(self._cleanup_post_login_thread)
         self._post_login_thread.start()
 
-    def _set_status(self, text: str, *, error: bool) -> None:
+    def _set_status(
+        self,
+        text: str,
+        *,
+        error: bool,
+        clear_on_user_activity: bool = True,
+    ) -> None:
         color = COLOR_ERROR if error else COLOR_SUCCESS
         show_auto_hiding_message(
             self,
@@ -527,23 +585,59 @@ class LoginWindow(QMainWindow):
             text,
             error=error,
             style_sheet=f"color: {color};",
+            clear_on_user_activity=clear_on_user_activity,
         )
 
     def _open_dashboard_after_workspace_prep(self) -> None:
+        log = logging.getLogger(__name__)
+        if self.dashboard_window is not None:
+            log.warning("[login] main: dashboard already exists — skipping open")
+            self._login_in_progress = False
+            return
         try:
+            log.info("[login] main: constructing DashboardWindow…")
             self.dashboard_window = DashboardWindow(on_sign_out=self.handle_sign_out)
+            log.info("[login] main: DashboardWindow constructed")
         except Exception as e:
+            log.exception("[login] main: DashboardWindow construction failed")
+            self._login_in_progress = False
             self.login_button.setEnabled(True)
             self.clear_button.setEnabled(True)
             self._set_status(f"Failed to open dashboard: {e}", error=True)
             return
-        # Show dashboard before hiding login so there is no gap with zero top-level windows
-        # (avoids taskbar icon disappearing / looking like the app restarted).
-        self.dashboard_window.showMaximized()
-        self.dashboard_window.raise_()
-        self.dashboard_window.activateWindow()
-        self.hide()
-        QApplication.processEvents()
+        self._present_dashboard_after_login()
+
+    def _present_dashboard_after_login(self) -> None:
+        log = logging.getLogger(__name__)
+        log.info("[login] main: _present_dashboard_after_login")
+        dw = self.dashboard_window
+        if dw is None:
+            log.error("[login] main: dashboard_window is None — cannot show")
+            self._login_in_progress = False
+            return
+        app = QApplication.instance()
+        try:
+            dw.show()
+            dw.showMaximized()
+            dw.raise_()
+            dw.activateWindow()
+            if app is not None:
+                app.setActiveWindow(dw)
+            self.setVisible(False)
+            self.lower()
+            if app is not None:
+                app.processEvents()
+        except Exception:
+            logging.getLogger(__name__).exception("present dashboard after login")
+            self._login_in_progress = False
+            if dw is not None:
+                dw.close()
+                self.dashboard_window = None
+            self.login_button.setEnabled(True)
+            self.clear_button.setEnabled(True)
+            self.setVisible(True)
+            return
+        self._login_in_progress = False
 
     def handle_sign_out(self) -> None:
         api_sign_out()

@@ -1,4 +1,4 @@
-"""Reset user password: same user table as Users; row opens password dialog (API reset-user-password)."""
+"""Reset user password: same user table as Users; row opens password dialog (POST api/user/reset-user-password by default)."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def _username_for_api(user: dict[str, Any]) -> str:
 
 
 class ResetPasswordDialog(QDialog):
-    """Prompt for new password and confirmation; POST api/reset-user-password."""
+    """Prompt for new password and confirmation; POST api/user/reset-user-password (see ETL_RESET_USER_PASSWORD_PATH)."""
 
     def __init__(self, user: dict[str, Any], parent: QWidget | None = None) -> None:
         super().__init__(parent)

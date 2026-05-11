@@ -156,6 +156,7 @@ class ViewCategoryPage(QWidget):
     def _switch_to_edit_mode(self) -> None:
         self.category_name_edit.setReadOnly(False)
         self.category_name_edit.setStyleSheet(FORM_INPUT_STYLE)
+        self.category_name_edit.setPlaceholderText("Enter category name")
         self._btn_stack.setCurrentIndex(1)
 
     def is_edit_mode(self) -> bool:

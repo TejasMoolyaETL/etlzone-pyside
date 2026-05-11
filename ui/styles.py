@@ -120,8 +120,12 @@ def global_application_stylesheet() -> str:
         background-color: {t.BG_WHITE};
         color: {t.TEXT_PRIMARY};
     }}
+    /* Default transparent so form cards / white panels do not show a grey slab
+       around small stacks (e.g. Edit/Back). Main content stacks set BG_APP locally
+       (see dashboard_window). */
     QStackedWidget {{
-        background-color: {t.BG_APP};
+        background-color: transparent;
+        border: none;
     }}
     QAbstractScrollArea {{
         background-color: {t.BG_WHITE};

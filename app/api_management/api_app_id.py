@@ -385,6 +385,8 @@ class _EditAppIdDialog(QDialog):
         ebl.addWidget(cancel_btn)
 
         self._btn_stack = QStackedWidget()
+        self._btn_stack.setFrameShape(QFrame.Shape.NoFrame)
+        self._btn_stack.setStyleSheet("QStackedWidget { border: none; background: transparent; }")
         self._btn_stack.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self._btn_stack.addWidget(display_btns)
         self._btn_stack.addWidget(edit_btns)

@@ -37,11 +37,29 @@ API_SUB_OPTIONS = [
     "API: User Involved",
     "API: Details",
     "API: Validations",
+    "API: Tasks",
     "API: All in One",
+]
+
+# Lead Management sub-options
+LEAD_MANAGEMENT_SUB_OPTIONS = [
+    "Lead: Company",
+    "Lead: Contact Person",
+    "Lead: Company Contact Assignment",
+    "Leads",
 ]
 
 # DMT Tracker sub-options
 OBJECT_TRACKER_SUB_OPTIONS = [
     "DMT - Category",
     "DMT - Module",
+    "DMT - Object",
+    "DMT - Users",
+    "DMT - Object List Tracker",
+    "DMT - Issue Tracker",
 ]
+
+MASTER_SETUP_ITEM = "Master Setup Value"
+MASTER_SETUP_CONFIG_ITEM = "Master Setup Config"
+MASTER_SETUP_KEY_ITEM = "Master Setup Key"
+APP_CONFIG_SUB_OPTIONS = [MASTER_SETUP_KEY_ITEM, MASTER_SETUP_ITEM, MASTER_SETUP_CONFIG_ITEM]

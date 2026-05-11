@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import re
+from ast import literal_eval
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 # Normalize Java-style offset +0000 -> +00:00 for fromisoformat
 _OFFSET_FIX = re.compile(r"([+-])(\d{2})(\d{2})$")
+_NESTED_KEYVALUE_RE = re.compile(r"(?:^|[,{]\s*)keyValue\s*[:=]\s*['\"]?([^,'\"}]+)")
 
 _PREFS_FILE = Path(__file__).resolve().parent.parent / ".etl_app_prefs.json"
 
@@ -88,15 +90,43 @@ DATE_KEYS = frozenset(
         "startDate", "start_date", "endDate", "end_date",
         "effectiveFrom", "effective_from", "effectiveTo", "effective_to",
         "timestamp", "Timestamp", "timeStamp", "time_stamp",
+        "functionalUnitTestingCompletionDate",
+        "functional_unit_testing_completion_date",
     }
 )
 
 
 def is_datetime_field(key: str, key_candidates: tuple[str, ...] = ()) -> bool:
     """True if ``key`` or any entry in ``key_candidates`` is a known API datetime field name."""
-    if key in DATE_KEYS:
+    def _looks_like_datetime_key(name: str) -> bool:
+        n = (name or "").strip()
+        if not n:
+            return False
+        if n in DATE_KEYS:
+            return True
+        low = n.lower()
+        date_hints = (
+            "date",
+            "time",
+            "timestamp",
+            "createdat",
+            "modifiedat",
+            "updatedat",
+            "startat",
+            "endat",
+            "validfrom",
+            "validto",
+            "fromdate",
+            "todate",
+            "on",
+        )
+        if low.endswith(("at", "_at", "date", "_date", "time", "_time", "timestamp", "_timestamp")):
+            return True
+        return any(h in low for h in date_hints)
+
+    if _looks_like_datetime_key(key):
         return True
-    return any(k in DATE_KEYS for k in key_candidates)
+    return any(_looks_like_datetime_key(k) for k in key_candidates)
 
 
 def _get_zoneinfo(tz_id: str):
@@ -328,3 +358,72 @@ def format_datetime_display(value: Any) -> str:
         return out
     s = str(value).strip()
     return s if s else ""
+
+
+def format_field_display_value(value: Any, key: str = "", key_candidates: tuple[str, ...] = ()) -> str:
+    """Shared UI field formatter for list/view pages.
+
+    Rules:
+    - datetime-like fields use timezone-aware ``format_datetime_display``
+    - dict values prefer ``keyValue``/``key_value`` display text, then ``seq``
+    - everything else falls back to ``str(value)``
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str) and value.strip().lower() in ("", "null", "none"):
+        return ""
+
+    def _extract_nested_display(obj: Any) -> str:
+        if not isinstance(obj, dict):
+            return ""
+        # Common variants from different backend serializers.
+        for k in ("keyValue", "key_value", "keyvalue", "value", "label", "name"):
+            v = obj.get(k)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+        # Case-insensitive fallback.
+        lower_map = {str(k).lower(): v for k, v in obj.items()}
+        for k in ("keyvalue", "key_value", "value", "label", "name"):
+            v = lower_map.get(k)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+        seq_val = obj.get("seq")
+        if seq_val is not None:
+            return str(seq_val)
+        return ""
+
+    # Some APIs return nested objects as JSON text; extract display value when possible.
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.startswith("{") and raw.endswith("}"):
+            try:
+                parsed = json.loads(raw)
+                nested_out = _extract_nested_display(parsed)
+                if nested_out:
+                    return nested_out
+            except Exception:
+                # Some APIs send Python-dict-like strings with single quotes.
+                try:
+                    parsed = literal_eval(raw)
+                    nested_out = _extract_nested_display(parsed)
+                    if nested_out:
+                        return nested_out
+                except Exception:
+                    pass
+            # Java map-style fallback: "{category=..., keyValue=Fulltime, seq=1}"
+            m = _NESTED_KEYVALUE_RE.search(raw)
+            if m:
+                out = str(m.group(1) or "").strip()
+                if out:
+                    return out
+    if is_datetime_field(key, key_candidates):
+        return format_datetime_display(value)
+    if isinstance(value, dict):
+        nested_out = _extract_nested_display(value)
+        if nested_out:
+            return nested_out
+        return ""
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    text = str(value).strip()
+    return text if text else ""

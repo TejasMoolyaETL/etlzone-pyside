@@ -1,11 +1,11 @@
-"""DMT - Module list page for DMT Tracker."""
+"""Object List Tracker list page for DMT Tracker."""
 
 from __future__ import annotations
 
 from typing import Any, Callable
 
 from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QCursor, QShowEvent
+from PySide6.QtGui import QAction, QCursor, QGuiApplication, QShowEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -14,11 +14,12 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from core.api import api_delete_module, api_get_all_modules
+from core.api import api_delete_object_tracker, api_get_all_object_trackers
 from core.app_preferences import format_datetime_display, is_datetime_field
 from core.user_context import get_user_profile
 from ui.auto_hide_message import show_auto_hiding_message
@@ -34,24 +35,43 @@ from ui.data_table import (
     sync_vertical_header_labels,
 )
 from ui.form_page_styles import (
+    DATA_TABLE_HEADER_FONT_SIZE_PX,
     LIST_PAGE_HEADER_HEIGHT_PX,
     LIST_PAGE_HEADER_LAYOUT_MARGINS,
     LIST_PAGE_HEADER_LAYOUT_SPACING,
     LIST_PAGE_HEADER_STYLESHEET,
 )
 from ui.styles import CONTEXT_MENU_STYLESHEET
+from ui.theme import Theme
 
-_MODULE_COLUMN_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Module Id", ("moduleId", "id")),
-    ("Module Name", ("moduleName", "name")),
-    ("Created At", ("createdAt", "created_at")),
-    ("Created By", ("createdBy", "created_by")),
-    ("Modified At", ("modifiedAt", "modified_at")),
-    ("Modified By", ("modifiedBy", "modified_by")),
+_TRACKER_COLUMN_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Tracker Id", ("objectTrackerId", "trackerId", "id")),
+    ("Module", ("moduleName",)),
+    ("Object Name", ("objectName",)),
+    ("TCode", ("tcode",)),
+    ("Business Object Type", ("businessObjectTypeName",)),
+    ("Scope", ("scopeName",)),
+    ("Load Approach", ("loadApproachName",)),
+    ("Upload Tool", ("uploadToolName",)),
+    ("Customization Status", ("customizationStatusName",)),
+    ("Build Status", ("buildStatusName",)),
+    ("Build Completion Date", ("buildCompletionDate",)),
+    ("Functional Unit Testing Status", ("functionalUnitTestingStatusName",)),
+    ("Functional Unit Testing Completion Date", ("functionalUnitTestingCompletionDate",)),
+    ("Business Unit Testing Status", ("businessUnitTestingStatusName",)),
+    ("Business Unit Testing Completion Date", ("businessUnitTestingCompletionDate",)),
+    ("Estimated Prod Count", ("estimatedProdCount",)),
+    ("Functional SPOC", ("functionalSPOC",)),
+    ("DMC Program Name", ("dmcProgramName",)),
+    ("SharePoint", ("uploadedToSharePoint",)),
+    ("Created By", ("createdBy",)),
+    ("Created At", ("createdAt",)),
+    ("Modified By", ("modifiedBy",)),
+    ("Modified At", ("modifiedAt",)),
 )
 
 
-def _module_value_for_column(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, str]:
+def _tracker_value_for_column(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, str]:
     for key in keys:
         if key in row and row.get(key) is not None:
             return row.get(key), key
@@ -63,10 +83,20 @@ def _format_cell(value: Any, key: str = "", key_candidates: tuple[str, ...] = ()
         return ""
     if is_datetime_field(key, key_candidates):
         return format_datetime_display(value)
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
     return str(value)
 
 
-class ModuleListPage(QWidget):
+def _tracker_id(row: dict[str, Any]) -> int | str | None:
+    for key in ("objectTrackerId", "trackerId", "id"):
+        value = row.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+class DmtObjectTrackerListPage(QWidget):
     def __init__(
         self,
         on_create_clicked: Callable[[], None] | None = None,
@@ -93,12 +123,12 @@ class ModuleListPage(QWidget):
         hl = QHBoxLayout(header)
         hl.setContentsMargins(*LIST_PAGE_HEADER_LAYOUT_MARGINS)
         hl.setSpacing(LIST_PAGE_HEADER_LAYOUT_SPACING)
-        hl.addWidget(QLabel("DMT - Module"))
+        hl.addWidget(QLabel("DMT - Object List Tracker"))
         hl.addStretch()
         refresh_btn = QPushButton("Refresh")
         refresh_btn.setFixedWidth(100)
         refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        refresh_btn.clicked.connect(self._load_modules)
+        refresh_btn.clicked.connect(self._load_trackers)
         hl.addWidget(refresh_btn)
         self._filter_btn = QPushButton("Filters")
         self._filter_btn.setCheckable(True)
@@ -111,6 +141,38 @@ class ModuleListPage(QWidget):
         create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         create_btn.clicked.connect(lambda: self.on_create_clicked() if self.on_create_clicked else None)
         hl.addWidget(create_btn)
+        self._more_btn = QToolButton()
+        self._more_btn.setText("☰")
+        self._more_btn.setFixedWidth(34)
+        self._more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._more_btn.setStyleSheet(
+            "QToolButton {"
+            f" color: {Theme.PANEL_TEXT_BRIGHT};"
+            " font-size: 16px; font-weight: 700; padding-bottom: 2px;"
+            " border: none; background: transparent; }"
+            f"QToolButton:hover {{ background: {Theme.HEADER_ACCENT_HOVER}; }}"
+            f"QToolButton:pressed {{ background: {Theme.HEADER_ACCENT_PRESSED}; }}"
+        )
+        more_menu = QMenu(self._more_btn)
+        more_menu.setStyleSheet(
+            "QMenu {"
+            " background: #f8fafc; color: #475569;"
+            " border: 1px solid #cbd5e1;"
+            " border-radius: 0px; padding: 0px; }"
+            "QMenu::item {"
+            " background: #f8fafc; color: #475569;"
+            f" font-size: {DATA_TABLE_HEADER_FONT_SIZE_PX}px; font-weight: 600;"
+            " padding: 3px 6px; margin: 0px; border: none;"
+            " border-bottom: 2px solid #e2e8f0; border-right: 1px solid #cbd5e1; }"
+            "QMenu::item:selected { background: #f8fafc; color: #475569; }"
+            "QMenu::item:pressed { background: #f8fafc; color: #475569; }"
+        )
+        copy_action = QAction("Copy", self._more_btn)
+        copy_action.triggered.connect(self._copy_selection_to_clipboard)
+        more_menu.addAction(copy_action)
+        self._more_btn.setMenu(more_menu)
+        hl.addWidget(self._more_btn)
         layout.addWidget(header)
 
         content = QWidget()
@@ -141,9 +203,9 @@ class ModuleListPage(QWidget):
         return filter_dict_rows_by_column_edits(
             self._source_rows,
             self.table,
-            list(_MODULE_COLUMN_SPEC),
+            list(_TRACKER_COLUMN_SPEC),
             self._filter_visible,
-            _module_value_for_column,
+            _tracker_value_for_column,
             _format_cell,
         )
 
@@ -160,8 +222,8 @@ class ModuleListPage(QWidget):
             install_filter_row(self.table, self.table.columnCount(), on_text_changed=self._schedule_filter_apply)
         for r, row in enumerate(rows):
             tr = off + r
-            for col, (_, keys) in enumerate(_MODULE_COLUMN_SPEC):
-                value, key_used = _module_value_for_column(row, keys)
+            for col, (_, keys) in enumerate(_TRACKER_COLUMN_SPEC):
+                value, key_used = _tracker_value_for_column(row, keys)
                 item = QTableWidgetItem(_format_cell(value, key_used, keys))
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if col == 0:
@@ -170,9 +232,9 @@ class ModuleListPage(QWidget):
         sync_vertical_header_labels(self.table, filter_visible=self._filter_visible, data_row_count=len(rows))
         resize_data_table_columns_to_content(
             self.table,
-            list(_MODULE_COLUMN_SPEC),
+            list(_TRACKER_COLUMN_SPEC),
             self._source_rows,
-            _module_value_for_column,
+            _tracker_value_for_column,
             _format_cell,
         )
         self.table.setSortingEnabled(not self._filter_visible)
@@ -200,60 +262,59 @@ class ModuleListPage(QWidget):
         self.table.setRowCount(0)
         self.table.setColumnCount(0)
 
-    def _get_module_at_row(self, row: int) -> dict[str, Any] | None:
+    def _get_tracker_at_row(self, row: int) -> dict[str, Any] | None:
         if row < self._data_row_offset() or row >= self.table.rowCount():
             return None
         item = self.table.item(row, 0)
         data = item.data(Qt.ItemDataRole.UserRole) if item else None
         return data if isinstance(data, dict) else None
 
-    def _module_at_pos(self, pos: QPoint) -> dict[str, Any] | None:
+    def _tracker_at_pos(self, pos: QPoint) -> dict[str, Any] | None:
         idx = self.table.indexAt(pos)
         if idx.isValid():
-            return self._get_module_at_row(idx.row())
+            return self._get_tracker_at_row(idx.row())
         item = self.table.itemAt(pos)
         if item:
-            return self._get_module_at_row(item.row())
+            return self._get_tracker_at_row(item.row())
         return None
 
     def _on_context_menu(self, pos: QPoint) -> None:
-        module = self._module_at_pos(pos)
+        rec = self._tracker_at_pos(pos)
         menu = QMenu(self)
         menu.setStyleSheet(CONTEXT_MENU_STYLESHEET)
-        add_action = menu.addAction("Add Module")
-        display_action = menu.addAction("Display Module")
-        edit_action = menu.addAction("Edit Module")
-        delete_action = menu.addAction("Delete Module")
-        display_action.setEnabled(module is not None and self.on_edit_clicked is not None)
-        edit_action.setEnabled(module is not None and self.on_edit_clicked is not None)
-        delete_action.setEnabled(module is not None)
+        add_action = menu.addAction("Add Object Tracker")
+        display_action = menu.addAction("Display Object Tracker")
+        edit_action = menu.addAction("Edit Object Tracker")
+        delete_action = menu.addAction("Delete Object Tracker")
+        display_action.setEnabled(rec is not None and self.on_edit_clicked is not None)
+        edit_action.setEnabled(rec is not None and self.on_edit_clicked is not None)
+        delete_action.setEnabled(rec is not None)
         action = menu.exec(QCursor.pos())
         if action == add_action and self.on_create_clicked:
             self.on_create_clicked()
-        elif action == display_action and module is not None and self.on_edit_clicked:
-            self.on_edit_clicked(module, False)
-        elif action == edit_action and module is not None and self.on_edit_clicked:
-            self.on_edit_clicked(module, True)
-        elif action == delete_action and module is not None:
-            self._handle_delete_module(module)
+        elif action == display_action and rec is not None and self.on_edit_clicked:
+            self.on_edit_clicked(rec, False)
+        elif action == edit_action and rec is not None and self.on_edit_clicked:
+            self.on_edit_clicked(rec, True)
+        elif action == delete_action and rec is not None:
+            self._handle_delete_tracker(rec)
 
     def _on_row_double_clicked(self, item: QTableWidgetItem) -> None:
         if item.row() < self._data_row_offset():
             return
-        module = self._get_module_at_row(item.row())
-        if module is not None and self.on_edit_clicked:
-            self.on_edit_clicked(module, False)
+        rec = self._get_tracker_at_row(item.row())
+        if rec is not None and self.on_edit_clicked:
+            self.on_edit_clicked(rec, False)
 
-    def _handle_delete_module(self, module: dict[str, Any]) -> None:
-        module_id = module.get("moduleId") or module.get("id")
-        if module_id is None:
-            show_auto_hiding_message(self, self._message_label, "Cannot delete: Module ID is missing.", error=True)
+    def _handle_delete_tracker(self, rec: dict[str, Any]) -> None:
+        tracker_id = _tracker_id(rec)
+        if tracker_id is None:
+            show_auto_hiding_message(self, self._message_label, "Cannot delete: Tracker ID is missing.", error=True)
             return
-        name = module.get("moduleName") or "this module"
         reply = QMessageBox.question(
             self,
-            "Delete Module",
-            f"Are you sure you want to delete '{name}'?",
+            "Delete Object Tracker",
+            "Are you sure you want to delete this tracker record?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -267,21 +328,54 @@ class ModuleListPage(QWidget):
             or profile.get("jwt")
         )
         token = str(token) if token else None
-        result = api_delete_module(module_id, token=token)
+        result = api_delete_object_tracker(tracker_id, token=token)
         if result.get("success"):
-            show_auto_hiding_message(self, self._message_label, str(result.get("message") or "Module deleted."), error=False)
-            QTimer.singleShot(700, self._load_modules)
+            show_auto_hiding_message(
+                self,
+                self._message_label,
+                str(result.get("message") or "Object tracker record deleted."),
+                error=False,
+            )
+            QTimer.singleShot(700, self._load_trackers)
         else:
-            show_auto_hiding_message(self, self._message_label, str(result.get("message") or "Failed to delete module."), error=True)
+            show_auto_hiding_message(
+                self,
+                self._message_label,
+                str(result.get("message") or "Failed to delete object tracker record."),
+                error=True,
+            )
+
+    def _copy_selection_to_clipboard(self) -> None:
+        selected = self.table.selectedIndexes()
+        if not selected:
+            show_auto_hiding_message(self, self._message_label, "Select rows/cells to copy.", error=True)
+            return
+        selected_cells = {(idx.row(), idx.column()) for idx in selected}
+        min_row = min(idx.row() for idx in selected)
+        max_row = max(idx.row() for idx in selected)
+        min_col = min(idx.column() for idx in selected)
+        max_col = max(idx.column() for idx in selected)
+        lines: list[str] = []
+        for r in range(min_row, max_row + 1):
+            row_cells: list[str] = []
+            for c in range(min_col, max_col + 1):
+                if (r, c) in selected_cells:
+                    item = self.table.item(r, c)
+                    row_cells.append(item.text() if item else "")
+                else:
+                    row_cells.append("")
+            lines.append("\t".join(row_cells))
+        QGuiApplication.clipboard().setText("\n".join(lines))
+        show_auto_hiding_message(self, self._message_label, "Copied.", error=False)
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
-        self._load_modules()
+        self._load_trackers()
 
     def refresh(self) -> None:
-        self._load_modules()
+        self._load_trackers()
 
-    def _load_modules(self) -> None:
+    def _load_trackers(self) -> None:
         profile = get_user_profile()
         token = (
             profile.get("token")
@@ -290,17 +384,21 @@ class ModuleListPage(QWidget):
             or profile.get("jwt")
         )
         token = str(token) if token else None
-        result = api_get_all_modules(token=token)
+        result = api_get_all_object_trackers(token=token)
         if not result.get("success"):
-            show_auto_hiding_message(self, self._message_label, str(result.get("message") or "Failed to load modules."), error=True)
+            show_auto_hiding_message(
+                self,
+                self._message_label,
+                str(result.get("message") or "Failed to load object tracker records."),
+                error=True,
+            )
             self._show_empty_table()
             return
         rows = result.get("data") or []
         valid_rows = [dict(r) for r in rows if isinstance(r, dict)]
         self._source_rows = valid_rows
-        self.table.setColumnCount(len(_MODULE_COLUMN_SPEC))
-        self.table.setHorizontalHeaderLabels([h for h, _ in _MODULE_COLUMN_SPEC])
+        self.table.setColumnCount(len(_TRACKER_COLUMN_SPEC))
+        self.table.setHorizontalHeaderLabels([h for h, _ in _TRACKER_COLUMN_SPEC])
         rows_to_show = self._filtered_source_rows() if self._filter_visible else valid_rows
         self._write_data_rows(rows_to_show)
         show_auto_hiding_message(self, self._message_label, "", error=False)
-

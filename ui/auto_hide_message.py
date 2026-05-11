@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -19,12 +20,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ui.form_page_styles import APP_FONT_SIZE_PX
+from ui.form_page_styles import FORM_ERROR_LABEL_STYLE, MODAL_FEEDBACK_SUCCESS_STYLE
 
 DEFAULT_HIDE_MS = 4500
 
-_STYLE_ERROR = f"color: #dc2626; font-size: {APP_FONT_SIZE_PX}px; font-weight: 500;"
-_STYLE_SUCCESS = f"color: #16a34a; font-size: {APP_FONT_SIZE_PX}px; font-weight: 500;"
+# Success: same green as modal feedback; errors: shared form error red (global).
+_STYLE_SUCCESS = MODAL_FEEDBACK_SUCCESS_STYLE
 
 
 def _timer_attr(label: QLabel) -> str:
@@ -39,10 +40,23 @@ def _activity_hook_attr(label: QLabel) -> str:
     return f"_auto_hide_activity_hook_{id(label)}"
 
 
+def _sticky_until_attr(label: QLabel) -> str:
+    """Monotonic deadline; while ``time.monotonic() < deadline``, ignore activity-driven clears."""
+    return f"_auto_hide_sticky_until_{id(label)}"
+
+
 def cancel_auto_hide_message(owner: QObject, label: QLabel) -> None:
-    timer = getattr(owner, _timer_attr(label), None)
-    if isinstance(timer, QTimer) and timer.isActive():
+    attr = _timer_attr(label)
+    timer = getattr(owner, attr, None)
+    if isinstance(timer, QTimer):
         timer.stop()
+        timer.deleteLater()
+    setattr(owner, attr, None)
+    setattr(owner, _sticky_until_attr(label), 0.0)
+    try:
+        label.setStyleSheet("")
+    except RuntimeError:
+        pass
 
 
 def _is_descendant(ancestor: QWidget, widget: QWidget | None) -> bool:
@@ -55,15 +69,24 @@ def _is_descendant(ancestor: QWidget, widget: QWidget | None) -> bool:
 
 
 def _clear_error_if_showing(owner: QObject, label: QLabel) -> None:
+    until = getattr(owner, _sticky_until_attr(label), 0.0)
+    try:
+        if isinstance(until, (int, float)) and float(until) > 0.0 and time.monotonic() < float(until):
+            return
+    except (TypeError, ValueError):
+        pass
     if getattr(owner, _kind_attr(label), None) != "error":
         return
     if not (label.text() or "").strip():
         setattr(owner, _kind_attr(label), None)
+        setattr(owner, _sticky_until_attr(label), 0.0)
         return
     cancel_auto_hide_message(owner, label)
     label.setText("")
+    label.setStyleSheet("")
     label.setVisible(False)
     setattr(owner, _kind_attr(label), None)
+    setattr(owner, _sticky_until_attr(label), 0.0)
 
 
 def _attach_clear_error_on_activity(page: QWidget, label: QLabel) -> None:
@@ -143,6 +166,7 @@ def show_auto_hiding_message(
     error: bool = True,
     hide_ms: int | None = None,
     style_sheet: str | None = None,
+    clear_on_user_activity: bool = True,
 ) -> None:
     """Show message on label. Success auto-hides after hide_ms; errors stay until cleared.
 
@@ -150,22 +174,34 @@ def show_auto_hiding_message(
     Explicit hide_ms (including 0) applies to both success and error.
 
     For QWidget owners, persistent errors are cleared when the user focuses another control
-    in the same page, edits a field, or changes table selection.
+    in the same page, edits a field, or changes table or combo selection. When
+    clear_on_user_activity is False (e.g. load-time failures), a short grace period ignores those
+    clears right after the message appears so layout and programmatic combo updates do not
+    remove it instantly.
     """
     cancel_auto_hide_message(owner, label)
     _ensure_clear_error_on_activity(owner, label)
     if not (text or "").strip():
         setattr(owner, _kind_attr(label), None)
+        setattr(owner, _sticky_until_attr(label), 0.0)
         label.setText("")
+        label.setStyleSheet("")
         label.setVisible(False)
         return
     if style_sheet is not None:
         label.setStyleSheet(style_sheet)
     else:
-        label.setStyleSheet(_STYLE_ERROR if error else _STYLE_SUCCESS)
+        label.setStyleSheet(FORM_ERROR_LABEL_STYLE if error else _STYLE_SUCCESS)
     label.setText(text)
     label.setVisible(True)
     setattr(owner, _kind_attr(label), "error" if error else "success")
+    # Global safeguard: avoid instant error disappearance when handlers set focus
+    # right after showing an error (common in validation flows).
+    if error:
+        sticky_for_s = 0.5 if clear_on_user_activity else 0.8
+        setattr(owner, _sticky_until_attr(label), time.monotonic() + sticky_for_s)
+    else:
+        setattr(owner, _sticky_until_attr(label), 0.0)
     if hide_ms is None:
         ms = 0 if error else DEFAULT_HIDE_MS
     else:
@@ -173,25 +209,24 @@ def show_auto_hiding_message(
     if ms <= 0:
         return
     attr = _timer_attr(label)
-    timer = getattr(owner, attr, None)
-    if not isinstance(timer, QTimer):
-        timer = QTimer(owner)
-        setattr(owner, attr, timer)
-        timer.setSingleShot(True)
+    old = getattr(owner, attr, None)
+    if isinstance(old, QTimer):
+        old.stop()
+        old.deleteLater()
+    timer = QTimer(owner)
+    setattr(owner, attr, timer)
+    timer.setSingleShot(True)
 
     def _clear() -> None:
         try:
             label.setText("")
+            label.setStyleSheet("")
             label.setVisible(False)
             setattr(owner, _kind_attr(label), None)
+            setattr(owner, _sticky_until_attr(label), 0.0)
         except RuntimeError:
             pass
 
-    timer.stop()
-    try:
-        timer.timeout.disconnect()
-    except TypeError:
-        pass
     timer.timeout.connect(_clear)
     timer.start(ms)
 

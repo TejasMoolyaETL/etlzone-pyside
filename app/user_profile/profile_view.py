@@ -118,7 +118,6 @@ _PROFILE_COL1 = (
     ("Lastname", ("lastName", "last_name", "name")),
     ("Email*", ("email",)),
     ("Mobile", ("mobileNumber", "mobile_number")),
-    ("Status", ("userStatus", "status")),
 )
 # Col 2: timezone and audit
 _PROFILE_COL2 = (
@@ -140,7 +139,6 @@ _LABEL_OVERRIDES = {
     "lastName": "Lastname",
     "last_name": "Lastname",
     "name": "Lastname",
-    "userStatus": "Status",
     "defaultRole": "Default Role",
     "default_role": "Default Role",
     "mobileNumber": "Mobile",

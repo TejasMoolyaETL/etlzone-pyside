@@ -6,6 +6,7 @@ import json
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -22,7 +23,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.api import api_update_org
+from core.api import (
+    api_get_master_key_by_app_id_field_name,
+    api_update_org,
+    master_key_row_display_label,
+    master_key_row_seq_value,
+)
 from core.app_preferences import format_datetime_display, is_datetime_field
 from ui.blank_display import is_blank_display_value
 from core.user_context import get_user_profile
@@ -40,6 +46,7 @@ from ui.form_page_styles import (
     FORM_PRIMARY_BUTTON_STYLESHEET,
     FORM_READONLY_INPUT_STYLE as READONLY_INPUT_STYLE,
     FORM_SECONDARY_BUTTON_STYLESHEET,
+    placeholder_example,
 )
 from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
 from ui.widgets.required_label import field_caption_label, labeled_field_block
@@ -52,6 +59,14 @@ def _get_value(org: dict[str, Any], keys: tuple[str, ...]) -> Any:
     for key in keys:
         if key in flat:
             return flat[key]
+    # API returns nested orgStatus { keyValue, ... } instead of flat status
+    if "status" in keys:
+        nested = flat.get("orgStatus") or flat.get("org_status")
+        if isinstance(nested, dict):
+            if "keyValue" in nested:
+                return nested.get("keyValue")
+            if "key_value" in nested:
+                return nested.get("key_value")
     return None
 
 
@@ -68,22 +83,64 @@ def _format_value(value: Any, key: str = "", key_candidates: tuple[str, ...] = (
 
 
 def _get_org_id(org: dict[str, Any]) -> int | str | None:
-    for k in ("orgId", "org_id", "id"):
+    for k in ("orgID", "orgId", "org_id", "id"):
         v = org.get(k)
         if v is not None:
             return v
     return None
 
 
-_ORG_STATUS = ("ACTIVE", "INACTIVE", "DISABLE", "COMPLETE")
+_ORG_STATUS_FIELD_NAME = "org_status"
+
+
+def _coerce_master_seq_to_int(seq_val: Any) -> int:
+    """Send master-key seq as integer in JSON payload (same as Create Org)."""
+    if isinstance(seq_val, bool):
+        return int(seq_val)
+    if isinstance(seq_val, int):
+        return seq_val
+    if isinstance(seq_val, float) and seq_val == int(seq_val):
+        return int(seq_val)
+    s = str(seq_val).strip()
+    if s.isdigit():
+        return int(s)
+    raise ValueError(f"Not a whole number: {seq_val!r}")
+
+
+def _org_status_nested(org: dict[str, Any]) -> dict[str, Any] | None:
+    flat = {k: v for k, v in org.items() if k not in _HIDDEN_KEYS}
+    nested = flat.get("orgStatus") or flat.get("org_status")
+    return nested if isinstance(nested, dict) else None
+
+
+def _org_status_seq(org: dict[str, Any]) -> Any | None:
+    nested = _org_status_nested(org)
+    if nested is not None:
+        return master_key_row_seq_value(nested)
+    flat = {k: v for k, v in org.items() if k not in _HIDDEN_KEYS}
+    for k in ("status", "statusSeq", "status_seq"):
+        v = flat.get(k)
+        if v is not None and str(v).strip() != "":
+            return v
+    return None
+
+
+def _combo_status_key_value(combo: QComboBox) -> str:
+    """Key value portion of master-key label (e.g. ``1 | ACTIVE`` → ``ACTIVE``)."""
+    if combo.currentIndex() <= 0 or combo.itemData(combo.currentIndex()) is None:
+        return ""
+    t = combo.currentText().strip()
+    if " | " in t:
+        return t.split(" | ", 1)[-1].strip().upper()
+    return t.upper()
 
 # Column 1: main org fields (canonical key first)
 _ORG_COL1 = (
-    ("Org Id", ("orgId", "org_id", "id")),
+    ("Org Id", ("orgId", "orgID", "org_id", "id")),
     ("Org Code*", ("orgCode", "org_code")),
     ("Org Name*", ("orgName", "org_name")),
     ("Industry*", ("industry",)),
-    ("Status", ("status",)),
+    ("Status*", ("status",)),
 )
 # Column 2: audit fields (read-only)
 _ORG_COL2 = (
@@ -95,7 +152,7 @@ _ORG_COL2 = (
 _ORG_FIELD_GROUPS = _ORG_COL1 + _ORG_COL2
 
 _READONLY_KEYS = frozenset({
-    "orgId", "org_id", "id",
+    "orgID", "orgId", "org_id", "id",
     "createdBy", "created_by", "createdOn", "created_on", "createdAt", "created_at",
     "modifiedBy", "modified_by", "modifiedOn", "modified_on", "modifiedAt", "modified_at", "updatedAt", "updated_at",
 })
@@ -171,8 +228,6 @@ class ViewOrgPage(QWidget):
 
             if canonical == "status":
                 value_edit = QComboBox()
-                value_edit.addItems(_ORG_STATUS)
-                value_edit.setCurrentText("ACTIVE")
                 apply_form_combobox_field(
                     value_edit, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX, min_width=240
                 )
@@ -188,6 +243,12 @@ class ViewOrgPage(QWidget):
                 value_edit.setReadOnly(canonical in _READONLY_KEYS)
                 value_edit.setStyleSheet(READONLY_INPUT_STYLE if canonical in _READONLY_KEYS else INPUT_STYLE)
                 value_edit.setText("")
+                if canonical == "orgName":
+                    value_edit.setPlaceholderText(placeholder_example("ETLZONE2"))
+                elif canonical == "orgCode":
+                    value_edit.setPlaceholderText(placeholder_example("ETL123"))
+                elif canonical == "industry":
+                    value_edit.setPlaceholderText(placeholder_example("IT"))
 
             self._field_edits[canonical] = value_edit
             grid.addWidget(labeled_field_block(label_widget, value_edit), idx, col)
@@ -223,6 +284,7 @@ class ViewOrgPage(QWidget):
         self._save_btn.clicked.connect(self._handle_save)
 
         display_btns = QWidget()
+        display_btns.setStyleSheet("background: transparent;")
         display_btns.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         display_btns_layout = QHBoxLayout(display_btns)
         display_btns_layout.setContentsMargins(0, 0, 0, 0)
@@ -232,6 +294,7 @@ class ViewOrgPage(QWidget):
         display_btns_layout.addWidget(self._back_btn)
 
         edit_btns = QWidget()
+        edit_btns.setStyleSheet("background: transparent;")
         edit_btns.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         edit_btns_layout = QHBoxLayout(edit_btns)
         edit_btns_layout.setContentsMargins(0, 0, 0, 0)
@@ -240,6 +303,7 @@ class ViewOrgPage(QWidget):
         edit_btns_layout.addWidget(self._cancel_btn)
 
         self._btn_stack = QStackedWidget()
+        self._btn_stack.setStyleSheet("QStackedWidget { background: transparent; border: none; }")
         self._btn_stack.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self._btn_stack.addWidget(display_btns)
         self._btn_stack.addWidget(edit_btns)
@@ -266,9 +330,91 @@ class ViewOrgPage(QWidget):
 
         self._switch_to_view_mode()
 
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if self.is_edit_mode():
+            return
+        combo = self._field_edits.get("status")
+        if isinstance(combo, QComboBox):
+            self._populate_master_key_seq_combo(combo, _ORG_STATUS_FIELD_NAME, "Select status…")
+            self._sync_status_combo_from_org()
+
+    def _token(self) -> str | None:
+        profile = get_user_profile()
+        token = (
+            profile.get("token")
+            or profile.get("accessToken")
+            or profile.get("access_token")
+            or profile.get("jwt")
+        )
+        return str(token) if token else None
+
+    def _populate_master_key_seq_combo(
+        self,
+        combo: QComboBox | None,
+        field_name: str,
+        placeholder: str,
+    ) -> None:
+        if combo is None:
+            return
+        result = api_get_master_key_by_app_id_field_name(
+            field_name=field_name,
+            token=self._token(),
+        )
+        rows = result.get("data") if result.get("success") else []
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(placeholder, None)
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                seq_val = master_key_row_seq_value(row)
+                if seq_val is None:
+                    continue
+                label = master_key_row_display_label(row).strip()
+                if not label:
+                    continue
+                combo.addItem(label, seq_val)
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def _sync_status_combo_from_org(self) -> None:
+        combo = self._field_edits.get("status")
+        if not isinstance(combo, QComboBox) or combo.count() == 0:
+            return
+        seq = _org_status_seq(self._org)
+        if seq is not None:
+            for i in range(combo.count()):
+                data = combo.itemData(i)
+                if data is None:
+                    continue
+                try:
+                    if int(data) == int(seq):  # type: ignore[arg-type]
+                        combo.setCurrentIndex(i)
+                        return
+                except (TypeError, ValueError):
+                    if str(data).strip() == str(seq).strip():
+                        combo.setCurrentIndex(i)
+                        return
+        kv = _get_value(self._org, ("status",))
+        if kv is not None and str(kv).strip():
+            kv_up = str(kv).strip().upper()
+            for i in range(combo.count()):
+                if combo.itemData(i) is None:
+                    continue
+                label_up = combo.itemText(i).strip().upper()
+                if kv_up == label_up or kv_up in label_up or label_up.endswith(kv_up) or f"| {kv_up}" in label_up:
+                    combo.setCurrentIndex(i)
+                    return
+        combo.setCurrentIndex(0)
+
     def set_org(self, org: dict[str, Any] | None, *, edit_mode: bool = False) -> None:
         """Load and display the given organization record. If edit_mode=True, open in edit mode."""
         self._org = dict(org) if org else {}
+        combo = self._field_edits.get("status")
+        if isinstance(combo, QComboBox):
+            self._populate_master_key_seq_combo(combo, _ORG_STATUS_FIELD_NAME, "Select status…")
         self._refresh_values()
         if edit_mode and self._org:
             self._handle_edit()
@@ -279,19 +425,14 @@ class ViewOrgPage(QWidget):
         """Sync field values from _org."""
         for label_text, keys in _ORG_FIELD_GROUPS:
             canonical = keys[0]
-            value = _get_value(self._org, keys)
-            key_used = keys[0]
-            text = _format_value(value, keys[0], keys)
             if canonical == "status":
-                text = (str(value).strip().upper() if value is not None else "") or "ACTIVE"
+                continue
+            value = _get_value(self._org, keys)
+            text = _format_value(value, keys[0], keys)
             edit = self._field_edits.get(canonical)
-            if edit:
-                if isinstance(edit, QComboBox):
-                    if text and edit.findText(text) < 0:
-                        edit.addItem(text)
-                    edit.setCurrentText(text if text else "ACTIVE")
-                else:
-                    edit.setText(text)
+            if edit and isinstance(edit, QLineEdit):
+                edit.setText(text)
+        self._sync_status_combo_from_org()
 
     def _handle_back(self) -> None:
         if self.on_back:
@@ -353,10 +494,27 @@ class ViewOrgPage(QWidget):
             canonical = keys[0]
             if canonical not in self._editable_keys:
                 continue
+            if canonical == "status":
+                combo = self._field_edits.get("status")
+                if not isinstance(combo, QComboBox):
+                    continue
+                orig_seq = _org_status_seq(self._org)
+                cur_data = combo.currentData()
+                if orig_seq is not None and cur_data is not None:
+                    try:
+                        if int(orig_seq) != int(cur_data):  # type: ignore[arg-type]
+                            return True
+                    except (TypeError, ValueError):
+                        if str(orig_seq).strip() != str(cur_data).strip():
+                            return True
+                    continue
+                orig_kv = str(_get_value(self._org, ("status",)) or "").strip().upper()
+                cur_kv = _combo_status_key_value(combo)
+                if orig_kv != cur_kv:
+                    return True
+                continue
             original = _get_value(self._org, keys)
             orig_str = _format_value(original, keys[0], keys)
-            if canonical == "status":
-                orig_str = (str(original).strip().upper() if original is not None else "") or "ACTIVE"
             current = self._get_edit_value(canonical)
             if orig_str.strip() != (current or "").strip():
                 return True
@@ -374,17 +532,40 @@ class ViewOrgPage(QWidget):
         org_name = self._get_edit_value("orgName", "org_name")
         org_code = self._get_edit_value("orgCode", "org_code")
         industry = self._get_edit_value("industry")
-        status = self._get_edit_value("status") or "ACTIVE"
 
         if not org_name:
             self._show_error("Organization name is required.")
+            name_edit = self._field_edits.get("orgName")
+            if isinstance(name_edit, QLineEdit):
+                name_edit.setFocus()
             return
         if not org_code:
             self._show_error("Organization code is required.")
+            code_edit = self._field_edits.get("orgCode")
+            if isinstance(code_edit, QLineEdit):
+                code_edit.setFocus()
             return
         if not industry:
             self._show_error("Industry is required.")
+            ind_edit = self._field_edits.get("industry")
+            if isinstance(ind_edit, QLineEdit):
+                ind_edit.setFocus()
             return
+
+        status_combo = self._field_edits.get("status")
+        if isinstance(status_combo, QComboBox):
+            if status_combo.currentIndex() <= 0 or status_combo.currentData() is None:
+                self._show_error("Status is required.")
+                status_combo.setFocus()
+                return
+            try:
+                status = _coerce_master_seq_to_int(status_combo.currentData())
+            except ValueError:
+                self._show_error("Status must be a valid selection.")
+                status_combo.setFocus()
+                return
+        else:
+            status = self._get_edit_value("status") or "ACTIVE"
 
         org_id = _get_org_id(self._org)
         if org_id is None:
@@ -416,7 +597,21 @@ class ViewOrgPage(QWidget):
         self._org["orgName"] = org_name
         self._org["orgCode"] = org_code
         self._org["industry"] = industry
-        self._org["status"] = status
+        kv = (
+            _combo_status_key_value(status_combo)
+            if isinstance(status_combo, QComboBox)
+            else str(status).strip().upper()
+        )
+        self._org["status"] = kv or str(status)
+        nested = _org_status_nested(self._org)
+        if isinstance(nested, dict) and isinstance(status_combo, QComboBox):
+            nested = dict(nested)
+            nested["seq"] = status
+            if kv:
+                nested["keyValue"] = kv
+            self._org["orgStatus"] = nested
+        elif isinstance(status_combo, QComboBox) and kv:
+            self._org["orgStatus"] = {"keyValue": kv, "seq": status}
         self._show_success(result.get("message", "Organization updated successfully."))
 
         schedule_after_success(

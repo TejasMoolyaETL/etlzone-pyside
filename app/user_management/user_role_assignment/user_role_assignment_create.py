@@ -1,4 +1,4 @@
-"""Create User Role Assignment — POST user-role/assign."""
+"""Create User Role Assignment — POST api/user-role-assignment/assign (see core.config USER_ROLE_ASSIGN_PATH)."""
 
 from __future__ import annotations
 

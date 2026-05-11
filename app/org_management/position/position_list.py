@@ -1,4 +1,4 @@
-"""Position list — GET api/positions/get-all-positions, same UX as Department list."""
+"""Position list — GET api/org-mgmt/position/get-all-position, same UX as Department list."""
 
 from __future__ import annotations
 
@@ -48,9 +48,11 @@ from ui.styles import CONTEXT_MENU_STYLESHEET
 _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "jwt"})
 
 _POSITION_COLUMN_SPEC = (
-    ("Position Id", ("positionId", "position_id", "id")),
+    # Prefer camelCase positionId from API; avoid mistaking unrelated id fields.
+    ("Position Id", ("positionId", "position_id", "positionID", "PositionId", "PositionID", "id")),
     ("Position Name", ("positionName", "position_name", "name")),
     ("Hierarchy Level", ("hierarchyLevel", "hierarchy_level", "level")),
+    ("Status", ("status",)),
     ("Created By", ("createdBy", "created_by")),
     ("Created At", ("createdAt", "created_at", "createdOn", "created_on")),
     ("Modified By", ("modifiedBy", "modified_by")),
@@ -64,6 +66,45 @@ def _flatten_position(row: dict[str, Any]) -> dict[str, Any]:
 
 def _value_for_column(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, str]:
     flat = _flatten_position(row)
+    if keys and keys[0] in (
+        "positionId",
+        "position_id",
+        "positionID",
+        "PositionId",
+        "PositionID",
+        "id",
+    ):
+        for key in ("positionId", "position_id", "positionID", "PositionId", "PositionID"):
+            if key in flat:
+                return (flat[key], "positionId")
+        nested = flat.get("position")
+        if not isinstance(nested, dict):
+            nested = row.get("position")
+        if isinstance(nested, dict):
+            for key in ("positionId", "position_id", "positionID", "PositionId", "PositionID", "id"):
+                if key in nested:
+                    return (nested[key], "positionId")
+        if "id" in flat:
+            return (flat["id"], "id")
+        return (None, "positionId")
+    # Status — nested status { keyValue, ... } (e.g. master ref from API)
+    if keys and "status" in keys:
+        nested = flat.get("status")
+        if not isinstance(nested, dict):
+            nested = flat.get("positionStatus") or flat.get("position_status")
+        if isinstance(nested, dict):
+            kv = nested.get("keyValue") or nested.get("key_value")
+            if kv is not None:
+                return (kv, "status")
+        for key in keys:
+            if key not in flat:
+                continue
+            v = flat[key]
+            if isinstance(v, dict):
+                continue
+            if v is not None and str(v).strip():
+                return (v, key)
+        return (None, "status")
     for key in keys:
         if key in flat:
             return (flat[key], key)
@@ -73,6 +114,13 @@ def _value_for_column(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, 
 def _format_cell(value: Any, key: str = "", key_candidates: tuple[str, ...] = ()) -> str:
     if is_blank_display_value(value):
         return ""
+    # is_datetime_field() treats keys containing substring "on" as dates — "positionId" matches → wrong display.
+    if key == "positionId":
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, default=str)
+        return str(value)
     if is_datetime_field(key, key_candidates):
         return format_datetime_display(value)
     if isinstance(value, bool):
@@ -346,10 +394,16 @@ class PositionListPage(QWidget):
         return _from_viewport(vp.mapFrom(self.table, pos))
 
     def _get_position_id(self, pos: dict[str, Any]) -> int | str | None:
-        for k in ("positionId", "position_id", "id"):
-            v = pos.get(k)
-            if v is not None:
-                return v
+        for k in ("positionId", "position_id", "positionID", "PositionId", "PositionID"):
+            if k in pos:
+                return pos.get(k)
+        nested = pos.get("position")
+        if isinstance(nested, dict):
+            for k in ("positionId", "position_id", "positionID", "PositionId", "PositionID", "id"):
+                if k in nested:
+                    return nested.get(k)
+        if "id" in pos:
+            return pos.get("id")
         return None
 
     def _has_data_row_selection(self) -> bool:

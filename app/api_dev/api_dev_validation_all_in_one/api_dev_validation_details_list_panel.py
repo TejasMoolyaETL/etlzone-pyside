@@ -1,4 +1,4 @@
-"""Replica of API Details list for API: All in One only (no import from ``api_details`` package)."""
+"""Replica of API Details list for API: All in One (no import from ``api_details`` package)."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_mess
 from ui.blank_display import is_blank_display_value
 from ui.data_table import (
     MIN_DATA_COL_WIDTH_PX,
+    apply_column_width_overrides,
     apply_data_table_appearance,
     attach_table_copy_shortcut,
     clear_filter_row_widgets,
@@ -46,10 +47,12 @@ from ui.form_page_styles import (
 )
 from ui.styles import CONTEXT_MENU_STYLESHEET
 
+_API_DETAILS_REQUEST_RESPONSE_COL_WIDTH_PX = 300
+
 _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "jwt"})
 
 _API_DETAIL_COLUMN_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("API Id (Internal)", ("apiId", "api_id", "id")),
+    ("API Id", ("apiId", "api_id", "id")),
     ("Project Id", ("projectId", "projectid", "project_id")),
     ("Project Name", ("projectName", "project_name", "name")),
     ("API Folder", ("folder", "Folder")),
@@ -300,6 +303,14 @@ class APIDetailsListPanel(QWidget):
             _value_for_column,
             _format_cell,
         )
+        apply_column_width_overrides(
+            self.table,
+            self._column_spec,
+            {
+                "Request": _API_DETAILS_REQUEST_RESPONSE_COL_WIDTH_PX,
+                "Response": _API_DETAILS_REQUEST_RESPONSE_COL_WIDTH_PX,
+            },
+        )
         self.table.setSortingEnabled(not self._filter_visible)
 
     def _apply_column_filters_refresh(self) -> None:
@@ -324,6 +335,15 @@ class APIDetailsListPanel(QWidget):
                 traceback.print_exc()
         elif not self._source_rows:
             self._show_empty_table()
+
+    def set_column_filters_visible(self, visible: bool) -> None:
+        """Show or hide the per-column filter row (used when toolbar is hidden, e.g. API: All in One)."""
+        if self._filter_visible == bool(visible):
+            return
+        self._on_filter_toggle(bool(visible))
+
+    def column_filters_visible(self) -> bool:
+        return self._filter_visible
 
     def _show_empty_table(self) -> None:
         self._source_rows = []
@@ -459,6 +479,27 @@ class APIDetailsListPanel(QWidget):
             return None
         data = item.data(Qt.ItemDataRole.UserRole)
         return data if isinstance(data, dict) else None
+
+    def get_selected_detail_row(self) -> dict[str, Any] | None:
+        """First selected API detail row (for All in One)."""
+        return self._selected_row()
+
+    def get_selected_detail_rows(self) -> list[dict[str, Any]]:
+        """All uniquely selected data rows (for All in One validation filtering)."""
+        seen: set[int] = set()
+        out: list[dict[str, Any]] = []
+        for it in self.table.selectedItems():
+            r = it.row()
+            if not self._is_data_table_row(r) or r in seen:
+                continue
+            seen.add(r)
+            row0 = self.table.item(r, 0)
+            if row0 is None:
+                continue
+            data = row0.data(Qt.ItemDataRole.UserRole)
+            if isinstance(data, dict):
+                out.append(data)
+        return out
 
     def _on_table_context_menu(self, pos: QPoint) -> None:
         clicked_item = self.table.itemAt(pos)

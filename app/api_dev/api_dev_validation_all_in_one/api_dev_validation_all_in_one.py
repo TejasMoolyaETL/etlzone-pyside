@@ -1,7 +1,7 @@
 """API: All in One — details + validations tables with one shared toolbar.
 
-Uses replicated list panels in this package only (no imports from ``api_details`` /
-``api_validations`` list modules).
+Uses replicated list panels in ``api_dev_validation_all_in_one`` only (no imports from
+``api_details`` / ``api_validations`` list modules).
 """
 
 from __future__ import annotations
@@ -13,9 +13,15 @@ from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSplitter, QVBoxLayout, QWidget
 
-from app.api_dev.api_dev_all_in_one.details_list_panel import APIDetailsListPanel
-from app.api_dev.api_dev_all_in_one.validation_comment_panel import ValidationCommentPanel
-from app.api_dev.api_dev_all_in_one.validations_list_panel import APIValidationsListPanel
+from app.api_dev.api_dev_validation_all_in_one.api_dev_validation_details_list_panel import (
+    APIDetailsListPanel,
+)
+from app.api_dev.api_dev_validation_all_in_one.api_dev_validation_comment_panel import (
+    ValidationCommentPanel,
+)
+from app.api_dev.api_dev_validation_all_in_one.api_dev_validation_list_panel import (
+    APIValidationsListPanel,
+)
 from core.api import api_get_all_api_details_all_in_one
 from core.nav_access import nav_action_visible_from_steps
 from core.user_context import get_nav_access_steps, get_user_profile
@@ -96,6 +102,7 @@ class ApiDevAllInOnePage(QWidget):
         self._pending_refresh = False
         self._lower_split_applied = False
         self._can_display_all_in_one = True
+        self._all_validations_rows: list[dict[str, Any]] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -115,6 +122,12 @@ class ApiDevAllInOnePage(QWidget):
         self._refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._refresh_btn.clicked.connect(self.refresh)
         header_layout.addWidget(self._refresh_btn)
+        self._filter_btn = QPushButton("Filters")
+        self._filter_btn.setCheckable(True)
+        self._filter_btn.setFixedWidth(100)
+        self._filter_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._filter_btn.toggled.connect(self._on_top_filters_toggled)
+        header_layout.addWidget(self._filter_btn)
         layout.addWidget(header)
 
         self._lower_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -148,6 +161,11 @@ class ApiDevAllInOnePage(QWidget):
         main_splitter.setStretchFactor(1, 1)
         layout.addWidget(main_splitter)
 
+        self._details_page.table.itemSelectionChanged.connect(self._on_detail_selection_changed)
+
+    def _on_top_filters_toggled(self, checked: bool) -> None:
+        self._details_page.set_column_filters_visible(checked)
+
     def _apply_lower_splitter_50_50(self) -> None:
         w = self._lower_splitter.width()
         if w < 40:
@@ -170,6 +188,11 @@ class ApiDevAllInOnePage(QWidget):
     def _refresh_combined(self) -> None:
         self._refresh_display_access()
         if not self._can_display_all_in_one:
+            self._all_validations_rows = []
+            self._details_page.set_column_filters_visible(False)
+            self._filter_btn.blockSignals(True)
+            self._filter_btn.setChecked(False)
+            self._filter_btn.blockSignals(False)
             self._details_page.reset_after_parent_load_failure("Require Permission.")
             self._validations_page.apply_rows_from_parent_load([])
             return
@@ -196,6 +219,7 @@ class ApiDevAllInOnePage(QWidget):
         self._loading = False
         try:
             if not success:
+                self._all_validations_rows = []
                 self._details_page.reset_after_parent_load_failure(
                     message or "Failed to load data."
                 )
@@ -206,11 +230,11 @@ class ApiDevAllInOnePage(QWidget):
                 self._details_page.apply_rows_from_parent_load(
                     [r for r in d_rows if isinstance(r, dict)]
                 )
-                self._validations_page.apply_rows_from_parent_load(
-                    [r for r in v_rows if isinstance(r, dict)]
-                )
+                self._all_validations_rows = [r for r in v_rows if isinstance(r, dict)]
+                self._apply_validations_for_selected_detail()
         except Exception:
             traceback.print_exc()
+            self._all_validations_rows = []
             self._details_page.reset_after_parent_load_failure("Failed to display data.")
             self._validations_page.apply_rows_from_parent_load([])
         finally:
@@ -250,6 +274,33 @@ class ApiDevAllInOnePage(QWidget):
     def refresh_validations(self) -> None:
         self._refresh_combined()
 
+    def _on_detail_selection_changed(self) -> None:
+        self._apply_validations_for_selected_detail()
+
+    def _apply_validations_for_selected_detail(self) -> None:
+        """Show validations for selected API detail row(s); if none selected, show full list."""
+        if not self._all_validations_rows:
+            self._validations_page.apply_rows_from_parent_load([])
+            return
+        selected = self._details_page.get_selected_detail_rows()
+        if not selected:
+            self._validations_page.apply_rows_from_parent_load(list(self._all_validations_rows))
+            return
+        api_ids: set[str] = set()
+        for rec in selected:
+            aid = rec.get("apiId") or rec.get("api_id") or rec.get("id")
+            if aid is not None and str(aid).strip() != "":
+                api_ids.add(str(aid).strip())
+        if not api_ids:
+            self._validations_page.apply_rows_from_parent_load(list(self._all_validations_rows))
+            return
+        filtered: list[dict[str, Any]] = []
+        for v in self._all_validations_rows:
+            vid = v.get("apiId") or v.get("api_id")
+            if vid is not None and str(vid).strip() in api_ids:
+                filtered.append(v)
+        self._validations_page.apply_rows_from_parent_load(filtered)
+
     def _refresh_display_access(self) -> None:
         steps = get_nav_access_steps()
         if steps is None:
@@ -262,3 +313,12 @@ class ApiDevAllInOnePage(QWidget):
         self._refresh_btn.setToolTip(
             "" if self._can_display_all_in_one else "Require Permission."
         )
+        self._filter_btn.setEnabled(self._can_display_all_in_one)
+        self._filter_btn.setToolTip(
+            "" if self._can_display_all_in_one else "Require Permission."
+        )
+        if not self._can_display_all_in_one and self._filter_btn.isChecked():
+            self._filter_btn.blockSignals(True)
+            self._filter_btn.setChecked(False)
+            self._filter_btn.blockSignals(False)
+            self._details_page.set_column_filters_visible(False)

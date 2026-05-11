@@ -6,7 +6,9 @@ import json
 from typing import Any, Callable
 
 from PySide6.QtCore import QStringListModel, Qt
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
+    QComboBox,
     QCompleter,
     QFrame,
     QGridLayout,
@@ -27,11 +29,19 @@ from app.org_management.bu.bu_utils import (
     get_bu_name,
     get_organization_name_from_bu,
 )
-from core.api import api_get_all_bu, api_get_all_depts, api_update_dept
+from core.api import (
+    api_get_all_bu,
+    api_get_all_depts,
+    api_get_master_key_by_app_id_field_name,
+    api_update_dept,
+    master_key_row_display_label,
+    master_key_row_seq_value,
+)
 from core.app_preferences import format_datetime_display, is_datetime_field
 from ui.blank_display import is_blank_display_value
 from core.user_context import get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
+from ui.form_combobox_style import FORM_COMBOBOX_STYLE, apply_form_combobox_field
 from ui.form_page_styles import (
     FORM_ERROR_LABEL_STYLE,
     FORM_INPUT_STYLE as INPUT_STYLE,
@@ -44,6 +54,7 @@ from ui.form_page_styles import (
     FORM_PRIMARY_BUTTON_STYLESHEET,
     FORM_READONLY_INPUT_STYLE as READONLY_INPUT_STYLE,
     FORM_SECONDARY_BUTTON_STYLESHEET,
+    placeholder_enter,
     placeholder_search_select,
 )
 from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
@@ -51,6 +62,50 @@ from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
 _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "jwt"})
+
+_DEPT_STATUS_FIELD_NAME = "dept_status"
+
+
+def _coerce_master_seq_to_int(seq_val: Any) -> int:
+    """Send master-key seq as integer in JSON payload (same as Create Org)."""
+    if isinstance(seq_val, bool):
+        return int(seq_val)
+    if isinstance(seq_val, int):
+        return seq_val
+    if isinstance(seq_val, float) and seq_val == int(seq_val):
+        return int(seq_val)
+    s = str(seq_val).strip()
+    if s.isdigit():
+        return int(s)
+    raise ValueError(f"Not a whole number: {seq_val!r}")
+
+
+def _dept_status_nested(dept: dict[str, Any]) -> dict[str, Any] | None:
+    flat = {k: v for k, v in dept.items() if k not in _HIDDEN_KEYS}
+    nested = flat.get("status") or flat.get("deptStatus") or flat.get("dept_status")
+    return nested if isinstance(nested, dict) else None
+
+
+def _dept_status_seq(dept: dict[str, Any]) -> Any | None:
+    nested = _dept_status_nested(dept)
+    if nested is not None:
+        return master_key_row_seq_value(nested)
+    flat = {k: v for k, v in dept.items() if k not in _HIDDEN_KEYS}
+    for k in ("status", "statusSeq", "status_seq"):
+        v = flat.get(k)
+        if v is not None and not isinstance(v, dict) and str(v).strip() != "":
+            return v
+    return None
+
+
+def _combo_status_key_value(combo: QComboBox) -> str:
+    """Key value portion of master-key label (e.g. ``1 | ACTIVE`` → ``ACTIVE``)."""
+    if combo.currentIndex() <= 0 or combo.itemData(combo.currentIndex()) is None:
+        return ""
+    t = combo.currentText().strip()
+    if " | " in t:
+        return t.split(" | ", 1)[-1].strip().upper()
+    return t.upper()
 
 
 def _dept_row_id(row: dict[str, Any]) -> Any:
@@ -138,6 +193,21 @@ def _get_value(dept: dict[str, Any], keys: tuple[str, ...]) -> Any:
     if canonical == "parentDeptSearch":
         return _parent_dept_search_display_from_dept(dept)
 
+    if keys and "status" in keys:
+        flat = {k: v for k, v in dept.items() if k not in _HIDDEN_KEYS}
+        nested = flat.get("status") or flat.get("deptStatus") or flat.get("dept_status")
+        if isinstance(nested, dict):
+            if nested.get("keyValue") is not None:
+                return nested.get("keyValue")
+            if nested.get("key_value") is not None:
+                return nested.get("key_value")
+        for key in ("status", "statusSeq", "status_seq"):
+            if key in flat:
+                v = flat[key]
+                if not isinstance(v, dict) and v is not None:
+                    return v
+        return None
+
     if keys and keys[0] in ("deptId", "dept_id", "departmentId", "id"):
         flat = {k: v for k, v in dept.items() if k not in _HIDDEN_KEYS}
         for key in keys:
@@ -187,6 +257,7 @@ _DEPT_COL1 = (
     ("BU*", ("buSearch",)),
     ("Parent Dept Id", ("parentDeptId", "parent_dept_id", "parentDepartmentId", "parent_department_id")),
     ("Parent Dept Name", ("parentDeptSearch",)),
+    ("Status", ("status",)),
 )
 _DEPT_COL2 = (
     ("Created By", ("createdBy", "created_by")),
@@ -217,7 +288,7 @@ class ViewDeptPage(QWidget):
         self.on_back = on_back
         self.on_update_success = on_update_success
         self._dept: dict[str, Any] = {}
-        self._field_edits: dict[str, QLineEdit] = {}
+        self._field_edits: dict[str, QLineEdit | QComboBox] = {}
         self._editable_keys: list[str] = []
         self._all_bus: list[dict[str, Any]] = []
         self._all_depts: list[dict[str, Any]] = []
@@ -277,12 +348,22 @@ class ViewDeptPage(QWidget):
 
             label_widget = field_caption_label(label_text, LABEL_STYLE)
 
-            value_edit = QLineEdit()
-            value_edit.setFixedHeight(FORM_SINGLELINE_FIELD_HEIGHT_PX)
-            value_edit.setMinimumWidth(240)
-            value_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            value_edit.setReadOnly(canonical in _READONLY_KEYS)
-            value_edit.setStyleSheet(READONLY_INPUT_STYLE if canonical in _READONLY_KEYS else INPUT_STYLE)
+            if canonical == "status":
+                value_edit = QComboBox()
+                apply_form_combobox_field(
+                    value_edit, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX, min_width=240
+                )
+                if canonical in _READONLY_KEYS:
+                    value_edit.setEnabled(False)
+                else:
+                    value_edit.setEnabled(True)
+            else:
+                value_edit = QLineEdit()
+                value_edit.setFixedHeight(FORM_SINGLELINE_FIELD_HEIGHT_PX)
+                value_edit.setMinimumWidth(240)
+                value_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                value_edit.setReadOnly(canonical in _READONLY_KEYS)
+                value_edit.setStyleSheet(READONLY_INPUT_STYLE if canonical in _READONLY_KEYS else INPUT_STYLE)
             if canonical == "buSearch":
                 value_edit.setPlaceholderText(placeholder_search_select("BU Id", "BU Name", "Org Name"))
                 value_edit.textChanged.connect(self._on_bu_search_changed)
@@ -301,7 +382,9 @@ class ViewDeptPage(QWidget):
                 completer.setFilterMode(Qt.MatchFlag.MatchContains)
                 completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
                 value_edit.setCompleter(completer)
-            else:
+            elif canonical == "deptName":
+                value_edit.setPlaceholderText(placeholder_enter("department name"))
+            elif canonical != "status":
                 value_edit.setText("")
 
             self._field_edits[canonical] = value_edit
@@ -387,10 +470,92 @@ class ViewDeptPage(QWidget):
 
         self._switch_to_view_mode()
 
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if self.is_edit_mode():
+            return
+        combo = self._field_edits.get("status")
+        if isinstance(combo, QComboBox):
+            self._populate_master_key_seq_combo(combo, _DEPT_STATUS_FIELD_NAME, "Select status…")
+            self._sync_status_combo_from_dept()
+
+    def _token(self) -> str | None:
+        profile = get_user_profile()
+        token = (
+            profile.get("token")
+            or profile.get("accessToken")
+            or profile.get("access_token")
+            or profile.get("jwt")
+        )
+        return str(token) if token else None
+
+    def _populate_master_key_seq_combo(
+        self,
+        combo: QComboBox | None,
+        field_name: str,
+        placeholder: str,
+    ) -> None:
+        if combo is None:
+            return
+        result = api_get_master_key_by_app_id_field_name(
+            field_name=field_name,
+            token=self._token(),
+        )
+        rows = result.get("data") if result.get("success") else []
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(placeholder, None)
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                seq_val = master_key_row_seq_value(row)
+                if seq_val is None:
+                    continue
+                label = master_key_row_display_label(row).strip()
+                if not label:
+                    continue
+                combo.addItem(label, seq_val)
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def _sync_status_combo_from_dept(self) -> None:
+        combo = self._field_edits.get("status")
+        if not isinstance(combo, QComboBox) or combo.count() == 0:
+            return
+        seq = _dept_status_seq(self._dept)
+        if seq is not None:
+            for i in range(combo.count()):
+                data = combo.itemData(i)
+                if data is None:
+                    continue
+                try:
+                    if int(data) == int(seq):  # type: ignore[arg-type]
+                        combo.setCurrentIndex(i)
+                        return
+                except (TypeError, ValueError):
+                    if str(data).strip() == str(seq).strip():
+                        combo.setCurrentIndex(i)
+                        return
+        kv = _get_value(self._dept, ("status",))
+        if kv is not None and str(kv).strip():
+            kv_up = str(kv).strip().upper()
+            for i in range(combo.count()):
+                if combo.itemData(i) is None:
+                    continue
+                label_up = combo.itemText(i).strip().upper()
+                if kv_up == label_up or kv_up in label_up or label_up.endswith(kv_up) or f"| {kv_up}" in label_up:
+                    combo.setCurrentIndex(i)
+                    return
+        combo.setCurrentIndex(0)
+
     def set_dept(self, dept: dict[str, Any] | None, *, edit_mode: bool = False) -> None:
         self._dept = dict(dept) if dept else {}
         self._load_bu_options()
         self._load_parent_dept_options()
+        combo = self._field_edits.get("status")
+        if isinstance(combo, QComboBox):
+            self._populate_master_key_seq_combo(combo, _DEPT_STATUS_FIELD_NAME, "Select status…")
         self._refresh_values()
         if edit_mode and self._dept:
             self._handle_edit()
@@ -400,8 +565,9 @@ class ViewDeptPage(QWidget):
     def _refresh_values(self) -> None:
         for _label_text, keys in _DEPT_FIELD_GROUPS:
             canonical = keys[0]
+            if canonical == "status":
+                continue
             value = _get_value(self._dept, keys)
-            key_used = keys[0]
             text = _format_value(value, keys[0], keys)
             edit = self._field_edits.get(canonical)
             if edit:
@@ -409,8 +575,9 @@ class ViewDeptPage(QWidget):
                     self._set_bu_search_from_value()
                 elif canonical == "parentDeptSearch":
                     self._set_parent_dept_search_from_value()
-                else:
+                elif isinstance(edit, QLineEdit):
                     edit.setText(text)
+        self._sync_status_combo_from_dept()
 
     def _load_bu_options(self) -> None:
         bu_edit = self._field_edits.get("buSearch")
@@ -630,6 +797,8 @@ class ViewDeptPage(QWidget):
         for key in keys:
             edit = self._field_edits.get(key)
             if edit:
+                if isinstance(edit, QComboBox):
+                    return edit.currentText().strip()
                 return edit.text().strip()
         return ""
 
@@ -638,8 +807,12 @@ class ViewDeptPage(QWidget):
         for key in self._editable_keys:
             edit = self._field_edits.get(key)
             if edit:
-                edit.setReadOnly(False)
-                edit.setStyleSheet(INPUT_STYLE)
+                if isinstance(edit, QComboBox):
+                    edit.setEnabled(True)
+                    edit.setStyleSheet(FORM_COMBOBOX_STYLE)
+                else:
+                    edit.setReadOnly(False)
+                    edit.setStyleSheet(INPUT_STYLE)
         self._btn_stack.setCurrentIndex(1)
 
     def _handle_cancel(self) -> None:
@@ -683,6 +856,25 @@ class ViewDeptPage(QWidget):
                 if ("" if orig is None else str(orig)) != ("" if cur is None else str(cur)):
                     return True
                 continue
+            if canonical == "status":
+                combo = self._field_edits.get("status")
+                if not isinstance(combo, QComboBox):
+                    continue
+                orig_seq = _dept_status_seq(self._dept)
+                cur_data = combo.currentData()
+                if orig_seq is not None and cur_data is not None:
+                    try:
+                        if int(orig_seq) != int(cur_data):  # type: ignore[arg-type]
+                            return True
+                    except (TypeError, ValueError):
+                        if str(orig_seq).strip() != str(cur_data).strip():
+                            return True
+                    continue
+                orig_kv = str(_get_value(self._dept, ("status",)) or "").strip().upper()
+                cur_kv = _combo_status_key_value(combo)
+                if orig_kv != cur_kv:
+                    return True
+                continue
             orig_str = self._original_display_for_editable(canonical, keys)
             current = self._get_edit_value(canonical)
             if orig_str != (current or "").strip():
@@ -721,6 +913,21 @@ class ViewDeptPage(QWidget):
             return
         parent_dept_id = self._resolve_parent_dept_id_from_ui()
 
+        status_combo = self._field_edits.get("status")
+        if isinstance(status_combo, QComboBox):
+            if status_combo.currentIndex() <= 0 or status_combo.currentData() is None:
+                self._show_error("Status is required.")
+                status_combo.setFocus()
+                return
+            try:
+                status = _coerce_master_seq_to_int(status_combo.currentData())
+            except ValueError:
+                self._show_error("Status must be a valid selection.")
+                status_combo.setFocus()
+                return
+        else:
+            status = self._get_edit_value("status") or "ACTIVE"
+
         dept_id = _get_dept_id(self._dept)
         if dept_id is None:
             self._show_error("Department Id is missing.")
@@ -740,6 +947,7 @@ class ViewDeptPage(QWidget):
             bu_id=bu_id,
             dept_name=dept_name,
             parent_dept_id=parent_dept_id,
+            status=status,
             token=token,
         )
 
@@ -773,6 +981,23 @@ class ViewDeptPage(QWidget):
             self._dept.pop("parentDeptId", None)
             self._dept.pop("parentDepartment", None)
 
+        kv = (
+            _combo_status_key_value(status_combo)
+            if isinstance(status_combo, QComboBox)
+            else str(status).strip().upper()
+        )
+        nested_st = _dept_status_nested(self._dept)
+        if isinstance(nested_st, dict) and isinstance(status_combo, QComboBox):
+            nested_st = dict(nested_st)
+            nested_st["seq"] = status
+            if kv:
+                nested_st["keyValue"] = kv
+            self._dept["status"] = nested_st
+        elif isinstance(status_combo, QComboBox) and kv:
+            self._dept["status"] = {"keyValue": kv, "seq": status}
+        else:
+            self._dept["status"] = kv or str(status)
+
         self._show_success(result.get("message", "Department updated successfully."))
 
         schedule_after_success(
@@ -786,8 +1011,12 @@ class ViewDeptPage(QWidget):
         for key in self._editable_keys:
             edit = self._field_edits.get(key)
             if edit:
-                edit.setReadOnly(True)
-                edit.setStyleSheet(READONLY_INPUT_STYLE)
+                if isinstance(edit, QComboBox):
+                    edit.setEnabled(False)
+                    edit.setStyleSheet(FORM_COMBOBOX_STYLE)
+                else:
+                    edit.setReadOnly(True)
+                    edit.setStyleSheet(READONLY_INPUT_STYLE)
         self._btn_stack.setCurrentIndex(0)
 
     def is_edit_mode(self) -> bool:

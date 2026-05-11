@@ -40,7 +40,7 @@ def get_organization_id_from_bu(bu: dict[str, Any]) -> Any:
     - orgId on BU root (scalar, not a nested object)
     - organization: { orgId | org_id | id, ... }
     """
-    for k in ("organizationId", "organization_id"):
+    for k in ("organizationId", "organization_id", "orgID"):
         v = bu.get(k)
         if v is not None:
             return v
@@ -49,7 +49,7 @@ def get_organization_id_from_bu(bu: dict[str, Any]) -> Any:
         return oid
     org = bu.get("organization")
     if isinstance(org, dict):
-        for k in ("orgId", "org_id", "id"):
+        for k in ("orgID", "orgId", "org_id", "id"):
             v = org.get(k)
             if v is not None:
                 return v

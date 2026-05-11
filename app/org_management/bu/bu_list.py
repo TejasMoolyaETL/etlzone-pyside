@@ -22,9 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.org_management.bu.bu_utils import (
-    get_organization_id_from_bu,
     get_organization_name_from_bu,
-    get_parent_bu_id_from_bu,
     get_parent_bu_name_from_bu,
 )
 from core.api import api_delete_bu, api_get_all_bu
@@ -56,10 +54,9 @@ _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "j
 _BU_COLUMN_SPEC = (
     ("BU Id", ("buId", "bu_id", "id")),
     ("BU Name", ("buName", "bu_name")),
-    ("Organization Id", ("organizationId", "organization_id", "orgId")),
     ("Organization Name", ("organizationName", "organization_name", "orgName", "org_name")),
-    ("Parent BU Id", ("parentBu", "parent_bu", "parentBuId", "parent_bu_id")),
     ("Parent BU Name", ("parentBuName", "parent_bu_name", "parentName", "parent_name")),
+    ("Status", ("status",)),
     ("Created By", ("createdBy", "created_by")),
     ("Created On", ("createdOn", "created_on", "createdAt", "created_at")),
     ("Modified By", ("modifiedBy", "modified_by")),
@@ -73,21 +70,6 @@ def _flatten_bu(row: dict[str, Any]) -> dict[str, Any]:
 
 def _value_for_column(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, str]:
     flat = _flatten_bu(row)
-
-    # Organization Id — flat scalars first, then nested organization / orgId root
-    if keys and keys[0] in ("organizationId", "organization_id", "orgId"):
-        for key in keys:
-            if key not in flat:
-                continue
-            v = flat[key]
-            if isinstance(v, dict):
-                continue
-            if v is not None:
-                return (v, "organizationId" if key != "orgId" else key)
-        oid = get_organization_id_from_bu(row)
-        if oid is not None:
-            return (oid, "organizationId")
-        return (None, "organizationId")
 
     # Organization Name — resolve from flat or nested organization object
     if keys and keys[0] in ("organizationName", "organization_name", "orgName", "org_name"):
@@ -103,21 +85,6 @@ def _value_for_column(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, 
             return (oname, "organizationName")
         return (None, "organizationName")
 
-    # Parent BU — never show raw nested object as JSON; always resolve to id
-    if keys and keys[0] in ("parentBu", "parent_bu", "parentBuId", "parent_bu_id"):
-        for key in keys:
-            if key not in flat:
-                continue
-            v = flat[key]
-            if isinstance(v, dict):
-                break
-            if v is not None:
-                return (v, "parentBu")
-        pid = get_parent_bu_id_from_bu(row)
-        if pid is not None:
-            return (pid, "parentBu")
-        return (None, "parentBu")
-
     # Parent BU Name — resolve from flat or nested parent object
     if keys and keys[0] in ("parentBuName", "parent_bu_name", "parentName", "parent_name"):
         for key in keys:
@@ -131,6 +98,23 @@ def _value_for_column(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, 
         if pname:
             return (pname, "parentBuName")
         return (None, "parentBuName")
+
+    # Status — nested status { keyValue, ... } (e.g. master ref from API)
+    if keys and "status" in keys:
+        nested = flat.get("status")
+        if isinstance(nested, dict):
+            kv = nested.get("keyValue") or nested.get("key_value")
+            if kv is not None:
+                return (kv, "status")
+        for key in keys:
+            if key not in flat:
+                continue
+            v = flat[key]
+            if isinstance(v, dict):
+                continue
+            if v is not None and str(v).strip():
+                return (v, key)
+        return (None, "status")
 
     for key in keys:
         if key in flat:

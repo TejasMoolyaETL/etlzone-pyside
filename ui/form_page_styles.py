@@ -169,17 +169,27 @@ _MDL_BTN_FS = LIST_PAGE_HEADER_BUTTON_FONT_PX
 _MDL_BTN_PV = LIST_PAGE_HEADER_BUTTON_PADDING_V_PX
 _MDL_BTN_PH = LIST_PAGE_HEADER_BUTTON_PADDING_H_PX
 
+_MODAL_PRIMARY_DISABLED = (
+    f"QPushButton:disabled {{ background: {Theme.BG_PAGE_ALT}; color: {Theme.TEXT_SECONDARY}; "
+    f"border: 1px solid {Theme.BORDER_DEFAULT}; }}"
+)
 MODAL_DIALOG_PRIMARY_BUTTON_STYLESHEET = (
     f"QPushButton {{ background: #0f172a; color: white; border: none; "
     f"border-radius: 6px; padding: {_MDL_BTN_PV}px {_MDL_BTN_PH}px; font-size: {_MDL_BTN_FS}px; font-weight: 500; }}"
-    "QPushButton:hover { background: #1e293b; }"
-    "QPushButton:pressed { background: #020617; }"
+    "QPushButton:hover:!disabled { background: #1e293b; }"
+    "QPushButton:pressed:!disabled { background: #020617; }"
+    + _MODAL_PRIMARY_DISABLED
+)
+_MODAL_SECONDARY_DISABLED = (
+    f"QPushButton:disabled {{ background: {Theme.BG_WHITE}; color: #cbd5e1; "
+    f"border: 1px solid {Theme.BORDER_DEFAULT}; }}"
 )
 MODAL_DIALOG_SECONDARY_BUTTON_STYLESHEET = (
     f"QPushButton {{ background: #f1f5f9; color: #0f172a; border: 1px solid #e2e8f0; "
     f"border-radius: 6px; padding: {_MDL_BTN_PV}px {_MDL_BTN_PH}px; font-size: {_MDL_BTN_FS}px; font-weight: 500; }}"
-    "QPushButton:hover { background: #e2e8f0; }"
-    "QPushButton:pressed { background: #cbd5e1; }"
+    "QPushButton:hover:!disabled { background: #e2e8f0; }"
+    "QPushButton:pressed:!disabled { background: #cbd5e1; }"
+    + _MODAL_SECONDARY_DISABLED
 )
 
 # Create / View / Edit footers — same typography as Dashboard Sign Out / modal actions.
@@ -192,11 +202,15 @@ DIALOG_BUTTON_BOX_STYLESHEET = (
     f"QDialogButtonBox QPushButton {{ "
     f"border-radius: 6px; padding: {_MDL_BTN_PV}px {_MDL_BTN_PH}px; font-size: {_MDL_BTN_FS}px; font-weight: 500; }}"
     f"QDialogButtonBox QPushButton:default {{ background: #0f172a; color: white; border: none; }}"
-    "QDialogButtonBox QPushButton:default:hover { background: #1e293b; }"
-    "QDialogButtonBox QPushButton:default:pressed { background: #020617; }"
+    "QDialogButtonBox QPushButton:default:hover:!disabled { background: #1e293b; }"
+    "QDialogButtonBox QPushButton:default:pressed:!disabled { background: #020617; }"
+    f"QDialogButtonBox QPushButton:default:disabled {{ background: {Theme.BG_PAGE_ALT}; color: {Theme.TEXT_SECONDARY}; "
+    f"border: 1px solid {Theme.BORDER_DEFAULT}; }}"
     f"QDialogButtonBox QPushButton:!default {{ background: #f1f5f9; color: #0f172a; border: 1px solid #e2e8f0; }}"
-    "QDialogButtonBox QPushButton:!default:hover { background: #e2e8f0; }"
-    "QDialogButtonBox QPushButton:!default:pressed { background: #cbd5e1; }"
+    "QDialogButtonBox QPushButton:!default:hover:!disabled { background: #e2e8f0; }"
+    "QDialogButtonBox QPushButton:!default:pressed:!disabled { background: #cbd5e1; }"
+    f"QDialogButtonBox QPushButton:!default:disabled {{ background: {Theme.BG_WHITE}; color: #cbd5e1; "
+    f"border: 1px solid {Theme.BORDER_DEFAULT}; }}"
 )
 
 
@@ -214,8 +228,9 @@ def themed_modal_primary_button_stylesheet(
     return (
         f"QPushButton {{ background: {background}; color: {color}; border: none; "
         f"border-radius: 6px; padding: {pv}px {ph}px; font-size: {b}px; font-weight: 500; }}"
-        f"QPushButton:hover {{ background: {hover}; }}"
-        f"QPushButton:pressed {{ background: {pressed}; }}"
+        f"QPushButton:hover:!disabled {{ background: {hover}; }}"
+        f"QPushButton:pressed:!disabled {{ background: {pressed}; }}"
+        + _MODAL_PRIMARY_DISABLED
     )
 
 
@@ -249,6 +264,7 @@ def themed_list_page_header_stylesheet(
         if button_padding_h_px is None
         else button_padding_h_px
     )
+    th = Theme
     return (
         f"QWidget {{ background: {widget_bg}; }} "
         f"QLabel {{ color: {label_color}; font-size: {t}px; font-weight: 600; }} "
@@ -256,8 +272,9 @@ def themed_list_page_header_stylesheet(
         f"  background: {button_bg}; color: {button_color}; border: none; border-radius: 6px; "
         f"  padding: {pv}px {ph}px; font-size: {b}px; font-weight: 500; "
         f"}} "
-        f"QPushButton:hover {{ background: {button_hover}; }} "
-        f"QPushButton:pressed {{ background: {button_pressed}; }} "
+        f"QPushButton:hover:!disabled {{ background: {button_hover}; }} "
+        f"QPushButton:pressed:!disabled {{ background: {button_pressed}; }} "
+        f"QPushButton:disabled {{ background: #1e293b; color: {th.TEXT_SECONDARY}; }} "
     )
 
 
@@ -272,8 +289,9 @@ def list_page_header_push_button_stylesheet() -> str:
         f"background: {t.HEADER_ACCENT}; color: {t.PANEL_TEXT_BRIGHT}; border: none; border-radius: 6px; "
         f"padding: {pv}px {ph}px; font-size: {b}px; font-weight: 500; "
         f"}} "
-        f"QPushButton:hover {{ background: {t.HEADER_ACCENT_HOVER}; }} "
-        f"QPushButton:pressed {{ background: {t.HEADER_ACCENT_PRESSED}; }} "
+        f"QPushButton:hover:!disabled {{ background: {t.HEADER_ACCENT_HOVER}; }} "
+        f"QPushButton:pressed:!disabled {{ background: {t.HEADER_ACCENT_PRESSED}; }} "
+        f"QPushButton:disabled {{ background: #1e293b; color: {t.TEXT_SECONDARY}; }} "
     )
 
 

@@ -37,13 +37,19 @@ class AppUpdatesWebSocketClient(QObject):
         self._reconnect_timer.setSingleShot(True)
         self._reconnect_timer.timeout.connect(self._open_socket)
         self._handshake_hint_printed = False
+        self._give_up_reconnect = False
+        self._fatal_handshake_logged = False
 
     def start(self) -> None:
         self._want_running = True
+        self._give_up_reconnect = False
+        self._fatal_handshake_logged = False
         self._open_socket()
 
     def stop(self) -> None:
         self._want_running = False
+        self._give_up_reconnect = False
+        self._fatal_handshake_logged = False
         self._reconnect_timer.stop()
         self._ws.close()
 
@@ -60,9 +66,19 @@ class AppUpdatesWebSocketClient(QObject):
         )
         return str(tok).strip() if tok else None
 
+    @staticmethod
+    def _is_fatal_handshake_denial(error_string: str) -> bool:
+        e = error_string.lower()
+        return (
+            "403" in e
+            or "401" in e
+            or "forbidden" in e
+            or "unauthorized" in e
+        )
+
     @Slot()
     def _open_socket(self) -> None:
-        if not self._want_running:
+        if not self._want_running or self._give_up_reconnect:
             return
         if self._ws.state() == QAbstractSocket.SocketState.ConnectedState:
             return
@@ -84,7 +100,7 @@ class AppUpdatesWebSocketClient(QObject):
         self._ws.open(req)
 
     def _schedule_reconnect(self) -> None:
-        if not self._want_running:
+        if not self._want_running or self._give_up_reconnect:
             return
         if not self._reconnect_timer.isActive():
             self._reconnect_timer.start(self._reconnect_ms)
@@ -92,6 +108,7 @@ class AppUpdatesWebSocketClient(QObject):
     @Slot()
     def _on_connected(self) -> None:
         self._handshake_hint_printed = False
+        self._fatal_handshake_logged = False
         tmpl = app_updates_websocket_connect_message_template()
         if tmpl:
             token = self._token() or ""
@@ -116,13 +133,27 @@ class AppUpdatesWebSocketClient(QObject):
 
     @Slot()
     def _on_disconnected(self) -> None:
-        if self._want_running:
+        if self._want_running and not self._give_up_reconnect:
             self._schedule_reconnect()
 
     @Slot(QAbstractSocket.SocketError)
     def _on_socket_error(self, _: QAbstractSocket.SocketError) -> None:
         err = self._ws.errorString()
         url_s = app_updates_websocket_url()
+        if self._is_fatal_handshake_denial(err):
+            self._give_up_reconnect = True
+            self._reconnect_timer.stop()
+            if not self._fatal_handshake_logged:
+                self._fatal_handshake_logged = True
+                print(
+                    f"[AppUpdatesWS] handshake denied ({err.strip()}). URL: {url_s}. "
+                    "Reconnect disabled for this session. Fix server CORS/origin/auth, or set "
+                    "ETL_WS_AUTH_HEADER=0 / ETL_WS_ORIGIN / ETL_WS_PATH, or disable WS with "
+                    "ETL_WS_ENABLED=0.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            return
         print(f"[AppUpdatesWS] socket error: {err}", file=sys.stderr, flush=True)
         print(f"[AppUpdatesWS] attempted URL: {url_s}", file=sys.stderr, flush=True)
         if not self._handshake_hint_printed and (

@@ -6,6 +6,7 @@ import json
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -22,7 +23,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.api import api_update_position
+from core.api import (
+    api_get_master_key_by_app_id_field_name,
+    api_update_position,
+    master_key_row_display_label,
+    master_key_row_seq_value,
+)
 from core.app_preferences import format_datetime_display, is_datetime_field
 from ui.blank_display import is_blank_display_value
 from core.user_context import get_user_profile
@@ -40,23 +46,97 @@ from ui.form_page_styles import (
     FORM_PRIMARY_BUTTON_STYLESHEET,
     FORM_READONLY_INPUT_STYLE as READONLY_INPUT_STYLE,
     FORM_SECONDARY_BUTTON_STYLESHEET,
+    placeholder_example,
 )
 from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
 _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "jwt"})
 
+_POSITION_STATUS_FIELD_NAME = "position_status"
+
+
+def _coerce_master_seq_to_int(seq_val: Any) -> int:
+    """Send master-key seq as integer in JSON payload."""
+    if isinstance(seq_val, bool):
+        return int(seq_val)
+    if isinstance(seq_val, int):
+        return seq_val
+    if isinstance(seq_val, float) and seq_val == int(seq_val):
+        return int(seq_val)
+    s = str(seq_val).strip()
+    if s.isdigit():
+        return int(s)
+    raise ValueError(f"Not a whole number: {seq_val!r}")
+
+
+def _position_status_nested(pos: dict[str, Any]) -> dict[str, Any] | None:
+    flat = {k: v for k, v in pos.items() if k not in _HIDDEN_KEYS}
+    nested = flat.get("status") or flat.get("positionStatus") or flat.get("position_status")
+    return nested if isinstance(nested, dict) else None
+
+
+def _position_status_seq(pos: dict[str, Any]) -> Any | None:
+    nested = _position_status_nested(pos)
+    if nested is not None:
+        return master_key_row_seq_value(nested)
+    flat = {k: v for k, v in pos.items() if k not in _HIDDEN_KEYS}
+    for k in ("status", "statusSeq", "status_seq"):
+        v = flat.get(k)
+        if v is not None and not isinstance(v, dict) and str(v).strip() != "":
+            return v
+    return None
+
+
+def _combo_status_key_value(combo: QComboBox) -> str:
+    if combo.currentIndex() <= 0 or combo.itemData(combo.currentIndex()) is None:
+        return ""
+    t = combo.currentText().strip()
+    if " | " in t:
+        return t.split(" | ", 1)[-1].strip().upper()
+    return t.upper()
+
 
 def _get_position_id(pos: dict[str, Any]) -> int | str | None:
-    for k in ("positionId", "position_id", "id"):
-        v = pos.get(k)
-        if v is not None:
-            return v
+    """Prefer API ``positionId`` (and common aliases); only then generic ``id``."""
+    for k in ("positionId", "position_id", "positionID", "PositionId", "PositionID"):
+        if k in pos:
+            return pos.get(k)
+    nested = pos.get("position")
+    if isinstance(nested, dict):
+        for k in ("positionId", "position_id", "positionID", "PositionId", "PositionID", "id"):
+            if k in nested:
+                return nested.get(k)
+    if "id" in pos:
+        return pos.get("id")
     return None
 
 
 def _get_value(pos: dict[str, Any], keys: tuple[str, ...]) -> Any:
     flat = {k: v for k, v in pos.items() if k not in _HIDDEN_KEYS}
+    if keys and keys[0] in (
+        "positionId",
+        "position_id",
+        "positionID",
+        "PositionId",
+        "PositionID",
+        "id",
+    ):
+        return _get_position_id(pos)
+    if keys and "status" in keys:
+        flat = {k: v for k, v in pos.items() if k not in _HIDDEN_KEYS}
+        nested = flat.get("status") or flat.get("positionStatus") or flat.get("position_status")
+        if isinstance(nested, dict):
+            if nested.get("keyValue") is not None:
+                return nested.get("keyValue")
+            if nested.get("key_value") is not None:
+                return nested.get("key_value")
+        for key in ("status", "statusSeq", "status_seq"):
+            if key in flat:
+                v = flat[key]
+                if not isinstance(v, dict) and v is not None:
+                    return v
+        return None
     for key in keys:
         if key in flat:
             return flat[key]
@@ -66,6 +146,13 @@ def _get_value(pos: dict[str, Any], keys: tuple[str, ...]) -> Any:
 def _format_value(value: Any, key: str = "", key_candidates: tuple[str, ...] = ()) -> str:
     if is_blank_display_value(value):
         return ""
+    # is_datetime_field() matches substring "on" — "positionId" is wrongly treated as a date field.
+    if key == "positionId":
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, default=str)
+        return str(value)
     if is_datetime_field(key, key_candidates):
         return format_datetime_display(value)
     if isinstance(value, bool):
@@ -76,9 +163,10 @@ def _format_value(value: Any, key: str = "", key_candidates: tuple[str, ...] = (
 
 
 _POSITION_COL1 = (
-    ("Position Id", ("positionId", "position_id", "id")),
+    ("Position Id", ("positionId", "position_id", "positionID", "PositionId", "PositionID", "id")),
     ("Position Name*", ("positionName", "position_name", "name")),
     ("Hierarchy Level*", ("hierarchyLevel", "hierarchy_level", "level")),
+    ("Status*", ("status",)),
 )
 _POSITION_COL2 = (
     ("Created By", ("createdBy", "created_by")),
@@ -89,7 +177,7 @@ _POSITION_COL2 = (
 _POSITION_FIELD_GROUPS = _POSITION_COL1 + _POSITION_COL2
 
 _READONLY_KEYS = frozenset({
-    "positionId", "position_id", "id",
+    "positionId", "position_id", "positionID", "PositionId", "PositionID", "id",
     "createdBy", "created_by", "createdAt", "created_at", "createdOn", "created_on",
     "modifiedBy", "modified_by", "modifiedAt", "modified_at", "updatedAt", "updated_at", "modifiedOn", "modified_on",
 })
@@ -177,6 +265,13 @@ class ViewPositionPage(QWidget):
                 value_edit.setEnabled(not ro)
                 value_edit.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
                 self._field_edits[wkey] = value_edit
+            elif canonical == "status":
+                value_edit = QComboBox()
+                apply_form_combobox_field(
+                    value_edit, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX, min_width=240
+                )
+                value_edit.setEnabled(canonical not in _READONLY_KEYS)
+                self._field_edits[canonical] = value_edit
             else:
                 value_edit = QLineEdit()
                 value_edit.setFixedHeight(FORM_SINGLELINE_FIELD_HEIGHT_PX)
@@ -185,6 +280,8 @@ class ViewPositionPage(QWidget):
                 value_edit.setReadOnly(canonical in _READONLY_KEYS)
                 value_edit.setStyleSheet(READONLY_INPUT_STYLE if canonical in _READONLY_KEYS else INPUT_STYLE)
                 value_edit.setText("")
+                if canonical == "positionName":
+                    value_edit.setPlaceholderText(placeholder_example("Developer"))
                 self._field_edits[canonical] = value_edit
 
             grid.addWidget(labeled_field_block(label_widget, value_edit), idx, col)
@@ -265,8 +362,90 @@ class ViewPositionPage(QWidget):
 
         self._switch_to_view_mode()
 
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if self.is_edit_mode():
+            return
+        combo = self._field_edits.get("status")
+        if isinstance(combo, QComboBox):
+            self._populate_master_key_seq_combo(combo, _POSITION_STATUS_FIELD_NAME, "Select status…")
+            self._sync_status_combo_from_position()
+
+    def _token(self) -> str | None:
+        profile = get_user_profile()
+        token = (
+            profile.get("token")
+            or profile.get("accessToken")
+            or profile.get("access_token")
+            or profile.get("jwt")
+        )
+        return str(token) if token else None
+
+    def _populate_master_key_seq_combo(
+        self,
+        combo: QComboBox | None,
+        field_name: str,
+        placeholder: str,
+    ) -> None:
+        if combo is None:
+            return
+        result = api_get_master_key_by_app_id_field_name(
+            field_name=field_name,
+            token=self._token(),
+        )
+        rows = result.get("data") if result.get("success") else []
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(placeholder, None)
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                seq_val = master_key_row_seq_value(row)
+                if seq_val is None:
+                    continue
+                label = master_key_row_display_label(row).strip()
+                if not label:
+                    continue
+                combo.addItem(label, seq_val)
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def _sync_status_combo_from_position(self) -> None:
+        combo = self._field_edits.get("status")
+        if not isinstance(combo, QComboBox) or combo.count() == 0:
+            return
+        seq = _position_status_seq(self._position)
+        if seq is not None:
+            for i in range(combo.count()):
+                data = combo.itemData(i)
+                if data is None:
+                    continue
+                try:
+                    if int(data) == int(seq):  # type: ignore[arg-type]
+                        combo.setCurrentIndex(i)
+                        return
+                except (TypeError, ValueError):
+                    if str(data).strip() == str(seq).strip():
+                        combo.setCurrentIndex(i)
+                        return
+        kv = _get_value(self._position, ("status",))
+        if kv is not None and str(kv).strip():
+            kv_up = str(kv).strip().upper()
+            for i in range(combo.count()):
+                if combo.itemData(i) is None:
+                    continue
+                label_up = combo.itemText(i).strip().upper()
+                if kv_up == label_up or kv_up in label_up or label_up.endswith(kv_up) or f"| {kv_up}" in label_up:
+                    combo.setCurrentIndex(i)
+                    return
+        combo.setCurrentIndex(0)
+
     def set_position(self, pos: dict[str, Any] | None, *, edit_mode: bool = False) -> None:
         self._position = dict(pos) if pos else {}
+        combo = self._field_edits.get("status")
+        if isinstance(combo, QComboBox):
+            self._populate_master_key_seq_combo(combo, _POSITION_STATUS_FIELD_NAME, "Select status…")
         self._refresh_values()
         if edit_mode and self._position:
             self._handle_edit()
@@ -276,19 +455,22 @@ class ViewPositionPage(QWidget):
     def _refresh_values(self) -> None:
         for _label_text, keys in _POSITION_FIELD_GROUPS:
             canonical = keys[0]
+            if canonical == "status":
+                continue
             value = _get_value(self._position, keys)
-            key_used = keys[0]
 
             if canonical in ("hierarchyLevel", "hierarchy_level", "level"):
                 combo = self._field_edits.get("hierarchyLevel")
                 if isinstance(combo, QComboBox):
-                    target = "1"
+                    lo = int(self._hierarchy_values[0])
+                    hi = int(self._hierarchy_values[-1])
+                    target = str(lo)
                     if value is not None:
                         try:
-                            ivalue = int(value)
-                            target = str(min(15, max(1, ivalue)))
+                            ivalue = int(float(value))
+                            target = str(min(hi, max(lo, ivalue)))
                         except (TypeError, ValueError):
-                            target = "1"
+                            target = str(lo)
                     combo.setCurrentText(target)
                 continue
 
@@ -296,6 +478,7 @@ class ViewPositionPage(QWidget):
             if isinstance(edit, QLineEdit):
                 text = _format_value(value, keys[0], keys)
                 edit.setText(text)
+        self._sync_status_combo_from_position()
 
     def _handle_back(self) -> None:
         if self.on_back:
@@ -314,6 +497,8 @@ class ViewPositionPage(QWidget):
 
     def _get_edit_text(self, key: str) -> str:
         w = self._field_edits.get(key)
+        if isinstance(w, QComboBox):
+            return w.currentText().strip()
         if isinstance(w, QLineEdit):
             return w.text().strip()
         return ""
@@ -332,6 +517,11 @@ class ViewPositionPage(QWidget):
         for key in self._editable_keys:
             if key in ("hierarchyLevel", "hierarchy_level", "level"):
                 combo = self._field_edits.get("hierarchyLevel")
+                if isinstance(combo, QComboBox):
+                    combo.setEnabled(True)
+                    combo.setStyleSheet(FORM_COMBOBOX_STYLE)
+            elif key == "status":
+                combo = self._field_edits.get("status")
                 if isinstance(combo, QComboBox):
                     combo.setEnabled(True)
                     combo.setStyleSheet(FORM_COMBOBOX_STYLE)
@@ -378,6 +568,25 @@ class ViewPositionPage(QWidget):
                 if self._get_hierarchy_value() != orig_int:
                     return True
                 continue
+            if canonical == "status":
+                combo = self._field_edits.get("status")
+                if not isinstance(combo, QComboBox):
+                    continue
+                orig_seq = _position_status_seq(self._position)
+                cur_data = combo.currentData()
+                if orig_seq is not None and cur_data is not None:
+                    try:
+                        if int(orig_seq) != int(cur_data):  # type: ignore[arg-type]
+                            return True
+                    except (TypeError, ValueError):
+                        if str(orig_seq).strip() != str(cur_data).strip():
+                            return True
+                    continue
+                orig_kv = str(_get_value(self._position, ("status",)) or "").strip().upper()
+                cur_kv = _combo_status_key_value(combo)
+                if orig_kv != cur_kv:
+                    return True
+                continue
             original = _get_value(self._position, keys)
             orig_str = _format_value(original, keys[0], keys)
             current = self._get_edit_text(canonical)
@@ -404,6 +613,21 @@ class ViewPositionPage(QWidget):
             self._show_error("Position Id is missing.")
             return
 
+        status_combo = self._field_edits.get("status")
+        if isinstance(status_combo, QComboBox):
+            if status_combo.currentIndex() <= 0 or status_combo.currentData() is None:
+                self._show_error("Status is required.")
+                status_combo.setFocus()
+                return
+            try:
+                status_seq = _coerce_master_seq_to_int(status_combo.currentData())
+            except ValueError:
+                self._show_error("Status must be a valid selection.")
+                status_combo.setFocus()
+                return
+        else:
+            status_seq = None
+
         profile = get_user_profile()
         token = (
             profile.get("token")
@@ -417,6 +641,7 @@ class ViewPositionPage(QWidget):
             pid,
             position_name=name,
             hierarchy_level=self._get_hierarchy_value(),
+            status=status_seq,
             token=token,
         )
 
@@ -426,6 +651,24 @@ class ViewPositionPage(QWidget):
 
         self._position["positionName"] = name
         self._position["hierarchyLevel"] = self._get_hierarchy_value()
+        if status_seq is not None:
+            kv = (
+                _combo_status_key_value(status_combo)
+                if isinstance(status_combo, QComboBox)
+                else str(status_seq).strip().upper()
+            )
+            nested_st = _position_status_nested(self._position)
+            if isinstance(nested_st, dict) and isinstance(status_combo, QComboBox):
+                nested_st = dict(nested_st)
+                nested_st["seq"] = status_seq
+                if kv:
+                    nested_st["keyValue"] = kv
+                self._position["status"] = nested_st
+            elif isinstance(status_combo, QComboBox) and kv:
+                self._position["status"] = {"keyValue": kv, "seq": status_seq}
+            else:
+                self._position["status"] = kv or str(status_seq)
+
         self._show_success(result.get("message", "Position updated successfully."))
 
         schedule_after_success(
@@ -439,6 +682,11 @@ class ViewPositionPage(QWidget):
         for key in self._editable_keys:
             if key in ("hierarchyLevel", "hierarchy_level", "level"):
                 combo = self._field_edits.get("hierarchyLevel")
+                if isinstance(combo, QComboBox):
+                    combo.setEnabled(False)
+                    combo.setStyleSheet(FORM_COMBOBOX_STYLE)
+            elif key == "status":
+                combo = self._field_edits.get("status")
                 if isinstance(combo, QComboBox):
                     combo.setEnabled(False)
                     combo.setStyleSheet(FORM_COMBOBOX_STYLE)

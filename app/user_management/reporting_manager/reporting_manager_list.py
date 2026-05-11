@@ -675,7 +675,6 @@ class ReportingManagerPage(QWidget):
         self._hierarchy_worker: _HierarchyLoadWorker | None = None
         self._hierarchy_loading = False
         self._pending_reload = False
-        self._users_loaded = False
         self._hierarchy_source_rows: list[dict[str, Any]] = []
         self._hierarchy_column_spec: list[tuple[str, tuple[str, ...]]] = []
         self._filter_visible = False
@@ -844,7 +843,6 @@ class ReportingManagerPage(QWidget):
         self.hierarchy_table.setColumnCount(0)
 
     def _refresh_all(self) -> None:
-        self._users_loaded = False
         self._load_user_directory_and_hierarchy()
 
     def _show_assign_dialog(self) -> None:
@@ -881,28 +879,25 @@ class ReportingManagerPage(QWidget):
             self._show_empty_hierarchy_table()
             return
 
-        # Directory data is mostly static in-session; avoid refetching on every showEvent.
-        if not self._users_loaded:
-            result = api_get_all_users(token=token)
-            rows = result.get("data") or []
-            self._users = []
-            for u in rows:
-                if not isinstance(u, dict):
-                    continue
-                uid = u.get("userId") or u.get("user_id") or u.get("id")
-                if uid is None:
-                    continue
-                uid_s = str(uid)
-                uname = str(u.get("userName") or u.get("username") or "").strip()
-                parts = [uid_s]
-                if uname:
-                    parts.append(uname)
-                un = _user_name(u)
-                if un:
-                    parts.append(un)
-                disp = " | ".join(parts)
-                self._users.append((uid_s, disp))
-            self._users_loaded = True
+        result = api_get_all_users(token=token)
+        rows = result.get("data") or []
+        self._users = []
+        for u in rows:
+            if not isinstance(u, dict):
+                continue
+            uid = u.get("userId") or u.get("user_id") or u.get("id")
+            if uid is None:
+                continue
+            uid_s = str(uid)
+            uname = str(u.get("userName") or u.get("username") or "").strip()
+            parts = [uid_s]
+            if uname:
+                parts.append(uname)
+            un = _user_name(u)
+            if un:
+                parts.append(un)
+            disp = " | ".join(parts)
+            self._users.append((uid_s, disp))
 
         self._load_all_hierarchy(token)
 

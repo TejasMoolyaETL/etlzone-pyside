@@ -1,0 +1,291 @@
+"""Create DMT User page."""
+
+from __future__ import annotations
+
+import re
+from typing import Callable
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QComboBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+
+from core.api import api_create_dmt_user
+from core.user_context import get_user_profile
+from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
+from ui.form_combobox_style import apply_form_combobox_field
+from ui.form_page_styles import (
+    FORM_ERROR_LABEL_STYLE,
+    FORM_INPUT_STYLE as INPUT_STYLE,
+    FORM_LABEL_STYLE as LABEL_STYLE,
+    FORM_PAGE_FONT_SIZE_PX,
+    FORM_PAGE_HEADER_STYLESHEET,
+    FORM_PRIMARY_BUTTON_STYLESHEET,
+    FORM_SECONDARY_BUTTON_STYLESHEET,
+    LIST_PAGE_HEADER_HEIGHT_PX,
+    LIST_PAGE_HEADER_LAYOUT_MARGINS,
+    LIST_PAGE_HEADER_LAYOUT_SPACING,
+    MODAL_FIELD_HEIGHT_PX,
+    placeholder_example,
+)
+from ui.post_save_navigation import schedule_after_success
+from ui.widgets.required_label import field_caption_label, labeled_field_block
+
+_EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+
+
+class CreateDmtUserPage(QWidget):
+    def __init__(
+        self,
+        on_back: Callable[[], None] | None = None,
+        on_create_success: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__()
+        self.on_back = on_back
+        self.on_create_success = on_create_success
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = QWidget()
+        header.setStyleSheet(FORM_PAGE_HEADER_STYLESHEET)
+        header.setFixedHeight(LIST_PAGE_HEADER_HEIGHT_PX)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(*LIST_PAGE_HEADER_LAYOUT_MARGINS)
+        header_layout.setSpacing(LIST_PAGE_HEADER_LAYOUT_SPACING)
+        title = QLabel("Create DMT User")
+        header_layout.addWidget(title)
+        header_layout.addStretch()
+        back_btn = QPushButton("Back")
+        back_btn.setFixedWidth(100)
+        back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        back_btn.clicked.connect(self._handle_back)
+        header_layout.addWidget(back_btn)
+        layout.addWidget(header)
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(12)
+
+        card = QWidget()
+        card.setObjectName("profileCard")
+        card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        card.setMaximumWidth(620)
+        card.setStyleSheet(
+            "#profileCard { background: #ffffff; border: 1px solid #e2e8f0; "
+            "border-radius: 8px; padding: 16px; }"
+        )
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 16, 20, 20)
+        card_layout.setSpacing(12)
+
+        field_h = MODAL_FIELD_HEIGHT_PX
+
+        self.first_name_edit = QLineEdit()
+        self.first_name_edit.setPlaceholderText(placeholder_example("ali"))
+        self.first_name_edit.setStyleSheet(INPUT_STYLE)
+        self.first_name_edit.setFixedHeight(field_h)
+        self.first_name_edit.setMinimumWidth(360)
+        self.first_name_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        card_layout.addWidget(
+            labeled_field_block(field_caption_label("First name*", LABEL_STYLE), self.first_name_edit)
+        )
+
+        self.last_name_edit = QLineEdit()
+        self.last_name_edit.setPlaceholderText(placeholder_example("java team"))
+        self.last_name_edit.setStyleSheet(INPUT_STYLE)
+        self.last_name_edit.setFixedHeight(field_h)
+        self.last_name_edit.setMinimumWidth(360)
+        self.last_name_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        card_layout.addWidget(
+            labeled_field_block(field_caption_label("Last name*", LABEL_STYLE), self.last_name_edit)
+        )
+
+        self.status_combo = QComboBox()
+        self.status_combo.addItem("ACTIVE", "ACTIVE")
+        self.status_combo.addItem("INACTIVE", "INACTIVE")
+        apply_form_combobox_field(self.status_combo, height_px=field_h, min_width=360)
+        card_layout.addWidget(
+            labeled_field_block(field_caption_label("Status*", LABEL_STYLE), self.status_combo)
+        )
+
+        self.email_edit = QLineEdit()
+        self.email_edit.setPlaceholderText(placeholder_example("abc@gmail.com"))
+        self.email_edit.setStyleSheet(INPUT_STYLE)
+        self.email_edit.setFixedHeight(field_h)
+        self.email_edit.setMinimumWidth(360)
+        self.email_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.email_edit.textChanged.connect(
+            lambda text: self._update_email_style(self.email_edit, text)
+        )
+        card_layout.addWidget(
+            labeled_field_block(field_caption_label("Email*", LABEL_STYLE), self.email_edit)
+        )
+
+        self.mobile_edit = QLineEdit()
+        self.mobile_edit.setPlaceholderText(placeholder_example("80808080"))
+        self.mobile_edit.setStyleSheet(INPUT_STYLE)
+        self.mobile_edit.setFixedHeight(field_h)
+        self.mobile_edit.setMinimumWidth(360)
+        self.mobile_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        card_layout.addWidget(
+            labeled_field_block(field_caption_label("Mobile*", LABEL_STYLE), self.mobile_edit)
+        )
+
+        card_layout.addSpacing(16)
+        self.error_label = QLabel()
+        self.error_label.setStyleSheet(FORM_ERROR_LABEL_STYLE)
+        self.error_label.setWordWrap(True)
+        self.error_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        self.error_label.setVisible(False)
+        card_layout.addWidget(self.error_label)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(12)
+        create_btn = QPushButton("Create")
+        create_btn.setFixedWidth(100)
+        create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        create_btn.setStyleSheet(FORM_PRIMARY_BUTTON_STYLESHEET)
+        create_btn.clicked.connect(self._handle_create)
+        btn_layout.addWidget(create_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setFixedWidth(100)
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.setStyleSheet(FORM_SECONDARY_BUTTON_STYLESHEET)
+        cancel_btn.clicked.connect(self._handle_back)
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addStretch()
+        card_layout.addLayout(btn_layout)
+
+        content_layout.addWidget(card)
+        content_layout.addStretch()
+        layout.addWidget(content)
+
+    def _token(self) -> str | None:
+        profile = get_user_profile()
+        token = (
+            profile.get("token")
+            or profile.get("accessToken")
+            or profile.get("access_token")
+            or profile.get("jwt")
+        )
+        return str(token) if token else None
+
+    def _show_error(self, message: str) -> None:
+        show_auto_hiding_message(self, self.error_label, message, error=True)
+
+    def _show_success(self, message: str) -> None:
+        show_auto_hiding_message(self, self.error_label, message, error=False)
+
+    def _clear_error(self) -> None:
+        cancel_auto_hide_message(self, self.error_label)
+        self.error_label.setText("")
+        self.error_label.setVisible(False)
+
+    def _update_email_style(self, widget: QLineEdit, text: str) -> None:
+        base = f"font-size: {FORM_PAGE_FONT_SIZE_PX}px; padding: 4px 8px; border-radius: 4px;"
+        if not text.strip():
+            widget.setStyleSheet(f"{base} border: 1px solid #e2e8f0; background-color: #ffffff;")
+        elif _EMAIL_REGEX.match(text.strip()):
+            widget.setStyleSheet(f"{base} border: 1px solid #22c55e; background-color: #ffffff;")
+        else:
+            widget.setStyleSheet(f"{base} border: 1px solid #ef4444; background-color: #ffffff;")
+
+    def is_dirty(self) -> bool:
+        return bool(
+            self.first_name_edit.text().strip()
+            or self.last_name_edit.text().strip()
+            or self.status_combo.currentIndex() != 0
+            or self.email_edit.text().strip()
+            or self.mobile_edit.text().strip()
+        )
+
+    def reset_to_default(self) -> None:
+        self.first_name_edit.clear()
+        self.last_name_edit.clear()
+        self.status_combo.setCurrentIndex(0)
+        self.email_edit.clear()
+        self.mobile_edit.clear()
+        self.email_edit.setStyleSheet(INPUT_STYLE)
+        self.mobile_edit.setStyleSheet(INPUT_STYLE)
+        self._clear_error()
+
+    def _handle_back(self) -> None:
+        if not self.is_dirty():
+            if self.on_back:
+                self.on_back()
+            return
+        reply = QMessageBox.question(
+            self,
+            "Unsaved Changes",
+            "You have unsaved changes. Discard and leave?",
+            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply == QMessageBox.StandardButton.Discard:
+            self.reset_to_default()
+            if self.on_back:
+                self.on_back()
+
+    def _handle_create(self) -> None:
+        self._clear_error()
+        first_name = self.first_name_edit.text().strip()
+        last_name = self.last_name_edit.text().strip()
+        status = str(self.status_combo.currentData() or "ACTIVE").strip().upper()
+        email = self.email_edit.text().strip()
+        mobile = self.mobile_edit.text().strip()
+        if not first_name:
+            self._show_error("First name is required.")
+            self.first_name_edit.setFocus()
+            return
+        if not last_name:
+            self._show_error("Last name is required.")
+            self.last_name_edit.setFocus()
+            return
+        if not email:
+            self._show_error("Email is required.")
+            self.email_edit.setFocus()
+            return
+        if not _EMAIL_REGEX.match(email):
+            self._show_error("Please enter a valid email address.")
+            self.email_edit.setFocus()
+            return
+        if not mobile:
+            self._show_error("Mobile is required.")
+            self.mobile_edit.setFocus()
+            return
+
+        result = api_create_dmt_user(
+            first_name=first_name,
+            last_name=last_name,
+            email=email,
+            mobile=mobile,
+            status=status,
+            token=self._token(),
+        )
+        if result.get("success"):
+            self._show_success(str(result.get("message") or "DMT user created successfully."))
+            schedule_after_success(
+                delay_ms=800,
+                clear_error=self._clear_error,
+                reset=self.reset_to_default,
+                on_back=self.on_back,
+                on_success=self.on_create_success,
+            )
+        else:
+            self._show_error(str(result.get("message") or "Failed to create DMT user."))

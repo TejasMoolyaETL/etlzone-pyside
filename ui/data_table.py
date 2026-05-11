@@ -105,6 +105,22 @@ def resize_data_table_columns_to_content(
         table.setColumnWidth(col, max(min_width_px, w))
 
 
+def apply_column_width_overrides(
+    table: QTableWidget,
+    column_spec: list[tuple[str, tuple[str, ...]]],
+    widths_by_label: dict[str, int],
+) -> None:
+    """Set fixed widths for columns whose header label matches a key in ``widths_by_label``."""
+    if not column_spec or not widths_by_label:
+        return
+    for col, (label, _) in enumerate(column_spec):
+        if col >= table.columnCount():
+            break
+        w = widths_by_label.get(label)
+        if w is not None:
+            table.setColumnWidth(col, w)
+
+
 def filter_dict_rows_by_column_edits(
     source_rows: list[dict[str, Any]],
     table: QTableWidget,

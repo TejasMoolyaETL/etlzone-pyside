@@ -25,8 +25,15 @@ from PySide6.QtWidgets import (
 )
 
 from app.api_dev.api_details.api_method_combo import configure_api_method_combo
-from core.api import api_create_api_detail, api_get_all_projects
-from core.user_context import get_user_profile
+from core.api import (
+    api_create_api_detail,
+    api_get_all_projects,
+    api_get_master_key_by_app_id_field_name,
+    master_key_row_display_label,
+    master_key_row_seq_value,
+)
+from core.nav_access import LEFT_PANEL_NAV_ITEM_APP_ID_KEYS
+from core.user_context import get_nav_access_steps, get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
 from ui.form_combobox_style import apply_form_combobox_field
 from ui.form_page_styles import (
@@ -65,6 +72,8 @@ _COL2_FIELDS = (
     ("Request", "request"),
     ("Response", "response"),
 )
+_API_DETAILS_NAV_LABEL = "API: Details"
+_API_STATUS_FIELD_NAME = "api_status"
 
 
 class CreateAPIDetailPage(QWidget):
@@ -79,7 +88,9 @@ class CreateAPIDetailPage(QWidget):
         self.on_back = on_back
         self.on_create_success = on_create_success
         self._project_completions: list[tuple[str, Any, dict[str, Any]]] = []
+        self._default_api_status = "ACTIVE"
         self._build_ui()
+        self._load_api_status_options()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -401,6 +412,74 @@ class CreateAPIDetailPage(QWidget):
     def _show_error(self, message: str) -> None:
         show_auto_hiding_message(self, self.error_label, message, error=True)
 
+    def _load_api_status_options(self) -> None:
+        profile = get_user_profile()
+        token = (
+            profile.get("token")
+            or profile.get("accessToken")
+            or profile.get("access_token")
+            or profile.get("jwt")
+        )
+        token = str(token) if token else None
+        result = api_get_master_key_by_app_id_field_name(
+            field_name=_API_STATUS_FIELD_NAME,
+            token=token,
+        )
+        rows = result.get("data") if result.get("success") else []
+        options: list[tuple[str, Any, str]] = []
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                label = (master_key_row_display_label(row) or "").strip()
+                seq = master_key_row_seq_value(row)
+                if label and seq is not None:
+                    options.append((label, seq, str(row.get("keyValue") or row.get("key_value") or "").strip().upper()))
+        if not options:
+            options = [("ACTIVE", "ACTIVE", "ACTIVE"), ("INACTIVE", "INACTIVE", "INACTIVE")]
+        self.api_status_combo.blockSignals(True)
+        self.api_status_combo.clear()
+        default_idx = 0
+        for idx, (label, seq, key_value) in enumerate(options):
+            self.api_status_combo.addItem(label, seq)
+            if key_value == "ACTIVE":
+                default_idx = idx
+        self._default_api_status = str(options[default_idx][1])
+        self.api_status_combo.setCurrentIndex(default_idx)
+        self.api_status_combo.blockSignals(False)
+
+    def reload_api_status_options(self) -> None:
+        self._load_api_status_options()
+
+    def _app_id_from_nav_steps(self) -> int | str | None:
+        steps = get_nav_access_steps()
+        allowed_desc = LEFT_PANEL_NAV_ITEM_APP_ID_KEYS.get(_API_DETAILS_NAV_LABEL, ())
+        if not allowed_desc:
+            return None
+        if steps:
+            for row in steps:
+                if not isinstance(row, dict):
+                    continue
+                desc = str(
+                    row.get("appIdDescription")
+                    or row.get("app_id_description")
+                    or ""
+                ).strip()
+                if desc not in allowed_desc:
+                    continue
+                app_id = row.get("appId")
+                if app_id is None:
+                    app_id = row.get("app_id")
+                if app_id is None:
+                    app_id = row.get("applicationId")
+                if app_id is None:
+                    continue
+                app_id_text = str(app_id).strip()
+                if not app_id_text:
+                    continue
+                return int(app_id_text) if app_id_text.isdigit() else app_id_text
+        return None
+
     def _show_success(self, message: str) -> None:
         show_auto_hiding_message(self, self.error_label, message, error=False)
 
@@ -419,7 +498,7 @@ class CreateAPIDetailPage(QWidget):
             "localhost_path": "",
             "server_path": "",
             "requirement": "",
-            "api_status": "ACTIVE",
+            "api_status": self._default_api_status,
             "comments": "",
             "request": "",
             "response": "",
@@ -436,7 +515,7 @@ class CreateAPIDetailPage(QWidget):
             or self.localhost_path_edit.text().strip() != d["localhost_path"]
             or self.server_path_edit.text().strip() != d["server_path"]
             or self.requirement_edit.text().strip() != d["requirement"]
-            or self.api_status_combo.currentText().strip() != d["api_status"]
+            or str(self.api_status_combo.currentData()).strip() != d["api_status"]
             or self.comments_edit.toPlainText().strip() != d["comments"]
             or self.request_edit.toPlainText().strip() != d["request"]
             or self.response_edit.toPlainText().strip() != d["response"]
@@ -451,7 +530,12 @@ class CreateAPIDetailPage(QWidget):
         self.localhost_path_edit.clear()
         self.server_path_edit.clear()
         self.requirement_edit.clear()
-        self.api_status_combo.setCurrentText("ACTIVE")
+        idx = self.api_status_combo.findData(
+            int(self._default_api_status)
+            if self._default_api_status.isdigit()
+            else self._default_api_status
+        )
+        self.api_status_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.comments_edit.clear()
         self.request_edit.clear()
         self.response_edit.clear()
@@ -535,13 +619,14 @@ class CreateAPIDetailPage(QWidget):
         result = api_create_api_detail(
             project_id,
             token=token,
+            app_id=self._app_id_from_nav_steps(),
             folder=self.folder_edit.text().strip(),
             api_method=api_method,
             api_name=api_name,
             localhost_path=self.localhost_path_edit.text().strip(),
             server_path=self.server_path_edit.text().strip(),
             requirement=self.requirement_edit.text().strip(),
-            api_status=self.api_status_combo.currentText().strip(),
+            api_status=self.api_status_combo.currentData(),
             comments=self.comments_edit.toPlainText().strip(),
             request_body=self.request_edit.toPlainText().strip(),
             response_body=self.response_edit.toPlainText().strip(),

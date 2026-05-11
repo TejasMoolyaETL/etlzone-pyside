@@ -8,6 +8,7 @@ from typing import Any, Callable
 from PySide6.QtCore import QEvent, QStringListModel, Qt
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
+    QComboBox,
     QCompleter,
     QHBoxLayout,
     QLabel,
@@ -24,18 +25,27 @@ from app.org_management.bu.bu_utils import (
     get_bu_name,
     get_organization_name_from_bu,
 )
-from core.api import api_create_bu, api_get_all_bu, api_get_all_orgs
+from core.api import (
+    api_create_bu,
+    api_get_all_bu,
+    api_get_all_orgs,
+    api_get_master_key_by_app_id_field_name,
+    master_key_row_display_label,
+    master_key_row_seq_value,
+)
 from core.user_context import get_user_profile
 from ui.auto_hide_message import (
     cancel_auto_hide_message,
     show_api_result_message,
     show_auto_hiding_message,
 )
+from ui.form_combobox_style import apply_form_combobox_field
 from ui.form_page_styles import (
     FORM_ERROR_LABEL_STYLE,
     FORM_INPUT_STYLE as INPUT_STYLE,
     FORM_LABEL_STYLE as LABEL_STYLE,
     FORM_PAGE_HEADER_STYLESHEET,
+    FORM_SINGLELINE_FIELD_HEIGHT_PX,
     LIST_PAGE_HEADER_HEIGHT_PX,
     LIST_PAGE_HEADER_LAYOUT_MARGINS,
     LIST_PAGE_HEADER_LAYOUT_SPACING,
@@ -50,6 +60,23 @@ from ui.form_page_styles import (
 from ui.post_save_navigation import schedule_after_success
 from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
+
+# Master setup field for BU status (GET …/get-by-field-name?fieldName=bu_status).
+_BU_STATUS_FIELD_NAME = "bu_status"
+
+
+def _coerce_master_seq_to_int(seq_val: Any) -> int:
+    """Send master-key seq as integer in JSON payload."""
+    if isinstance(seq_val, bool):
+        return int(seq_val)
+    if isinstance(seq_val, int):
+        return seq_val
+    if isinstance(seq_val, float) and seq_val == int(seq_val):
+        return int(seq_val)
+    s = str(seq_val).strip()
+    if s.isdigit():
+        return int(s)
+    raise ValueError(f"Not a whole number: {seq_val!r}")
 
 
 class CreateBuPage(QWidget):
@@ -124,9 +151,7 @@ class CreateBuPage(QWidget):
 
         label_org_name = field_caption_label("Organization*", LABEL_STYLE)
         self.org_name_edit = QLineEdit()
-        self.org_name_edit.setPlaceholderText(
-            placeholder_search_select("Org Id", "Org Name", "Code", "Industry")
-        )
+        self.org_name_edit.setPlaceholderText(placeholder_search_select("orgID", "orgName"))
         self.org_name_edit.setStyleSheet(INPUT_STYLE)
         self.org_name_edit.installEventFilter(self)
         self.org_name_edit.textChanged.connect(self._on_org_name_text_changed)
@@ -153,6 +178,11 @@ class CreateBuPage(QWidget):
         parent_completer.setMaxVisibleItems(10)
         self.parent_bu_edit.setCompleter(parent_completer)
         card_layout.addWidget(labeled_field_block(label_parent, self.parent_bu_edit))
+
+        label_status = field_caption_label("Status*", LABEL_STYLE)
+        self.status_combo = QComboBox()
+        apply_form_combobox_field(self.status_combo, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX)
+        card_layout.addWidget(labeled_field_block(label_status, self.status_combo))
 
         card_layout.addSpacing(16)
         self.error_label = QLabel()
@@ -202,17 +232,11 @@ class CreateBuPage(QWidget):
         for org in orgs:
             if not isinstance(org, dict):
                 continue
-            oid = org.get("orgId") or org.get("org_id") or org.get("id")
+            oid = org.get("orgID") or org.get("orgId") or org.get("org_id") or org.get("id")
             if oid is None or str(oid).strip() == "":
                 continue
             org_name = str(org.get("orgName") or org.get("org_name") or "").strip()
-            org_code = str(org.get("orgCode") or org.get("org_code") or "").strip()
-            industry = str(org.get("industry") or "").strip()
-            display = (
-                f"{oid} | {org_name} | Code: {org_code} | Industry: {industry}"
-                if org_name or org_code or industry
-                else f"Organization {oid}"
-            )
+            display = f"{oid} | {org_name}" if org_name else f"{oid} |"
             self._org_completions.append((display, oid))
 
         completer = QCompleter([d for d, _ in self._org_completions])
@@ -276,6 +300,51 @@ class CreateBuPage(QWidget):
         super().showEvent(event)
         self._setup_organization_completer()
         self._load_parent_bus()
+        self._populate_master_key_seq_combo(
+            self.status_combo,
+            _BU_STATUS_FIELD_NAME,
+            "Select status…",
+        )
+
+    def _token(self) -> str | None:
+        profile = get_user_profile()
+        token = (
+            profile.get("token")
+            or profile.get("accessToken")
+            or profile.get("access_token")
+            or profile.get("jwt")
+        )
+        return str(token) if token else None
+
+    def _populate_master_key_seq_combo(
+        self,
+        combo: QComboBox | None,
+        field_name: str,
+        placeholder: str,
+    ) -> None:
+        if combo is None:
+            return
+        result = api_get_master_key_by_app_id_field_name(
+            field_name=field_name,
+            token=self._token(),
+        )
+        rows = result.get("data") if result.get("success") else []
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(placeholder, None)
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                seq_val = master_key_row_seq_value(row)
+                if seq_val is None:
+                    continue
+                label = master_key_row_display_label(row).strip()
+                if not label:
+                    continue
+                combo.addItem(label, seq_val)
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
 
     def eventFilter(self, obj, event) -> bool:
         if obj == self.org_name_edit and event.type() == QEvent.Type.FocusIn:
@@ -353,6 +422,8 @@ class CreateBuPage(QWidget):
             return True
         if self.parent_bu_edit.text().strip():
             return True
+        if self.status_combo.currentIndex() > 0:
+            return True
         return False
 
     def reset_to_default(self) -> None:
@@ -361,6 +432,7 @@ class CreateBuPage(QWidget):
         self.bu_name_edit.clear()
         self.parent_bu_id_edit.clear()
         self.parent_bu_edit.clear()
+        self.status_combo.setCurrentIndex(0)
 
     def _handle_back(self) -> None:
         if not self.is_dirty():
@@ -412,6 +484,22 @@ class CreateBuPage(QWidget):
                 return
         parent_bu = self._resolve_parent_bu_id()
 
+        if self.status_combo.currentIndex() <= 0:
+            self._show_error("Status is required.")
+            self.status_combo.setFocus()
+            return
+        status_raw = self.status_combo.currentData()
+        if status_raw is None:
+            self._show_error("Status is required.")
+            self.status_combo.setFocus()
+            return
+        try:
+            status_val = _coerce_master_seq_to_int(status_raw)
+        except ValueError:
+            self._show_error("Status must be a valid selection.")
+            self.status_combo.setFocus()
+            return
+
         profile = get_user_profile()
         token = (
             profile.get("token")
@@ -425,6 +513,7 @@ class CreateBuPage(QWidget):
             organization_id=organization_id,
             bu_name=bu_name,
             parent_bu=parent_bu,
+            status=status_val,
             token=token,
         )
 

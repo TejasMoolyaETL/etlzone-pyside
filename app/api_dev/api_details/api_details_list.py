@@ -7,7 +7,7 @@ import traceback
 from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QPoint, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QCursor, QShowEvent
+from PySide6.QtGui import QAction, QCursor, QShowEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
@@ -17,17 +17,23 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from core.api import api_delete_api_detail_by_id, api_get_all_api_details
 from core.app_preferences import format_datetime_display, is_datetime_field
-from core.nav_access import collect_allowed_action_names, nav_action_visible
+from core.nav_access import (
+    LEFT_PANEL_NAV_ITEM_APP_ID_KEYS,
+    collect_allowed_action_names,
+    nav_action_visible,
+)
 from ui.blank_display import is_blank_display_value
 from core.user_context import get_nav_access_steps, get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
 from ui.form_page_styles import (
+    DATA_TABLE_HEADER_FONT_SIZE_PX,
     LIST_PAGE_HEADER_HEIGHT_PX,
     LIST_PAGE_HEADER_LAYOUT_MARGINS,
     LIST_PAGE_HEADER_LAYOUT_SPACING,
@@ -35,7 +41,9 @@ from ui.form_page_styles import (
     MODAL_FIELD_LABEL_STYLE,
 )
 from ui.styles import CONTEXT_MENU_STYLESHEET
+from ui.theme import Theme
 from ui.data_table import (
+    apply_column_width_overrides,
     apply_data_table_appearance,
     attach_table_copy_shortcut,
     clear_filter_row_widgets,
@@ -45,15 +53,32 @@ from ui.data_table import (
     resize_data_table_columns_to_content,
     sync_vertical_header_labels,
 )
+
+_API_DETAILS_REQUEST_RESPONSE_COL_WIDTH_PX = 300
 _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "jwt"})
+_API_DETAILS_NAV_LABEL = "API: Details"
+_API_STATUS_KEYS = (
+    "apiStatusResponse.keyValue",
+    "keyValue",
+    "key_value",
+    "apiStatus",
+    "api_status",
+    "apistatus",
+    "seqId",
+    "seq_id",
+    "apiStatusResponse.seq",
+)
 
 _API_DETAIL_COLUMN_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("API Id (Internal)", ("apiId", "api_id", "id")),
+    ("API Id", ("apiId", "api_id", "id")),
     ("Project Id", ("projectId", "projectid", "project_id")),
     ("Project Name", ("projectName", "project_name", "name")),
     ("API Folder", ("folder", "Folder")),
     ("API Method", ("apiMethod", "api_method", "method")),
-    ("API Status", ("apiStatus", "api_status", "apistatus")),
+    (
+        "API Status",
+        _API_STATUS_KEYS,
+    ),
     ("API name", ("apiName", "api_name", "name")),
     ("Requirement", ("requirement", "Requirement")),
     ("Comments", ("comments", "Comments")),
@@ -80,6 +105,17 @@ def _flatten_row(row: dict[str, Any]) -> dict[str, Any]:
 def _value_for_column(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, str]:
     flat = _flatten_row(row)
     for key in keys:
+        if "." in key:
+            cur: Any = flat
+            ok = True
+            for part in key.split("."):
+                if isinstance(cur, dict) and part in cur:
+                    cur = cur[part]
+                else:
+                    ok = False
+                    break
+            if ok:
+                return (cur, key)
         if key in flat:
             return (flat[key], key)
     return (None, keys[0] if keys else "")
@@ -88,6 +124,11 @@ def _value_for_column(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, 
 def _format_cell(value: Any, key: str = "", key_candidates: tuple[str, ...] = ()) -> str:
     if is_blank_display_value(value):
         return ""
+    if key_candidates == _API_STATUS_KEYS:
+        if isinstance(value, dict):
+            kv = str(value.get("keyValue") or value.get("key_value") or "").strip()
+            return kv
+        return str(value)
     if is_datetime_field(key, key_candidates):
         return format_datetime_display(value)
     if isinstance(value, bool):
@@ -104,14 +145,15 @@ def _internal_row_id(row: dict[str, Any]) -> Any:
 class _APIDetailsLoadWorker(QObject):
     finished = Signal(bool, object, str)
 
-    def __init__(self, token: str | None) -> None:
+    def __init__(self, token: str | None, app_id: int | str | None) -> None:
         super().__init__()
         self._token = token
+        self._app_id = app_id
 
     @Slot()
     def run(self) -> None:
         try:
-            result = api_get_all_api_details(token=self._token)
+            result = api_get_all_api_details(token=self._token, app_id=self._app_id)
         except Exception as exc:
             self.finished.emit(False, [], f"Load failed ({type(exc).__name__}).")
             return
@@ -130,6 +172,7 @@ class APIDetailsPage(QWidget):
         self,
         on_create_clicked: Callable[[], None] | None = None,
         on_edit_clicked: Callable[[dict[str, Any], bool], None] | None = None,
+        on_copy_to_mgmt_clicked: Callable[[], None] | None = None,
         *,
         auto_refresh_on_show: bool = True,
         show_toolbar: bool = True,
@@ -137,6 +180,7 @@ class APIDetailsPage(QWidget):
         super().__init__()
         self.on_create_clicked = on_create_clicked
         self.on_edit_clicked = on_edit_clicked
+        self.on_copy_to_mgmt_clicked = on_copy_to_mgmt_clicked
         self._auto_refresh_on_show = auto_refresh_on_show
         self._show_toolbar = show_toolbar
         self._loading = False
@@ -155,6 +199,7 @@ class APIDetailsPage(QWidget):
         self._can_edit = True
         self._can_delete = True
         self._create_btn: QPushButton | None = None
+        self._copy_to_mgmt_action: QAction | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -195,6 +240,39 @@ class APIDetailsPage(QWidget):
             )
             self._create_btn.clicked.connect(self._emit_add)
             header_layout.addWidget(self._create_btn)
+            self._more_btn = QToolButton()
+            self._more_btn.setText("☰")
+            self._more_btn.setFixedWidth(34)
+            self._more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            self._more_btn.setStyleSheet(
+                "QToolButton {"
+                f" color: {Theme.PANEL_TEXT_BRIGHT};"
+                " font-size: 16px; font-weight: 700; padding-bottom: 2px;"
+                " border: none; background: transparent; }"
+                f"QToolButton:hover {{ background: {Theme.HEADER_ACCENT_HOVER}; }}"
+                f"QToolButton:pressed {{ background: {Theme.HEADER_ACCENT_PRESSED}; }}"
+            )
+            more_menu = QMenu(self._more_btn)
+            more_menu.setStyleSheet(
+                "QMenu {"
+                " background: #f8fafc; color: #475569;"
+                " border: 1px solid #cbd5e1;"
+                " border-radius: 0px; padding: 0px; }"
+                "QMenu::item {"
+                " background: #f8fafc; color: #475569;"
+                f" font-size: {DATA_TABLE_HEADER_FONT_SIZE_PX}px; font-weight: 600;"
+                " padding: 3px 6px; margin: 0px; border: none;"
+                " border-bottom: 2px solid #e2e8f0; border-right: 1px solid #cbd5e1; }"
+                "QMenu::item:selected { background: #f8fafc; color: #475569; }"
+                "QMenu::item:pressed { background: #f8fafc; color: #475569; }"
+            )
+            self._copy_to_mgmt_action = QAction("Copy to API MGMT", self._more_btn)
+            self._copy_to_mgmt_action.triggered.connect(self._emit_copy_to_mgmt)
+            self._copy_to_mgmt_action.setEnabled(bool(self.on_copy_to_mgmt_clicked))
+            more_menu.addAction(self._copy_to_mgmt_action)
+            self._more_btn.setMenu(more_menu)
+            header_layout.addWidget(self._more_btn)
             layout.addWidget(header)
 
         content = QWidget()
@@ -228,6 +306,10 @@ class APIDetailsPage(QWidget):
         if self.on_create_clicked:
             self.on_create_clicked()
 
+    def _emit_copy_to_mgmt(self) -> None:
+        if self.on_copy_to_mgmt_clicked:
+            self.on_copy_to_mgmt_clicked()
+
     def _refresh_action_access(self) -> None:
         steps = get_nav_access_steps()
         if steps is None:
@@ -244,6 +326,8 @@ class APIDetailsPage(QWidget):
         if self._create_btn is not None:
             self._create_btn.setEnabled(self._can_create)
             self._create_btn.setToolTip("" if self._can_create else "Require Permission.")
+        if self._copy_to_mgmt_action is not None:
+            self._copy_to_mgmt_action.setEnabled(bool(self.on_copy_to_mgmt_clicked))
 
     def _data_row_offset(self) -> int:
         return 1 if self._filter_visible else 0
@@ -299,6 +383,14 @@ class APIDetailsPage(QWidget):
             self._source_rows,
             _value_for_column,
             _format_cell,
+        )
+        apply_column_width_overrides(
+            self.table,
+            self._column_spec,
+            {
+                "Request": _API_DETAILS_REQUEST_RESPONSE_COL_WIDTH_PX,
+                "Response": _API_DETAILS_REQUEST_RESPONSE_COL_WIDTH_PX,
+            },
         )
         self.table.setSortingEnabled(not self._filter_visible)
 
@@ -361,13 +453,14 @@ class APIDetailsPage(QWidget):
             self._pending_refresh = True
             return
         token = self._get_token()
+        app_id = self._app_id_from_nav_steps()
         self._loading = True
         cancel_auto_hide_message(self, self._message_label)
         self._message_label.setStyleSheet(MODAL_FIELD_LABEL_STYLE)
         self._message_label.setText("Loading...")
         self._message_label.setVisible(True)
         self._load_thread = QThread(self)
-        self._load_worker = _APIDetailsLoadWorker(token)
+        self._load_worker = _APIDetailsLoadWorker(token, app_id)
         self._load_worker.moveToThread(self._load_thread)
         self._load_thread.started.connect(self._load_worker.run)
         self._load_worker.finished.connect(self._on_data_loaded)
@@ -418,6 +511,31 @@ class APIDetailsPage(QWidget):
 
     def _show_message(self, text: str, *, error: bool) -> None:
         show_auto_hiding_message(self, self._message_label, text, error=error)
+
+    def _app_id_from_nav_steps(self) -> int | str | None:
+        steps = get_nav_access_steps()
+        allowed_desc = LEFT_PANEL_NAV_ITEM_APP_ID_KEYS.get(_API_DETAILS_NAV_LABEL, ())
+        if not allowed_desc:
+            return None
+        if steps:
+            for row in steps:
+                if not isinstance(row, dict):
+                    continue
+                desc = str(row.get("appIdDescription") or row.get("app_id_description") or "").strip()
+                if desc not in allowed_desc:
+                    continue
+                app_id = row.get("appId")
+                if app_id is None:
+                    app_id = row.get("app_id")
+                if app_id is None:
+                    app_id = row.get("applicationId")
+                if app_id is None:
+                    continue
+                s = str(app_id).strip()
+                if not s:
+                    continue
+                return int(s) if s.isdigit() else s
+        return None
 
     def _has_data_row_selection(self) -> bool:
         for it in self.table.selectedItems():

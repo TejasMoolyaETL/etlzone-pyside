@@ -58,7 +58,7 @@ def _row_for_project_table(row: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in row.items() if k not in _OMITTED_FROM_PROJECT_TABLE_KEYS}
 
 _PROJECT_COLUMN_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Project Id (Internal)", ("projectid", "projectId", "project_id")),
+    ("Project Id", ("projectid", "projectId", "project_id")),
     ("Project Name", ("projectName", "project_name")),
     ("Project Desc", ("projectDesc", "project_desc", "projectDescription")),
     ("Project Owner User Id", ("projectOwnerUserld", "projectOwnerUserId", "project_owner_user_id")),

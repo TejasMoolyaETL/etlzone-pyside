@@ -1,4 +1,4 @@
-"""Map GET api-access/getAppStepList to left-panel section and sub-item visibility.
+"""Map GET api-access/get-app-id-step-id-list to left-panel section and sub-item visibility.
 
 Each API row may include ``appIdDescription``. Rows with a missing or empty
 ``appIdDescription`` are ignored.
@@ -16,7 +16,7 @@ each gated submenu is shown only when its configured ``appIdDescription`` value 
 least one step row; otherwise it is hidden.
 
 SADMIN bypass is applied in :func:`app.login_window` via ``set_nav_access_steps(None)`` and
-skipping the getAppStepList call.
+skipping the get-app-id-step-id-list call.
 
 Print a sectioned tag list: ``print(core.nav_access.format_nav_app_id_descriptions_by_section())``
 or use :func:`all_distinct_nav_app_id_descriptions` for a flat sorted tuple.
@@ -30,6 +30,9 @@ from typing import Any, Iterable
 from core.left_panel_nav_items import (
     API_MANAGEMENT_SUB_OPTIONS,
     API_SUB_OPTIONS,
+    APP_CONFIG_SUB_OPTIONS,
+    LEAD_MANAGEMENT_SUB_OPTIONS,
+    OBJECT_TRACKER_SUB_OPTIONS,
     ORG_MANAGEMENT_SUB_OPTIONS,
     USER_MANAGEMENT_SUB_OPTIONS,
 )
@@ -61,7 +64,24 @@ LEFT_PANEL_NAV_ITEM_APP_ID_KEYS: dict[str, tuple[str, ...]] = {
     "API: User Involved": ("API_DEV_USER_INVOLVED",),
     "API: Details": ("API_DEV_DETAILS",),
     "API: Validations": ("API_DEV_VALIDATIONS",),
+    "API: Tasks": ("API_DEV_TASKS", "API_DEV_TASK"),
     "API: All in One": ("API_DEV_ALL_IN_ONE",),
+    # Lead Management (align appIdDescription with backend getAppStepList when available)
+    "Lead: Company": ("LEAD_MGMT_COMPANY",),
+    "Lead: Contact Person": ("LEAD_MGMT_CONTACT_PERSON",),
+    "Lead: Company Contact Assignment": ("LEAD_MGMT_COMPANY_CONTACT_ASSIGNMENT",),
+    "Leads": ("LEAD_MGMT_LEAD",),
+    # DMT Tracker (align appIdDescription with backend getAppStepList when available)
+    "DMT - Category": ("DMT_CATEGORY",),
+    "DMT - Module": ("DMT_MODULE",),
+    "DMT - Object": ("DMT_OBJECT",),
+    "DMT - Users": ("DMT_USERS",),
+    "DMT - Object List Tracker": ("DMT_OBJECT_LIST_TRACKER",),
+    "DMT - Issue Tracker": ("DMT_ISSUE_TRACKER",),
+    # App Config (align appIdDescription with backend getAppStepList when available)
+    "Master Setup Key": ("MASTER_SETUP_KEY",),
+    "Master Setup Value": ("MASTER_SETUP_VALUE",),
+    "Master Setup Config": ("MASTER_SETUP_CONFIG",),
 }
 
 # Per-submenu actions (step-level) keyed by action name -> accepted stepIdDescription/apiName values.
@@ -87,12 +107,48 @@ LEFT_PANEL_ACTION_STEP_ID_KEYS: dict[str, dict[str, tuple[str, ...]]] = {
         "edit": ("api-dev-validations-edit",),
         "delete": ("api-dev-validations-delete",),
     },
+    "API: Tasks": {
+        "create": ("api-dev-tasks-create",),
+        "edit": ("api-dev-tasks-edit",),
+        "delete": ("api-dev-tasks-delete",),
+    },
     "API: All in One": {
         "display": ("api-dev-all-in-one-display",),
         "comment_create": ("api-dev-comment-create",),
         "comment_display": ("api-dev-comment-display",),
         "comment_edit": ("api-dev-comment-edit",),
         "comment_delete": ("api-dev-comment-delete",),
+    },
+    "Lead: Company": {
+        "create": ("lead-company-create",),
+        "display": ("lead-company-display",),
+        "edit": ("lead-company-edit",),
+        "delete": ("lead-company-delete",),
+    },
+    "Lead: Contact Person": {
+        "create": ("lead-contact-person-create",),
+        "display": ("lead-contact-person-display",),
+        "edit": ("lead-contact-person-edit",),
+        "delete": ("lead-contact-person-delete",),
+    },
+    "Lead: Company Contact Assignment": {
+        "create": ("lead-company-contact-assignment-create",),
+        "display": ("lead-company-contact-assignment-display",),
+        "edit": (
+            "lead-company-contact-assignment-edit",
+            "lead-company-contact-assignment-update",
+        ),
+        "delete": ("lead-company-contact-assignment-delete",),
+    },
+    "Leads": {
+        "create": ("lead-create",),
+        "display": ("lead-display",),
+        "edit": ("lead-edit",),
+        "delete": ("lead-delete",),
+        "comment_create": ("lead-comment-create",),
+        "comment_display": ("lead-comment-display",),
+        "comment_edit": ("lead-comment-edit",),
+        "comment_delete": ("lead-comment-delete",),
     },
 }
 
@@ -114,6 +170,9 @@ def format_nav_app_id_descriptions_by_section() -> str:
         ("API Management", list(API_MANAGEMENT_SUB_OPTIONS)),
         ("API Development", list(API_SUB_OPTIONS)),
         ("DB Design Project", ["DB Design Project"]),
+        ("Lead Management", list(LEAD_MANAGEMENT_SUB_OPTIONS)),
+        ("DMT Tracker", list(OBJECT_TRACKER_SUB_OPTIONS)),
+        ("App Config", list(APP_CONFIG_SUB_OPTIONS)),
     ]
     for section_title, labels in groups:
         lines.append(f"[{section_title}]")
@@ -219,6 +278,9 @@ class LeftPanelAccessState:
     show_api_management: bool
     show_db_design_project: bool
     show_api_development: bool
+    show_lead_management: bool
+    show_dmt_tracker: bool
+    show_app_config: bool
     api_development_title: str
     unrestricted: bool
     """When True, ignore ``visible_gated_nav_labels`` and show every sub-item."""
@@ -232,6 +294,9 @@ def build_left_panel_access_state(steps: list[dict[str, Any]] | None) -> LeftPan
     empty_visible: frozenset[str] = frozenset()
     if steps is None:
         return LeftPanelAccessState(
+            True,
+            True,
+            True,
             True,
             True,
             True,
@@ -251,6 +316,9 @@ def build_left_panel_access_state(steps: list[dict[str, Any]] | None) -> LeftPan
     show_api_mgmt = any(nav_item_visible(lbl, allowed) for lbl in API_MANAGEMENT_SUB_OPTIONS)
     show_db = nav_item_visible("DB Design Project", allowed)
     show_api_dev = any(nav_item_visible(lbl, allowed) for lbl in API_SUB_OPTIONS)
+    show_lead_mgmt = any(nav_item_visible(lbl, allowed) for lbl in LEAD_MANAGEMENT_SUB_OPTIONS)
+    show_dmt = any(nav_item_visible(lbl, allowed) for lbl in OBJECT_TRACKER_SUB_OPTIONS)
+    show_app_cfg = any(nav_item_visible(lbl, allowed) for lbl in APP_CONFIG_SUB_OPTIONS)
 
     return LeftPanelAccessState(
         show_org,
@@ -258,6 +326,9 @@ def build_left_panel_access_state(steps: list[dict[str, Any]] | None) -> LeftPan
         show_api_mgmt,
         show_db,
         show_api_dev,
+        show_lead_mgmt,
+        show_dmt,
+        show_app_cfg,
         default_title,
         False,
         visible,

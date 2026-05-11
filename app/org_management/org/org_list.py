@@ -49,7 +49,7 @@ _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "j
 
 # Column order: (header, possible API keys)
 _ORG_COLUMN_SPEC = (
-    ("Org Id", ("orgId", "org_id", "id")),
+    ("Org Id", ("orgID", "orgId", "org_id", "id")),
     ("Org Code", ("orgCode", "org_code")),
     ("Org Name", ("orgName", "org_name")),
     ("Industry", ("industry",)),
@@ -71,6 +71,13 @@ def _value_for_column(org: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, 
     for key in keys:
         if key in flat:
             return (flat[key], key)
+    # API returns nested orgStatus { keyValue, category, seq } instead of flat status
+    if "status" in keys:
+        nested = flat.get("orgStatus") or flat.get("org_status")
+        if isinstance(nested, dict):
+            kv = nested.get("keyValue") or nested.get("key_value")
+            if kv is not None:
+                return (kv, "status")
     return (None, keys[0] if keys else "")
 
 
@@ -380,7 +387,7 @@ class OrgListPage(QWidget):
         return _org_from_viewport_point(vp_pos)
 
     def _get_org_id(self, org: dict[str, Any]) -> int | str | None:
-        for k in ("orgId", "org_id", "id"):
+        for k in ("orgID", "orgId", "org_id", "id"):
             v = org.get(k)
             if v is not None:
                 return v

@@ -50,17 +50,7 @@ _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "j
 _DEPT_COLUMN_SPEC = (
     ("Department Id", ("deptId", "dept_id", "departmentId", "department_id", "id")),
     ("Department Name", ("deptName", "dept_name", "departmentName", "department_name", "name")),
-    ("BU Id", ("buId", "bu_id", "businessUnitId", "business_unit_id")),
     ("BU Name", ("buName", "bu_name", "businessUnitName", "business_unit_name")),
-    (
-        "Parent Dept Id",
-        (
-            "parentDeptId",
-            "parent_dept_id",
-            "parentDepartmentId",
-            "parent_department_id",
-        ),
-    ),
     (
         "Parent Dept Name",
         (
@@ -74,6 +64,7 @@ _DEPT_COLUMN_SPEC = (
     ),
     ("Organization Id", ("organizationId", "organization_id", "orgId", "org_id")),
     ("Organization Name", ("organizationName", "organization_name", "orgName", "org_name")),
+    ("Status", ("status",)),
     ("Created By", ("createdBy", "created_by")),
     ("Created On", ("createdOn", "created_on", "createdAt", "created_at")),
     ("Modified By", ("modifiedBy", "modified_by")),
@@ -142,17 +133,6 @@ def _value_for_column(dept: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any,
                 return (str(v).strip(), "organizationName")
         return (None, "organizationName")
 
-    if keys and keys[0] in ("buId", "bu_id", "businessUnitId", "business_unit_id"):
-        for key in keys:
-            if key in flat and not isinstance(flat[key], dict) and flat[key] is not None:
-                return (flat[key], key)
-        bu = dept.get("businessUnit") or dept.get("bu")
-        if isinstance(bu, dict):
-            v = _nested_value(bu, "buId", "bu_id", "businessUnitId", "id")
-            if v is not None:
-                return (v, "buId")
-        return (None, "buId")
-
     if keys and keys[0] in ("buName", "bu_name", "businessUnitName", "business_unit_name"):
         for key in keys:
             if key in flat and not isinstance(flat[key], dict):
@@ -165,29 +145,6 @@ def _value_for_column(dept: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any,
             if v is not None and str(v).strip():
                 return (str(v).strip(), "buName")
         return (None, "buName")
-
-    if keys and keys[0] in (
-        "parentDeptId",
-        "parent_dept_id",
-        "parentDepartmentId",
-        "parent_department_id",
-    ):
-        for key in keys:
-            if key in flat and not isinstance(flat[key], dict) and flat[key] is not None:
-                return (flat[key], key)
-        parent = _parent_department_object_from_dept(dept)
-        if isinstance(parent, dict):
-            v = _nested_value(
-                parent,
-                "deptId",
-                "dept_id",
-                "departmentId",
-                "department_id",
-                "id",
-            )
-            if v is not None:
-                return (v, "parentDeptId")
-        return (None, "parentDeptId")
 
     if keys and keys[0] in (
         "parentDeptName",
@@ -215,6 +172,23 @@ def _value_for_column(dept: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any,
             if v is not None and str(v).strip():
                 return (str(v).strip(), "parentDeptName")
         return (None, "parentDeptName")
+
+    # Status — nested status { keyValue, ... } (e.g. master ref from API)
+    if keys and "status" in keys:
+        nested = flat.get("status")
+        if isinstance(nested, dict):
+            kv = nested.get("keyValue") or nested.get("key_value")
+            if kv is not None:
+                return (kv, "status")
+        for key in keys:
+            if key not in flat:
+                continue
+            v = flat[key]
+            if isinstance(v, dict):
+                continue
+            if v is not None and str(v).strip():
+                return (v, key)
+        return (None, "status")
 
     for key in keys:
         if key in flat:

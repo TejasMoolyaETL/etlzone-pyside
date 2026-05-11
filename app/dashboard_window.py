@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from app.api_dev.api_details import (
     APIDetailsPage,
+    CopyApiDevToMgmtPage,
     CreateAPIDetailPage,
     ViewAPIDetailPage,
 )
@@ -29,7 +30,12 @@ from app.api_dev.api_validations import (
     CreateAPIValidationPage,
     ViewAPIValidationPage,
 )
-from app.api_dev.api_dev_all_in_one import ApiDevAllInOnePage
+from app.api_dev.api_dev_task import (
+    APIDevTaskPage,
+    CreateAPIDevTaskPage,
+    ViewAPIDevTaskPage,
+)
+from app.api_dev.api_dev_validation_all_in_one import ApiDevAllInOnePage
 from app.api_dev.api_project import (
     APIProjectsPage,
     CreateProjectPage,
@@ -43,6 +49,7 @@ from app.api_dev.api_userType import (
 from app.api_management.api_app_id import ApiAppIdListPage
 from app.api_management.api_registry_list import ApiRegistryListPage
 from app.api_management.api_role_assignment_page import ApiRoleAssignmentPage
+from app.api_management.role_api_assignment_page import RoleApiAssignmentPage
 from app.user_management.user_role_assignment.user_role_assignment_list import (
     UserRoleAssignmentListPage,
 )
@@ -58,8 +65,38 @@ from app.db_management.db_design_project_page import DbDesignProjectPage
 from app.user_profile.settings_page import SettingsPage
 from app.user_management.users.user_list import UsersPage
 from app.user_management.user_timepass.user_reset_password import ResetUserPasswordPage
-from app.object_tracker.category import CategoryListPage, CreateCategoryPage, ViewCategoryPage
-from app.object_tracker.module import CreateModulePage, ModuleListPage, ViewModulePage
+from app.dmt.dmt_category import CategoryListPage, CreateCategoryPage, ViewCategoryPage
+from app.dmt.dmt_module import CreateModulePage, ModuleListPage, ViewModulePage
+from app.dmt.dmt_object import CreateDmtObjectPage, DmtObjectListPage, ViewDmtObjectPage
+from app.dmt.dmt_object_tracker import (
+    CreateDmtObjectTrackerPage,
+    DmtObjectTrackerListPage,
+    ViewDmtObjectTrackerPage,
+)
+from app.dmt.dmt_user import CreateDmtUserPage, DmtCopyAppUsersPage, DmtUserListPage, ViewDmtUserPage
+from app.master_setup import CreateMasterSetupPage, MasterSetupListPage, ViewMasterSetupPage
+from app.master_setup_config import (
+    CreateMasterSetupConfigPage,
+    MasterSetupConfigListPage,
+    ViewMasterSetupConfigPage,
+)
+from app.master_setup_key import (
+    CreateMasterSetupKeyPage,
+    MasterSetupKeyListPage,
+    ViewMasterSetupKeyPage,
+)
+from app.lead_management.company import CompanyListPage, CreateCompanyPage, ViewCompanyPage
+from app.lead_management.contact_person import (
+    ContactPersonListPage,
+    CreateContactPersonPage,
+    ViewContactPersonPage,
+)
+from app.lead_management.contact_person_company_assignment import (
+    ContactPersonCompanyAssignmentListPage,
+    CreateContactPersonCompanyAssignmentPage,
+    ViewContactPersonCompanyAssignmentPage,
+)
+from app.lead_management.leads import CreateLeadPage, LeadListPage, ViewLeadPage
 from app.org_management.bu.bu_create import CreateBuPage
 from app.org_management.bu.bu_list import BuListPage
 from app.org_management.bu.bu_view import ViewBuPage
@@ -79,10 +116,17 @@ from app.user_profile.profile_view import ViewProfilePage
 from core.api import api_check_app_version
 from core.app_branding import apply_window_icon
 from core.app_version import APP_VERSION
+from core.config import app_updates_websocket_enabled
 from core.reminders_ws_client import AppUpdatesWebSocketClient
 from core.ws_notification import WsNotificationPayload
 from ui.ws_update_banner import WsUpdateBanner
 from core.nav_access import build_left_panel_access_state
+from core.left_panel_nav_items import (
+    LEAD_MANAGEMENT_SUB_OPTIONS,
+    MASTER_SETUP_CONFIG_ITEM,
+    MASTER_SETUP_ITEM,
+    MASTER_SETUP_KEY_ITEM,
+)
 from core.user_context import (
     get_nav_access_steps,
     get_user_email,
@@ -366,6 +410,109 @@ class DashboardWindow(QMainWindow):
         )
         self.stack.addWidget(self.view_module_page)
 
+        self.create_dmt_object_page = CreateDmtObjectPage(
+            on_back=self._show_object_tracker_object,
+            on_create_success=None,
+        )
+        self.stack.addWidget(self.create_dmt_object_page)
+        self.view_dmt_object_page = ViewDmtObjectPage(
+            on_back=self._show_object_tracker_object,
+            on_update_success=None,
+        )
+        self.stack.addWidget(self.view_dmt_object_page)
+        self.create_dmt_object_tracker_page = CreateDmtObjectTrackerPage(
+            on_back=self._show_object_tracker_list_tracker,
+            on_create_success=None,
+        )
+        self.stack.addWidget(self.create_dmt_object_tracker_page)
+        self.view_dmt_object_tracker_page = ViewDmtObjectTrackerPage(
+            on_back=self._show_object_tracker_list_tracker,
+            on_update_success=None,
+        )
+        self.stack.addWidget(self.view_dmt_object_tracker_page)
+        self.create_dmt_user_page = CreateDmtUserPage(
+            on_back=self._show_object_tracker_users,
+            on_create_success=None,
+        )
+        self.stack.addWidget(self.create_dmt_user_page)
+        self.view_dmt_user_page = ViewDmtUserPage(
+            on_back=self._show_object_tracker_users,
+            on_update_success=None,
+        )
+        self.stack.addWidget(self.view_dmt_user_page)
+        self.dmt_copy_app_users_page = DmtCopyAppUsersPage(on_back=self._show_object_tracker_users)
+        self.stack.addWidget(self.dmt_copy_app_users_page)
+        self.create_master_setup_page = CreateMasterSetupPage(
+            on_back=self._show_master_setup,
+            on_create_success=None,
+        )
+        self.stack.addWidget(self.create_master_setup_page)
+        self.view_master_setup_page = ViewMasterSetupPage(
+            on_back=self._show_master_setup,
+            on_update_success=None,
+        )
+        self.stack.addWidget(self.view_master_setup_page)
+        self.create_master_setup_config_page = CreateMasterSetupConfigPage(
+            on_back=self._show_master_setup_config,
+            on_create_success=None,
+        )
+        self.stack.addWidget(self.create_master_setup_config_page)
+        self.view_master_setup_config_page = ViewMasterSetupConfigPage(
+            on_back=self._show_master_setup_config,
+            on_update_success=None,
+        )
+        self.stack.addWidget(self.view_master_setup_config_page)
+        self.create_master_setup_key_page = CreateMasterSetupKeyPage(
+            on_back=self._show_master_setup_key,
+            on_create_success=None,
+        )
+        self.stack.addWidget(self.create_master_setup_key_page)
+        self.view_master_setup_key_page = ViewMasterSetupKeyPage(
+            on_back=self._show_master_setup_key,
+            on_update_success=None,
+        )
+        self.stack.addWidget(self.view_master_setup_key_page)
+        self.create_company_page = CreateCompanyPage(
+            on_back=self._show_lead_company,
+            on_create_success=None,
+        )
+        self.stack.addWidget(self.create_company_page)
+        self.view_company_page = ViewCompanyPage(
+            on_back=self._show_lead_company,
+            on_update_success=None,
+        )
+        self.stack.addWidget(self.view_company_page)
+        self.create_contact_person_page = CreateContactPersonPage(
+            on_back=self._show_lead_contact_person,
+            on_create_success=None,
+        )
+        self.stack.addWidget(self.create_contact_person_page)
+        self.view_contact_person_page = ViewContactPersonPage(
+            on_back=self._show_lead_contact_person,
+            on_update_success=None,
+        )
+        self.stack.addWidget(self.view_contact_person_page)
+        self.create_contact_person_company_assignment_page = CreateContactPersonCompanyAssignmentPage(
+            on_back=self._show_lead_contact_person_company_assignment,
+            on_create_success=None,
+        )
+        self.stack.addWidget(self.create_contact_person_company_assignment_page)
+        self.view_contact_person_company_assignment_page = ViewContactPersonCompanyAssignmentPage(
+            on_back=self._show_lead_contact_person_company_assignment,
+            on_update_success=None,
+        )
+        self.stack.addWidget(self.view_contact_person_company_assignment_page)
+        self.create_lead_page = CreateLeadPage(
+            on_back=self._show_leads,
+            on_create_success=None,
+        )
+        self.stack.addWidget(self.create_lead_page)
+        self.view_lead_page = ViewLeadPage(
+            on_back=self._show_leads,
+            on_update_success=None,
+        )
+        self.stack.addWidget(self.view_lead_page)
+
         # Create User page
         self.create_user_page = CreateUserPage(on_back=self._show_users)
         self.stack.addWidget(self.create_user_page)
@@ -403,6 +550,11 @@ class DashboardWindow(QMainWindow):
         )
         self.stack.addWidget(self.view_api_detail_page)
 
+        self.copy_api_dev_to_mgmt_page = CopyApiDevToMgmtPage(
+            on_back=self._show_api_details,
+        )
+        self.stack.addWidget(self.copy_api_dev_to_mgmt_page)
+
         # Create API Validation page (API: Validations)
         self.create_api_validation_page = CreateAPIValidationPage()
         self.stack.addWidget(self.create_api_validation_page)
@@ -413,6 +565,15 @@ class DashboardWindow(QMainWindow):
             on_update_success=lambda: None,
         )
         self.stack.addWidget(self.view_api_validation_page)
+
+        # Create/View API Task pages (API: Tasks)
+        self.create_api_dev_task_page = CreateAPIDevTaskPage()
+        self.stack.addWidget(self.create_api_dev_task_page)
+        self.view_api_dev_task_page = ViewAPIDevTaskPage(
+            on_back=self._show_api_dev_tasks,
+            on_update_success=lambda: None,
+        )
+        self.stack.addWidget(self.view_api_dev_task_page)
 
         # View Profile page
         self.view_profile_page = ViewProfilePage(on_back=self._show_dashboard)
@@ -500,6 +661,8 @@ class DashboardWindow(QMainWindow):
                 page = ApiRegistryListPage()
             elif name == "API: API-Role Assignment":
                 page = ApiRoleAssignmentPage()
+            elif name == "API: Role-API Assignment":
+                page = RoleApiAssignmentPage()
             else:
                 page = self._make_placeholder_page(name)
             self.stack.addWidget(page)
@@ -590,6 +753,7 @@ class DashboardWindow(QMainWindow):
                 page = APIDetailsPage(
                     on_create_clicked=self._show_create_api_detail,
                     on_edit_clicked=lambda r, e: self._show_view_api_detail(r, e),
+                    on_copy_to_mgmt_clicked=self._show_copy_api_dev_to_mgmt,
                 )
                 self.create_api_detail_page.on_back = self._show_api_details
                 self.create_api_detail_page.on_create_success = None
@@ -602,6 +766,14 @@ class DashboardWindow(QMainWindow):
                 self.create_api_validation_page.on_back = self._show_api_validations
                 self.create_api_validation_page.on_create_success = None
                 self.view_api_validation_page.on_update_success = None
+            elif name == "API: Tasks":
+                page = APIDevTaskPage(
+                    on_create_clicked=self._show_create_api_dev_task,
+                    on_edit_clicked=lambda r, e: self._show_view_api_dev_task(r, e),
+                )
+                self.create_api_dev_task_page.on_back = self._show_api_dev_tasks
+                self.create_api_dev_task_page.on_create_success = None
+                self.view_api_dev_task_page.on_update_success = None
             elif name == "API: All in One":
                 page = ApiDevAllInOnePage(
                     on_add_detail_clicked=self._show_create_api_detail_from_testing,
@@ -632,17 +804,99 @@ class DashboardWindow(QMainWindow):
                 )
                 self.create_module_page.on_create_success = page.refresh
                 self.view_module_page.on_update_success = page.refresh
+            elif name == "DMT - Object":
+                page = DmtObjectListPage(
+                    on_create_clicked=self._show_create_dmt_object,
+                    on_edit_clicked=lambda o, e: self._show_view_dmt_object(o, e),
+                )
+                self.create_dmt_object_page.on_create_success = page.refresh
+                self.view_dmt_object_page.on_update_success = page.refresh
+            elif name == "DMT - Object List Tracker":
+                page = DmtObjectTrackerListPage(
+                    on_create_clicked=self._show_create_dmt_object_tracker,
+                    on_edit_clicked=lambda rec, e: self._show_view_dmt_object_tracker(rec, e),
+                )
+                self.create_dmt_object_tracker_page.on_create_success = page.refresh
+                self.view_dmt_object_tracker_page.on_update_success = page.refresh
+            elif name == "DMT - Users":
+                page = DmtUserListPage(
+                    on_create_clicked=self._show_create_dmt_user,
+                    on_edit_clicked=lambda user, e: self._show_view_dmt_user(user, e),
+                    on_copy_app_users_clicked=self._show_copy_dmt_app_users,
+                )
+                self.create_dmt_user_page.on_create_success = page.refresh
+                self.view_dmt_user_page.on_update_success = page.refresh
+            elif name == MASTER_SETUP_ITEM:
+                page = MasterSetupListPage()
             else:
                 page = self._make_placeholder_page(name)
             self.stack.addWidget(page)
             self._object_tracker_pages[name] = page
+
+        self.master_setup_page = MasterSetupListPage(
+            on_create_clicked=self._show_create_master_setup,
+            on_edit_clicked=lambda r, e: self._show_view_master_setup(r, e),
+        )
+        self.create_master_setup_page.on_create_success = self.master_setup_page.refresh
+        self.view_master_setup_page.on_update_success = self.master_setup_page.refresh
+        self.stack.addWidget(self.master_setup_page)
+        self.master_setup_config_page = MasterSetupConfigListPage(
+            on_create_clicked=self._show_create_master_setup_config,
+            on_edit_clicked=lambda r, e: self._show_view_master_setup_config(r, e),
+        )
+        self.create_master_setup_config_page.on_create_success = self.master_setup_config_page.refresh
+        self.view_master_setup_config_page.on_update_success = self.master_setup_config_page.refresh
+        self.stack.addWidget(self.master_setup_config_page)
+        self.master_setup_key_page = MasterSetupKeyListPage(
+            on_create_clicked=self._show_create_master_setup_key,
+            on_edit_clicked=lambda r, e: self._show_view_master_setup_key(r, e),
+        )
+        self.create_master_setup_key_page.on_create_success = self._on_master_setup_key_data_changed
+        self.view_master_setup_key_page.on_update_success = self._on_master_setup_key_data_changed
+        self.stack.addWidget(self.master_setup_key_page)
+
+        self._lead_management_pages: dict[str, QWidget] = {}
+        for name in LEAD_MANAGEMENT_SUB_OPTIONS:
+            if name == "Lead: Company":
+                page = CompanyListPage(
+                    on_create_clicked=self._show_create_company,
+                    on_edit_clicked=lambda company, e: self._show_view_company(company, e),
+                )
+                self.create_company_page.on_create_success = page.refresh
+                self.view_company_page.on_update_success = page.refresh
+            elif name == "Lead: Contact Person":
+                page = ContactPersonListPage(
+                    on_create_clicked=self._show_create_contact_person,
+                    on_edit_clicked=lambda rec, e: self._show_view_contact_person(rec, e),
+                )
+                self.create_contact_person_page.on_create_success = page.refresh
+                self.view_contact_person_page.on_update_success = page.refresh
+            elif name == "Lead: Company Contact Assignment":
+                page = ContactPersonCompanyAssignmentListPage(
+                    on_create_clicked=self._show_create_contact_person_company_assignment,
+                    on_edit_clicked=lambda rec, e: self._show_view_contact_person_company_assignment(rec, e),
+                )
+                self.create_contact_person_company_assignment_page.on_create_success = page.refresh
+                self.view_contact_person_company_assignment_page.on_update_success = page.refresh
+            elif name == "Leads":
+                page = LeadListPage(
+                    on_create_clicked=self._show_create_lead,
+                    on_edit_clicked=lambda rec, e: self._show_view_lead(rec, e),
+                )
+                self.create_lead_page.on_create_success = page.refresh
+                self.view_lead_page.on_update_success = page.refresh
+            else:
+                page = self._make_placeholder_page(name)
+            self._lead_management_pages[name] = page
+            self.stack.addWidget(page)
 
         root_layout.addWidget(self.stack, 1)
         root_outer.addWidget(content_row, 1)
         self.left_panel.set_current_item("Dashboard")
         # WebSocket + floating notification bar only after sign-in (this window is post-login).
         # Help → Check for update uses the same session and is only available here.
-        self._reminders_ws.start()
+        if app_updates_websocket_enabled():
+            self._reminders_ws.start()
         # Silent API check after sign-in: show the WS-style strip only when there is news (no modal).
         QTimer.singleShot(0, self._run_post_login_version_banner_check)
 
@@ -689,6 +943,26 @@ class DashboardWindow(QMainWindow):
         elif item_name == "DB Design Project":
             self.stack.setCurrentWidget(self.db_design_project_page)
             self.left_panel.set_current_item("DB Design Project")
+        elif item_name == MASTER_SETUP_ITEM:
+            self.stack.setCurrentWidget(self.master_setup_page)
+            self.left_panel.set_current_item(MASTER_SETUP_ITEM)
+        elif item_name == MASTER_SETUP_CONFIG_ITEM:
+            self.stack.setCurrentWidget(self.master_setup_config_page)
+            self.left_panel.set_current_item(MASTER_SETUP_CONFIG_ITEM)
+        elif item_name == MASTER_SETUP_KEY_ITEM:
+            self.stack.setCurrentWidget(self.master_setup_key_page)
+            refresh_mk = getattr(self.master_setup_key_page, "refresh", None)
+            if callable(refresh_mk):
+                refresh_mk()
+            self.left_panel.set_current_item(MASTER_SETUP_KEY_ITEM)
+        elif item_name in self._lead_management_pages:
+            w = self._lead_management_pages[item_name]
+            self.stack.setCurrentWidget(w)
+            # Always reload list data: Qt may not emit QShowEvent when the page is already current.
+            refresh_fn = getattr(w, "refresh", None)
+            if callable(refresh_fn):
+                refresh_fn()
+            self.left_panel.set_current_item(item_name)
         elif item_name in self._object_tracker_pages:
             self.stack.setCurrentWidget(self._object_tracker_pages[item_name])
             self.left_panel.set_current_item(item_name)
@@ -776,6 +1050,21 @@ class DashboardWindow(QMainWindow):
                 )
                 if reply == QMessageBox.StandardButton.Discard:
                     self.create_api_validation_page.reset_to_default()
+                    return True
+                return False
+            return True
+        # Create API Task page - form modified
+        if self.stack.currentWidget() is self.create_api_dev_task_page:
+            if self.create_api_dev_task_page.is_dirty():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.create_api_dev_task_page.reset_to_default()
                     return True
                 return False
             return True
@@ -886,6 +1175,23 @@ class DashboardWindow(QMainWindow):
             )
             if reply == QMessageBox.StandardButton.Discard:
                 self.view_api_validation_page._handle_cancel()
+                return True
+            return False
+        # View API Task page - edit mode
+        if self.stack.currentWidget() is self.view_api_dev_task_page:
+            if not self.view_api_dev_task_page.is_edit_mode():
+                return True
+            if not self.view_api_dev_task_page._has_unsaved_changes():
+                return True
+            reply = QMessageBox.question(
+                self,
+                "Unsaved Changes",
+                "You have unsaved changes. Discard and leave?",
+                QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if reply == QMessageBox.StandardButton.Discard:
+                self.view_api_dev_task_page._handle_cancel()
                 return True
             return False
         # View User Type page - edit mode
@@ -1053,6 +1359,270 @@ class DashboardWindow(QMainWindow):
                     return True
                 return False
             return True
+        # Create DMT Object page - form modified
+        if self.stack.currentWidget() is self.create_dmt_object_page:
+            if self.create_dmt_object_page.is_dirty():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.create_dmt_object_page.reset_to_default()
+                    return True
+                return False
+            return True
+        # View DMT Object page - edit mode
+        if self.stack.currentWidget() is self.view_dmt_object_page:
+            if self.view_dmt_object_page.is_edit_mode():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.view_dmt_object_page._handle_cancel()
+                    return True
+                return False
+            return True
+        # Create DMT Object Tracker page - form modified
+        if self.stack.currentWidget() is self.create_dmt_object_tracker_page:
+            if self.create_dmt_object_tracker_page.is_dirty():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.create_dmt_object_tracker_page.reset_to_default()
+                    return True
+                return False
+            return True
+        # View DMT Object Tracker page - edit mode
+        if self.stack.currentWidget() is self.view_dmt_object_tracker_page:
+            if self.view_dmt_object_tracker_page.is_edit_mode():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.view_dmt_object_tracker_page._handle_cancel()
+                    return True
+                return False
+            return True
+        # Create DMT User page - form modified
+        if self.stack.currentWidget() is self.create_dmt_user_page:
+            if self.create_dmt_user_page.is_dirty():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.create_dmt_user_page.reset_to_default()
+                    return True
+                return False
+            return True
+        # View DMT User page - edit mode
+        if self.stack.currentWidget() is self.view_dmt_user_page:
+            if self.view_dmt_user_page.is_edit_mode():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.view_dmt_user_page._handle_cancel()
+                    return True
+                return False
+            return True
+        # Create Company page - form modified
+        if self.stack.currentWidget() is self.create_company_page:
+            if self.create_company_page.is_dirty():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.create_company_page.reset_to_default()
+                    return True
+                return False
+            return True
+        # View Company page - edit mode
+        if self.stack.currentWidget() is self.view_company_page:
+            if self.view_company_page.is_edit_mode():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.view_company_page._handle_cancel()
+                    return True
+                return False
+            return True
+        if self.stack.currentWidget() is self.create_contact_person_page:
+            if self.create_contact_person_page.is_dirty():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.create_contact_person_page.reset_to_default()
+                    return True
+                return False
+            return True
+        if self.stack.currentWidget() is self.view_contact_person_page:
+            if self.view_contact_person_page.is_edit_mode():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.view_contact_person_page._handle_cancel()
+                    return True
+                return False
+            return True
+        if self.stack.currentWidget() is self.create_contact_person_company_assignment_page:
+            if self.create_contact_person_company_assignment_page.is_dirty():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.create_contact_person_company_assignment_page.reset_to_default()
+                    return True
+                return False
+            return True
+        if self.stack.currentWidget() is self.view_contact_person_company_assignment_page:
+            if self.view_contact_person_company_assignment_page.is_edit_mode():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.view_contact_person_company_assignment_page._handle_cancel()
+                    return True
+                return False
+            return True
+        # Create Master Setup page - form modified
+        if self.stack.currentWidget() is self.create_master_setup_page:
+            if self.create_master_setup_page.is_dirty():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.create_master_setup_page.reset_to_default()
+                    return True
+                return False
+            return True
+        # View Master Setup page - edit mode
+        if self.stack.currentWidget() is self.view_master_setup_page:
+            if self.view_master_setup_page.is_edit_mode():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.view_master_setup_page._handle_cancel()
+                    return True
+                return False
+            return True
+        # Create Master Setup Config page - form modified
+        if self.stack.currentWidget() is self.create_master_setup_config_page:
+            if self.create_master_setup_config_page.is_dirty():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.create_master_setup_config_page.reset_to_default()
+                    return True
+                return False
+            return True
+        # View Master Setup Config page - edit mode
+        if self.stack.currentWidget() is self.view_master_setup_config_page:
+            if self.view_master_setup_config_page.is_edit_mode():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.view_master_setup_config_page._handle_cancel()
+                    return True
+                return False
+            return True
+        if self.stack.currentWidget() is self.create_master_setup_key_page:
+            if self.create_master_setup_key_page.is_dirty():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.create_master_setup_key_page.reset_to_default()
+                    return True
+                return False
+            return True
+        if self.stack.currentWidget() is self.view_master_setup_key_page:
+            if self.view_master_setup_key_page.is_edit_mode():
+                reply = QMessageBox.question(
+                    self,
+                    "Unsaved Changes",
+                    "You have unsaved changes. Discard and leave?",
+                    QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    self.view_master_setup_key_page._handle_cancel()
+                    return True
+                return False
+            return True
         return True
 
     def _create_menu_bar(self) -> None:
@@ -1162,11 +1732,16 @@ class DashboardWindow(QMainWindow):
         self.stack.setCurrentWidget(self._api_pages["API: User Involved"])
 
     def _show_api_details(self) -> None:
+        self.create_api_detail_page.reload_api_status_options()
         self.stack.setCurrentWidget(self._api_pages["API: Details"])
+
+    def _show_copy_api_dev_to_mgmt(self) -> None:
+        self.stack.setCurrentWidget(self.copy_api_dev_to_mgmt_page)
 
     def _show_create_api_detail(self) -> None:
         self.create_api_detail_page.on_back = self._show_api_details
         self.create_api_detail_page.on_create_success = None
+        self.create_api_detail_page.reload_api_status_options()
         self.stack.setCurrentWidget(self.create_api_detail_page)
 
     def _show_view_api_detail(self, record: dict, edit_mode: bool = False) -> None:
@@ -1176,6 +1751,9 @@ class DashboardWindow(QMainWindow):
 
     def _show_api_validations(self) -> None:
         self.stack.setCurrentWidget(self._api_pages["API: Validations"])
+
+    def _show_api_dev_tasks(self) -> None:
+        self.stack.setCurrentWidget(self._api_pages["API: Tasks"])
 
     def _show_create_api_validation(self) -> None:
         self.create_api_validation_page.on_back = self._show_api_validations
@@ -1189,12 +1767,24 @@ class DashboardWindow(QMainWindow):
         self.view_api_validation_page.set_record(record, edit_mode=edit_mode)
         self.stack.setCurrentWidget(self.view_api_validation_page)
 
+    def _show_create_api_dev_task(self) -> None:
+        self.create_api_dev_task_page.on_back = self._show_api_dev_tasks
+        self.create_api_dev_task_page.on_create_success = None
+        self.stack.setCurrentWidget(self.create_api_dev_task_page)
+
+    def _show_view_api_dev_task(self, record: dict, edit_mode: bool = False) -> None:
+        self.view_api_dev_task_page.on_back = self._show_api_dev_tasks
+        self.view_api_dev_task_page.on_update_success = None
+        self.view_api_dev_task_page.set_task(record, edit_mode=edit_mode)
+        self.stack.setCurrentWidget(self.view_api_dev_task_page)
+
     def _show_api_testing(self) -> None:
         self.stack.setCurrentWidget(self._api_pages["API: All in One"])
 
     def _show_create_api_detail_from_testing(self) -> None:
         self.create_api_detail_page.on_back = self._show_api_testing
         self.create_api_detail_page.on_create_success = None
+        self.create_api_detail_page.reload_api_status_options()
         self.stack.setCurrentWidget(self.create_api_detail_page)
 
     def _show_view_api_detail_from_testing(self, record: dict, edit_mode: bool = False) -> None:
@@ -1264,6 +1854,135 @@ class DashboardWindow(QMainWindow):
     def _show_view_module(self, module: dict, edit_mode: bool = False) -> None:
         self.view_module_page.set_module(module, edit_mode=edit_mode)
         self.stack.setCurrentWidget(self.view_module_page)
+
+    def _show_object_tracker_object(self) -> None:
+        self.stack.setCurrentWidget(self._object_tracker_pages["DMT - Object"])
+
+    def _show_create_dmt_object(self) -> None:
+        self.stack.setCurrentWidget(self.create_dmt_object_page)
+
+    def _show_view_dmt_object(self, obj: dict, edit_mode: bool = False) -> None:
+        self.view_dmt_object_page.set_object(obj, edit_mode=edit_mode)
+        self.stack.setCurrentWidget(self.view_dmt_object_page)
+
+    def _show_object_tracker_list_tracker(self) -> None:
+        self.stack.setCurrentWidget(self._object_tracker_pages["DMT - Object List Tracker"])
+
+    def _show_create_dmt_object_tracker(self) -> None:
+        self.stack.setCurrentWidget(self.create_dmt_object_tracker_page)
+
+    def _show_view_dmt_object_tracker(self, rec: dict, edit_mode: bool = False) -> None:
+        self.view_dmt_object_tracker_page.set_record(rec, edit_mode=edit_mode)
+        self.stack.setCurrentWidget(self.view_dmt_object_tracker_page)
+
+    def _show_object_tracker_users(self) -> None:
+        self.stack.setCurrentWidget(self._object_tracker_pages["DMT - Users"])
+
+    def _show_copy_dmt_app_users(self) -> None:
+        self.stack.setCurrentWidget(self.dmt_copy_app_users_page)
+
+    def _show_create_dmt_user(self) -> None:
+        self.stack.setCurrentWidget(self.create_dmt_user_page)
+
+    def _show_view_dmt_user(self, user: dict, edit_mode: bool = False) -> None:
+        self.view_dmt_user_page.set_user(user, edit_mode=edit_mode)
+        self.stack.setCurrentWidget(self.view_dmt_user_page)
+
+    def _show_master_setup(self) -> None:
+        self.stack.setCurrentWidget(self.master_setup_page)
+
+    def _show_master_setup_key(self) -> None:
+        self.stack.setCurrentWidget(self.master_setup_key_page)
+
+    def _on_master_setup_key_data_changed(self) -> None:
+        """Refresh Master Setup Key list and Create Master Setup Value category combo."""
+        self.master_setup_key_page.refresh()
+        self.create_master_setup_page.refresh_categories()
+
+    def _show_create_master_setup_key(self) -> None:
+        self.stack.setCurrentWidget(self.create_master_setup_key_page)
+
+    def _show_view_master_setup_key(self, record: dict, edit_mode: bool = False) -> None:
+        self.view_master_setup_key_page.set_record(record, edit_mode=edit_mode)
+        self.stack.setCurrentWidget(self.view_master_setup_key_page)
+
+    def _show_master_setup_config(self) -> None:
+        self.stack.setCurrentWidget(self.master_setup_config_page)
+
+    def _show_lead_company(self) -> None:
+        w = self._lead_management_pages["Lead: Company"]
+        self.stack.setCurrentWidget(w)
+        refresh_fn = getattr(w, "refresh", None)
+        if callable(refresh_fn):
+            refresh_fn()
+
+    def _show_create_company(self) -> None:
+        for page in self._lead_management_pages.values():
+            refresh_fn = getattr(page, "refresh", None)
+            if callable(refresh_fn):
+                refresh_fn()
+        self.stack.setCurrentWidget(self.create_company_page)
+
+    def _show_view_company(self, company: dict, edit_mode: bool = False) -> None:
+        self.view_company_page.set_company(company, edit_mode=edit_mode)
+        self.stack.setCurrentWidget(self.view_company_page)
+
+    def _show_lead_contact_person(self) -> None:
+        w = self._lead_management_pages["Lead: Contact Person"]
+        self.stack.setCurrentWidget(w)
+        refresh_fn = getattr(w, "refresh", None)
+        if callable(refresh_fn):
+            refresh_fn()
+
+    def _show_create_contact_person(self) -> None:
+        self.stack.setCurrentWidget(self.create_contact_person_page)
+
+    def _show_view_contact_person(self, rec: dict, edit_mode: bool = False) -> None:
+        self.view_contact_person_page.set_contact_person(rec, edit_mode=edit_mode)
+        self.stack.setCurrentWidget(self.view_contact_person_page)
+
+    def _show_lead_contact_person_company_assignment(self) -> None:
+        w = self._lead_management_pages["Lead: Company Contact Assignment"]
+        self.stack.setCurrentWidget(w)
+        refresh_fn = getattr(w, "refresh", None)
+        if callable(refresh_fn):
+            refresh_fn()
+
+    def _show_leads(self) -> None:
+        w = self._lead_management_pages["Leads"]
+        self.stack.setCurrentWidget(w)
+        refresh_fn = getattr(w, "refresh", None)
+        if callable(refresh_fn):
+            refresh_fn()
+
+    def _show_create_lead(self) -> None:
+        self.stack.setCurrentWidget(self.create_lead_page)
+
+    def _show_view_lead(self, rec: dict, edit_mode: bool = False) -> None:
+        self.view_lead_page.set_lead(rec, edit_mode=edit_mode)
+        self.stack.setCurrentWidget(self.view_lead_page)
+
+    def _show_create_contact_person_company_assignment(self, prefill: dict | None = None) -> None:
+        self.create_contact_person_company_assignment_page.set_prefill(prefill)
+        self.stack.setCurrentWidget(self.create_contact_person_company_assignment_page)
+
+    def _show_view_contact_person_company_assignment(self, rec: dict, edit_mode: bool = False) -> None:
+        self.view_contact_person_company_assignment_page.set_assignment(rec, edit_mode=edit_mode)
+        self.stack.setCurrentWidget(self.view_contact_person_company_assignment_page)
+
+    def _show_create_master_setup(self) -> None:
+        self.stack.setCurrentWidget(self.create_master_setup_page)
+
+    def _show_view_master_setup(self, record: dict, edit_mode: bool = False) -> None:
+        self.view_master_setup_page.set_record(record, edit_mode=edit_mode)
+        self.stack.setCurrentWidget(self.view_master_setup_page)
+
+    def _show_create_master_setup_config(self) -> None:
+        self.stack.setCurrentWidget(self.create_master_setup_config_page)
+
+    def _show_view_master_setup_config(self, record: dict, edit_mode: bool = False) -> None:
+        self.view_master_setup_config_page.set_record(record, edit_mode=edit_mode)
+        self.stack.setCurrentWidget(self.view_master_setup_config_page)
 
     def _show_about_dialog(self) -> None:
         QMessageBox.information(

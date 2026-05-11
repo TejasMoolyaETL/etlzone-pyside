@@ -50,10 +50,10 @@ from ui.styles import CONTEXT_MENU_STYLESHEET
 _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "jwt"})
 
 _USER_INVOLVED_COLUMN_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("User Id (Internal)", ("id", "internalId", "internal_id")),
+    ("Role Id", ("id", "internalId", "internal_id")),
+    ("Role", ("userType", "user_type")),
     ("Project Id", ("projectId", "projectid", "project_id")),
     ("Project Name", ("projectName", "project_name", "name")),
-    ("Role", ("userType", "user_type")),
     ("Created By", ("createdBy", "created_by", "CreatedBy")),
     ("Created At", ("createdAt", "created_at", "CreatedAt", "createDate", "creationDate", "dateCreated")),
     ("Modified By", ("modifiedBy", "modified_by", "ModifiedBy")),

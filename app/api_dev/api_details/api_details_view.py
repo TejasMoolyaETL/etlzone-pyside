@@ -27,8 +27,18 @@ from PySide6.QtWidgets import (
 )
 
 from app.api_dev.api_details.api_method_combo import configure_api_method_combo
-from core.api import api_get_all_projects, api_update_api_detail_by_id
-from core.nav_access import collect_allowed_action_names, nav_action_visible
+from core.api import (
+    api_get_all_projects,
+    api_get_master_key_by_app_id_field_name,
+    api_update_api_detail_by_id,
+    master_key_row_display_label,
+    master_key_row_seq_value,
+)
+from core.nav_access import (
+    LEFT_PANEL_NAV_ITEM_APP_ID_KEYS,
+    collect_allowed_action_names,
+    nav_action_visible,
+)
 from core.app_preferences import format_datetime_display, is_datetime_field
 from ui.blank_display import is_blank_display_value
 from core.user_context import get_nav_access_steps, get_user_profile
@@ -51,11 +61,33 @@ from ui.post_save_navigation import navigate_after_no_changes, schedule_after_su
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
 _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "jwt"})
+_API_STATUS_KEYS = (
+    "apiStatus",
+    "api_status",
+    "apistatus",
+    "apiStatusResponse.keyValue",
+    "keyValue",
+    "key_value",
+    "seqId",
+    "seq_id",
+    "apiStatusResponse.seq",
+)
 
 
 def _get_value(record: dict[str, Any], keys: tuple[str, ...]) -> Any:
     flat = {k: v for k, v in record.items() if k not in _HIDDEN_KEYS}
     for key in keys:
+        if "." in key:
+            cur: Any = flat
+            ok = True
+            for part in key.split("."):
+                if isinstance(cur, dict) and part in cur:
+                    cur = cur[part]
+                else:
+                    ok = False
+                    break
+            if ok:
+                return cur
         if key in flat:
             return flat[key]
     return None
@@ -64,6 +96,11 @@ def _get_value(record: dict[str, Any], keys: tuple[str, ...]) -> Any:
 def _format_value(value: Any, key: str = "", key_candidates: tuple[str, ...] = ()) -> str:
     if is_blank_display_value(value):
         return ""
+    if key_candidates == _API_STATUS_KEYS:
+        if isinstance(value, dict):
+            kv = str(value.get("keyValue") or value.get("key_value") or "").strip()
+            return kv
+        return str(value)
     if is_datetime_field(key, key_candidates):
         return format_datetime_display(value)
     if isinstance(value, bool):
@@ -74,6 +111,8 @@ def _format_value(value: Any, key: str = "", key_candidates: tuple[str, ...] = (
 
 
 _MULTILINE_DETAIL_HEIGHT = 120
+_API_DETAILS_NAV_LABEL = "API: Details"
+_API_STATUS_FIELD_NAME = "api_status"
 
 _DETAIL_COL1 = (
     ("API ID (Internal)", ("apiId", "api_id", "id")),
@@ -87,7 +126,7 @@ _DETAIL_COL1 = (
 )
 _DETAIL_COL2 = (
     ("Requirement", ("requirement", "Requirement")),
-    ("API Status", ("apiStatus", "api_status", "apistatus")),
+    ("API Status", _API_STATUS_KEYS),
     ("Comments", ("comments", "Comments")),
     ("Request", ("request", "Request")),
 )
@@ -150,6 +189,7 @@ class ViewAPIDetailPage(QWidget):
         self._localhost_path_icon: QToolButton | None = None
         self._server_path_icon: QToolButton | None = None
         self._build_ui()
+        self._load_api_status_options()
 
     def set_record(self, record: dict[str, Any], edit_mode: bool = False) -> None:
         self._record = dict(record)
@@ -186,7 +226,7 @@ class ViewAPIDetailPage(QWidget):
                             default_index=0,
                         )
                     else:
-                        widget.setCurrentText(text if text else "ACTIVE")
+                        self._select_api_status_from_record(value, text)
                 elif isinstance(widget, QPlainTextEdit):
                     widget.setPlainText(text)
                 else:
@@ -440,6 +480,86 @@ class ViewAPIDetailPage(QWidget):
     def _show_error(self, message: str) -> None:
         show_auto_hiding_message(self, self._error_label, message, error=True)
 
+    def _app_id_from_nav_steps(self) -> int | str | None:
+        steps = get_nav_access_steps()
+        allowed_desc = LEFT_PANEL_NAV_ITEM_APP_ID_KEYS.get(_API_DETAILS_NAV_LABEL, ())
+        if not allowed_desc:
+            return None
+        if steps:
+            for row in steps:
+                if not isinstance(row, dict):
+                    continue
+                desc = str(row.get("appIdDescription") or row.get("app_id_description") or "").strip()
+                if desc not in allowed_desc:
+                    continue
+                app_id = row.get("appId")
+                if app_id is None:
+                    app_id = row.get("app_id")
+                if app_id is None:
+                    app_id = row.get("applicationId")
+                if app_id is None:
+                    continue
+                app_id_text = str(app_id).strip()
+                if not app_id_text:
+                    continue
+                return int(app_id_text) if app_id_text.isdigit() else app_id_text
+        return None
+
+    def _load_api_status_options(self) -> None:
+        combo = self._field_edits.get("apiStatus")
+        if not isinstance(combo, QComboBox):
+            return
+        profile = get_user_profile()
+        token = (
+            profile.get("token")
+            or profile.get("accessToken")
+            or profile.get("access_token")
+            or profile.get("jwt")
+        )
+        token = str(token) if token else None
+        result = api_get_master_key_by_app_id_field_name(
+            field_name=_API_STATUS_FIELD_NAME,
+            token=token,
+        )
+        rows = result.get("data") if result.get("success") else []
+        options: list[tuple[str, Any, str]] = []
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                label = (master_key_row_display_label(row) or "").strip()
+                seq = master_key_row_seq_value(row)
+                key_value = str(row.get("keyValue") or row.get("key_value") or "").strip().upper()
+                if label and seq is not None:
+                    options.append((label, seq, key_value))
+        if not options:
+            options = [("ACTIVE", "ACTIVE", "ACTIVE"), ("INACTIVE", "INACTIVE", "INACTIVE")]
+        combo.blockSignals(True)
+        combo.clear()
+        for label, seq, _ in options:
+            combo.addItem(label, seq)
+        combo.blockSignals(False)
+
+    def _select_api_status_from_record(self, raw_value: Any, text_value: str) -> None:
+        combo = self._field_edits.get("apiStatus")
+        if not isinstance(combo, QComboBox):
+            return
+        seq_text = str(raw_value).strip() if raw_value is not None else ""
+        if seq_text:
+            idx = combo.findData(int(seq_text) if seq_text.isdigit() else seq_text)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+                return
+        t = (text_value or "").strip().upper()
+        if t:
+            for i in range(combo.count()):
+                item_t = combo.itemText(i).strip().upper()
+                if item_t == t or item_t.endswith(f"| {t}") or item_t.endswith(f"|{t}"):
+                    combo.setCurrentIndex(i)
+                    return
+        if combo.count() > 0:
+            combo.setCurrentIndex(0)
+
     def _show_success(self, message: str) -> None:
         show_auto_hiding_message(self, self._error_label, message, error=False)
 
@@ -514,6 +634,7 @@ class ViewAPIDetailPage(QWidget):
         result = api_update_api_detail_by_id(
             api_id,
             token=token,
+            app_id=self._app_id_from_nav_steps(),
             folder=self._get_edit_value("folder"),
             api_method=api_method,
             api_name=api_name,
@@ -537,11 +658,18 @@ class ViewAPIDetailPage(QWidget):
             on_success=self.on_update_success,
         )
 
-    def _get_edit_value(self, key: str) -> str:
+    def _get_edit_value(self, key: str) -> str | int:
         widget = self._field_edits.get(key)
         if not widget:
             return ""
         if isinstance(widget, QComboBox):
+            if key in ("apiStatus", "api_status"):
+                data = widget.currentData()
+                if data is None:
+                    return ""
+                if isinstance(data, int):
+                    return data
+                return str(data).strip()
             return widget.currentText().strip()
         if isinstance(widget, QPlainTextEdit):
             return widget.toPlainText().strip()

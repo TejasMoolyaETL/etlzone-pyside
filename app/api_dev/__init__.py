@@ -1,1 +1,1 @@
-"""API Dev package: API details, projects, user types, validations, all-in-one."""
+"""API Dev package: details, projects, user types, validations, tasks, all-in-one."""

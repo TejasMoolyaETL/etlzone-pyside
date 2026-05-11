@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QEasingCurve, QPropertyAnimation, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from core.left_panel_nav_items import (
+    APP_CONFIG_SUB_OPTIONS,
     API_MANAGEMENT_SUB_OPTIONS,
     API_SUB_OPTIONS,
+    LEAD_MANAGEMENT_SUB_OPTIONS,
+    MASTER_SETUP_ITEM,
     OBJECT_TRACKER_SUB_OPTIONS,
     ORG_MANAGEMENT_SUB_OPTIONS,
     USER_MANAGEMENT_SUB_OPTIONS,
@@ -35,7 +38,7 @@ def _make_tinted_icon(path: Path, r: int, g: int, b: int) -> QIcon | None:
     return QIcon(QPixmap.fromImage(img))
 
 # Order: Dashboard, Org Management, User Management, API Management,
-#        API Development, DB Design Project, DMT Tracker (last main sections before bottom actions)
+#        API Development, DB Design Project, Lead Management, DMT Tracker, App Config (before bottom actions)
 DEFAULT_PANEL_ITEMS = ["Dashboard", "DB Design Project"]
 
 # Bottom section items (pinned at bottom)
@@ -83,17 +86,36 @@ class AppLeftPanel(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setFixedWidth(280)
+        self._default_panel_width = 280
+        self._min_panel_width = 220
+        self._max_panel_width = 520
+        self._resizing_panel = False
+        self._resize_start_global_x = 0
+        self._resize_start_width = self._default_panel_width
+        self.setMinimumWidth(self._min_panel_width)
+        self.setMaximumWidth(self._max_panel_width)
+        self.setFixedWidth(self._default_panel_width)
         self._items = items or DEFAULT_PANEL_ITEMS
         self._bottom_items = bottom_items or DEFAULT_PANEL_BOTTOM_ITEMS
 
         panel = QFrame()
         panel.setStyleSheet(PANEL_STYLESHEET)
 
-        root_layout = QVBoxLayout(self)
+        root_layout = QHBoxLayout(self)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
-        root_layout.addWidget(panel)
+        root_layout.addWidget(panel, 1)
+
+        self._resize_handle = QFrame()
+        self._resize_handle.setObjectName("leftPanelResizeHandle")
+        self._resize_handle.setFixedWidth(6)
+        self._resize_handle.setCursor(Qt.CursorShape.SizeHorCursor)
+        self._resize_handle.setStyleSheet(
+            "#leftPanelResizeHandle { background: #d1d5db; border: none; }"
+            "#leftPanelResizeHandle:hover { background: #94a3b8; }"
+        )
+        self._resize_handle.installEventFilter(self)
+        root_layout.addWidget(self._resize_handle)
 
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -322,7 +344,29 @@ class AppLeftPanel(QWidget):
         self._nav_buttons["DB Design Project"] = self._db_design_btn
         content_layout.addWidget(self._db_design_btn)
 
-        # 7. DMT Tracker (collapsible, start collapsed)
+        # 7. Lead Management (collapsible, start collapsed)
+        self._lead_mgmt_toggle = QPushButton("Lead Management")
+        self._lead_mgmt_toggle.setCheckable(True)
+        self._lead_mgmt_toggle.setChecked(False)
+        self._lead_mgmt_toggle.setStyleSheet(_toggle_style)
+        self._lead_mgmt_toggle.clicked.connect(self._on_lead_mgmt_toggle)
+        content_layout.addWidget(self._lead_mgmt_toggle)
+        self._lead_mgmt_sub_container = _CollapsibleWidget()
+        self._lead_mgmt_sub_container.setMaximumHeight(0)
+        lead_mgmt_layout = QVBoxLayout(self._lead_mgmt_sub_container)
+        lead_mgmt_layout.setContentsMargins(20, 4, 0, 8)
+        lead_mgmt_layout.setSpacing(6)
+        for opt in LEAD_MANAGEMENT_SUB_OPTIONS:
+            btn = QPushButton(opt)
+            btn.setStyleSheet(_sub_btn_style)
+            btn.clicked.connect(lambda checked=False, name=opt: self.navigation_requested.emit(name))
+            self._nav_buttons[opt] = btn
+            lead_mgmt_layout.addWidget(btn)
+        content_layout.addWidget(self._lead_mgmt_sub_container)
+        self._lead_mgmt_sub_container.setMinimumHeight(0)
+        self._lead_mgmt_sub_container.set_content_height(len(LEAD_MANAGEMENT_SUB_OPTIONS) * 36 + 20)
+
+        # 8. DMT Tracker (collapsible, start collapsed)
         self._object_tracker_toggle = QPushButton("DMT Tracker")
         self._object_tracker_toggle.setCheckable(True)
         self._object_tracker_toggle.setChecked(False)
@@ -344,6 +388,28 @@ class AppLeftPanel(QWidget):
         self._object_tracker_sub_container.setMinimumHeight(0)
         self._object_tracker_sub_container.set_content_height(len(OBJECT_TRACKER_SUB_OPTIONS) * 36 + 20)
 
+        # 9. App Config (collapsible, start collapsed)
+        self._app_config_toggle = QPushButton("App Config")
+        self._app_config_toggle.setCheckable(True)
+        self._app_config_toggle.setChecked(False)
+        self._app_config_toggle.setStyleSheet(_toggle_style)
+        self._app_config_toggle.clicked.connect(self._on_app_config_toggle)
+        content_layout.addWidget(self._app_config_toggle)
+        self._app_config_sub_container = _CollapsibleWidget()
+        self._app_config_sub_container.setMaximumHeight(0)
+        app_config_layout = QVBoxLayout(self._app_config_sub_container)
+        app_config_layout.setContentsMargins(20, 4, 0, 8)
+        app_config_layout.setSpacing(6)
+        for opt in APP_CONFIG_SUB_OPTIONS:
+            btn = QPushButton(opt)
+            btn.setStyleSheet(_sub_btn_style)
+            btn.clicked.connect(lambda checked=False, name=opt: self.navigation_requested.emit(name))
+            self._nav_buttons[opt] = btn
+            app_config_layout.addWidget(btn)
+        content_layout.addWidget(self._app_config_sub_container)
+        self._app_config_sub_container.setMinimumHeight(0)
+        self._app_config_sub_container.set_content_height(len(APP_CONFIG_SUB_OPTIONS) * 36 + 20)
+
         content_layout.addStretch()
 
         for item in self._bottom_items:
@@ -359,7 +425,9 @@ class AppLeftPanel(QWidget):
         scroll_area = QScrollArea()
         scroll_area.setObjectName("leftPanelOuterScroll")
         scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Keep vertical behavior as before; allow horizontal when panel width gets too small.
+        content_widget.setMinimumWidth(260)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         scroll_area.setStyleSheet(
@@ -369,8 +437,29 @@ class AppLeftPanel(QWidget):
         scroll_area.setWidget(content_widget)
         layout.addWidget(scroll_area)
 
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # type: ignore[override]
+        if obj is getattr(self, "_resize_handle", None):
+            if event.type() == QEvent.Type.MouseButtonPress and getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton:
+                self._resizing_panel = True
+                self._resize_start_global_x = int(event.globalPosition().x())  # type: ignore[attr-defined]
+                self._resize_start_width = self.width()
+                return True
+            if event.type() == QEvent.Type.MouseMove and self._resizing_panel:
+                current_x = int(event.globalPosition().x())  # type: ignore[attr-defined]
+                delta = current_x - self._resize_start_global_x
+                new_width = max(
+                    self._min_panel_width,
+                    min(self._max_panel_width, self._resize_start_width + delta),
+                )
+                self.setFixedWidth(new_width)
+                return True
+            if event.type() == QEvent.Type.MouseButtonRelease and self._resizing_panel:
+                self._resizing_panel = False
+                return True
+        return super().eventFilter(obj, event)
+
     def apply_nav_access_state(self, state: LeftPanelAccessState) -> None:
-        """Show or hide menu sections and sub-items from GET getAppStepList (see :mod:`core.nav_access`)."""
+        """Show or hide menu sections and sub-items from GET get-app-id-step-id-list (see :mod:`core.nav_access`)."""
 
         def _pair(toggle: QPushButton, container: _CollapsibleWidget, show: bool) -> None:
             toggle.setVisible(show)
@@ -419,11 +508,34 @@ class AppLeftPanel(QWidget):
 
         self._db_design_btn.setVisible(state.show_db_design_project)
 
+        _pair(
+            self._lead_mgmt_toggle,
+            self._lead_mgmt_sub_container,
+            state.show_lead_management,
+        )
+        if state.show_lead_management:
+            _apply_subs(LEAD_MANAGEMENT_SUB_OPTIONS, self._lead_mgmt_sub_container)
+
+        _pair(
+            self._object_tracker_toggle,
+            self._object_tracker_sub_container,
+            state.show_dmt_tracker,
+        )
+        if state.show_dmt_tracker:
+            _apply_subs(OBJECT_TRACKER_SUB_OPTIONS, self._object_tracker_sub_container)
+
         _pair(self._api_toggle, self._api_sub_container, state.show_api_development)
         if state.show_api_development:
             _apply_subs(API_SUB_OPTIONS, self._api_sub_container)
 
         self._api_toggle.setText(state.api_development_title)
+        _pair(
+            self._app_config_toggle,
+            self._app_config_sub_container,
+            state.show_app_config,
+        )
+        if state.show_app_config:
+            _apply_subs(APP_CONFIG_SUB_OPTIONS, self._app_config_sub_container)
 
     def set_pin_checked(self, checked: bool) -> None:
         self._pin_btn.setChecked(checked)
@@ -454,10 +566,18 @@ class AppLeftPanel(QWidget):
             self._collapse_others_except(self._api_toggle)
             self._api_toggle.setChecked(True)
             self._api_sub_container.expand()
+        elif item_name in LEAD_MANAGEMENT_SUB_OPTIONS:
+            self._collapse_others_except(self._lead_mgmt_toggle)
+            self._lead_mgmt_toggle.setChecked(True)
+            self._lead_mgmt_sub_container.expand()
         elif item_name in OBJECT_TRACKER_SUB_OPTIONS:
             self._collapse_others_except(self._object_tracker_toggle)
             self._object_tracker_toggle.setChecked(True)
             self._object_tracker_sub_container.expand()
+        elif item_name in APP_CONFIG_SUB_OPTIONS:
+            self._collapse_others_except(self._app_config_toggle)
+            self._app_config_toggle.setChecked(True)
+            self._app_config_sub_container.expand()
         else:
             self.collapse_all_sections()
 
@@ -471,8 +591,12 @@ class AppLeftPanel(QWidget):
         self._api_mgmt_sub_container.collapse()
         self._api_toggle.setChecked(False)
         self._api_sub_container.collapse()
+        self._lead_mgmt_toggle.setChecked(False)
+        self._lead_mgmt_sub_container.collapse()
         self._object_tracker_toggle.setChecked(False)
         self._object_tracker_sub_container.collapse()
+        self._app_config_toggle.setChecked(False)
+        self._app_config_sub_container.collapse()
 
     def _collapse_others_except(self, except_toggle: QPushButton) -> None:
         """Collapse all sections except the one whose toggle is given (accordion: only one open)."""
@@ -488,9 +612,15 @@ class AppLeftPanel(QWidget):
         if except_toggle is not self._api_toggle:
             self._api_toggle.setChecked(False)
             self._api_sub_container.collapse()
+        if except_toggle is not self._lead_mgmt_toggle:
+            self._lead_mgmt_toggle.setChecked(False)
+            self._lead_mgmt_sub_container.collapse()
         if except_toggle is not self._object_tracker_toggle:
             self._object_tracker_toggle.setChecked(False)
             self._object_tracker_sub_container.collapse()
+        if except_toggle is not self._app_config_toggle:
+            self._app_config_toggle.setChecked(False)
+            self._app_config_sub_container.collapse()
 
     def _on_org_mgmt_toggle(self) -> None:
         if self._org_mgmt_toggle.isChecked():
@@ -520,9 +650,23 @@ class AppLeftPanel(QWidget):
         else:
             self._api_sub_container.collapse()
 
+    def _on_lead_mgmt_toggle(self) -> None:
+        if self._lead_mgmt_toggle.isChecked():
+            self._collapse_others_except(self._lead_mgmt_toggle)
+            self._lead_mgmt_sub_container.expand()
+        else:
+            self._lead_mgmt_sub_container.collapse()
+
     def _on_object_tracker_toggle(self) -> None:
         if self._object_tracker_toggle.isChecked():
             self._collapse_others_except(self._object_tracker_toggle)
             self._object_tracker_sub_container.expand()
         else:
             self._object_tracker_sub_container.collapse()
+
+    def _on_app_config_toggle(self) -> None:
+        if self._app_config_toggle.isChecked():
+            self._collapse_others_except(self._app_config_toggle)
+            self._app_config_sub_container.expand()
+        else:
+            self._app_config_sub_container.collapse()
