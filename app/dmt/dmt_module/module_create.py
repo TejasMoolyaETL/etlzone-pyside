@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -19,6 +21,7 @@ from PySide6.QtWidgets import (
 from core.api import api_create_module
 from core.user_context import get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
+from ui.form_combobox_style import apply_form_combobox_field
 from ui.form_page_styles import (
     FORM_ERROR_LABEL_STYLE,
     FORM_INPUT_STYLE as INPUT_STYLE,
@@ -32,7 +35,20 @@ from ui.form_page_styles import (
     placeholder_example,
 )
 from ui.post_save_navigation import schedule_after_success
+from ui.searchable_form_combo import (
+    combo_resolved_master_key_seq,
+    master_key_invalid_typed_text,
+    master_key_seq_for_payload,
+    require_master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    reset_searchable_combo,
+    wire_searchable_master_key_combo,
+)
+from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
+
+
+_DMT_MODULE_STATUS_FIELD_NAME = "dmt_module_status"
 
 
 class CreateModulePage(QWidget):
@@ -46,6 +62,7 @@ class CreateModulePage(QWidget):
         super().__init__()
         self.on_back = on_back
         self.on_create_success = on_create_success
+        self._status_combo: QComboBox | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -83,7 +100,7 @@ class CreateModulePage(QWidget):
             "border-radius: 8px; padding: 16px; }"
         )
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(20, 16, 20, 20)
+        card_layout.setContentsMargins(20, 16, 20, 16)
         card_layout.setSpacing(12)
 
         label_name = field_caption_label("Module Name*", LABEL_STYLE)
@@ -91,6 +108,15 @@ class CreateModulePage(QWidget):
         self.module_name_edit.setPlaceholderText(placeholder_example("Data Ingestion"))
         self.module_name_edit.setStyleSheet(INPUT_STYLE)
         card_layout.addWidget(labeled_field_block(label_name, self.module_name_edit))
+
+        label_status = field_caption_label("Status*", LABEL_STYLE)
+        status_combo = QComboBox()
+        status_combo.setMinimumWidth(260)
+        status_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        apply_form_combobox_field(status_combo, height_px=32)
+        wire_searchable_master_key_combo(status_combo, search_field_label="Status")
+        self._status_combo = status_combo
+        card_layout.addWidget(labeled_field_block(label_status, status_combo))
 
         card_layout.addSpacing(16)
         self.error_label = QLabel()
@@ -124,6 +150,26 @@ class CreateModulePage(QWidget):
         content_layout.addStretch()
         layout.addWidget(content)
 
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if self._status_combo is not None:
+            populate_master_key_by_field_name(
+                self._status_combo,
+                _DMT_MODULE_STATUS_FIELD_NAME,
+                token=self._token(),
+                include_placeholder=False,
+            )
+
+    def _token(self) -> str | None:
+        profile = get_user_profile()
+        token = (
+            profile.get("token")
+            or profile.get("accessToken")
+            or profile.get("access_token")
+            or profile.get("jwt")
+        )
+        return str(token) if token else None
+
     def _show_error(self, message: str) -> None:
         show_auto_hiding_message(self, self.error_label, message, error=True)
 
@@ -140,10 +186,19 @@ class CreateModulePage(QWidget):
 
     def is_dirty(self) -> bool:
         d = self._get_default_values()
-        return self.module_name_edit.text().strip() != d["module_name"]
+        if self.module_name_edit.text().strip() != d["module_name"]:
+            return True
+        if self._status_combo is not None:
+            seq = combo_resolved_master_key_seq(self._status_combo)
+            if seq is not None and str(seq).strip() != "":
+                return True
+        return False
 
     def reset_to_default(self) -> None:
         self.module_name_edit.clear()
+        if self._status_combo is not None:
+            reset_searchable_combo(self._status_combo)
+        self._clear_error()
 
     def _handle_back(self) -> None:
         if not self.is_dirty():
@@ -169,15 +224,15 @@ class CreateModulePage(QWidget):
             self._show_error("Module name is required.")
             self.module_name_edit.setFocus()
             return
-        profile = get_user_profile()
-        token = (
-            profile.get("token")
-            or profile.get("accessToken")
-            or profile.get("access_token")
-            or profile.get("jwt")
+        status_id, status_err = require_master_key_seq_for_payload(
+            self._status_combo, field_caption="Status", strict_phrase="a status"
         )
-        token = str(token) if token else None
-        result = api_create_module(name, token=token)
+        if status_err:
+            self._show_error(status_err)
+            if self._status_combo is not None:
+                self._status_combo.setFocus()
+            return
+        result = api_create_module(name, status=status_id, token=self._token())
         if result.get("success"):
             self._show_success(str(result.get("message") or "Module created successfully."))
             schedule_after_success(

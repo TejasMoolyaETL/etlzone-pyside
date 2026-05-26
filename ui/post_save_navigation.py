@@ -54,9 +54,10 @@ def navigate_after_no_changes(
     clear_message: Callable[[], None],
     on_back: Callable[[], None] | None,
     delay_ms: int = 800,
+    message: str | None = None,
 ) -> None:
-    """Show a neutral success message and navigate to the list (or previous page) without calling an update API."""
-    show_non_error_message(NO_CHANGES_MESSAGE)
+    """Show a neutral message and navigate to the list (or previous page) without calling an update API."""
+    show_non_error_message(message or NO_CHANGES_MESSAGE)
     schedule_after_success(
         delay_ms=delay_ms,
         clear_error=clear_message,

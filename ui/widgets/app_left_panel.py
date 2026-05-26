@@ -12,6 +12,9 @@ from core.left_panel_nav_items import (
     APP_CONFIG_SUB_OPTIONS,
     API_MANAGEMENT_SUB_OPTIONS,
     API_SUB_OPTIONS,
+    DATA_MIGRATION_ADMIN_SUB_OPTIONS,
+    DATA_MIGRATION_ONBOARDING_SUB_OPTIONS,
+    ETL_SUB_OPTIONS,
     LEAD_MANAGEMENT_SUB_OPTIONS,
     MASTER_SETUP_ITEM,
     OBJECT_TRACKER_SUB_OPTIONS,
@@ -38,7 +41,8 @@ def _make_tinted_icon(path: Path, r: int, g: int, b: int) -> QIcon | None:
     return QIcon(QPixmap.fromImage(img))
 
 # Order: Dashboard, Org Management, User Management, API Management,
-#        API Development, DB Design Project, Lead Management, DMT Tracker, App Config (before bottom actions)
+#        API Development, DB Design Project, Lead Management, Data Migration Onboarding,
+#        Data Migration - Admin, Data Migration Tracker, App Config (before bottom actions)
 DEFAULT_PANEL_ITEMS = ["Dashboard", "DB Design Project"]
 
 # Bottom section items (pinned at bottom)
@@ -366,8 +370,52 @@ class AppLeftPanel(QWidget):
         self._lead_mgmt_sub_container.setMinimumHeight(0)
         self._lead_mgmt_sub_container.set_content_height(len(LEAD_MANAGEMENT_SUB_OPTIONS) * 36 + 20)
 
-        # 8. DMT Tracker (collapsible, start collapsed)
-        self._object_tracker_toggle = QPushButton("DMT Tracker")
+        # 8. Data Migration Onboarding (collapsible, start collapsed)
+        self._data_migration_toggle = QPushButton("Data Migration Onboarding")
+        self._data_migration_toggle.setCheckable(True)
+        self._data_migration_toggle.setChecked(False)
+        self._data_migration_toggle.setStyleSheet(_toggle_style)
+        self._data_migration_toggle.clicked.connect(self._on_data_migration_toggle)
+        content_layout.addWidget(self._data_migration_toggle)
+        self._data_migration_sub_container = _CollapsibleWidget()
+        self._data_migration_sub_container.setMaximumHeight(0)
+        data_migration_layout = QVBoxLayout(self._data_migration_sub_container)
+        data_migration_layout.setContentsMargins(20, 4, 0, 8)
+        data_migration_layout.setSpacing(6)
+        for opt in DATA_MIGRATION_ONBOARDING_SUB_OPTIONS:
+            btn = QPushButton(opt)
+            btn.setStyleSheet(_sub_btn_style)
+            btn.clicked.connect(lambda checked=False, name=opt: self.navigation_requested.emit(name))
+            self._nav_buttons[opt] = btn
+            data_migration_layout.addWidget(btn)
+        content_layout.addWidget(self._data_migration_sub_container)
+        self._data_migration_sub_container.setMinimumHeight(0)
+        self._data_migration_sub_container.set_content_height(len(DATA_MIGRATION_ONBOARDING_SUB_OPTIONS) * 36 + 20)
+
+        # 9. Data Migration - Admin (collapsible, start collapsed)
+        self._data_migration_admin_toggle = QPushButton("Data Migration - Admin")
+        self._data_migration_admin_toggle.setCheckable(True)
+        self._data_migration_admin_toggle.setChecked(False)
+        self._data_migration_admin_toggle.setStyleSheet(_toggle_style)
+        self._data_migration_admin_toggle.clicked.connect(self._on_data_migration_admin_toggle)
+        content_layout.addWidget(self._data_migration_admin_toggle)
+        self._data_migration_admin_sub_container = _CollapsibleWidget()
+        self._data_migration_admin_sub_container.setMaximumHeight(0)
+        data_migration_admin_layout = QVBoxLayout(self._data_migration_admin_sub_container)
+        data_migration_admin_layout.setContentsMargins(20, 4, 0, 8)
+        data_migration_admin_layout.setSpacing(6)
+        for opt in DATA_MIGRATION_ADMIN_SUB_OPTIONS:
+            btn = QPushButton(opt)
+            btn.setStyleSheet(_sub_btn_style)
+            btn.clicked.connect(lambda checked=False, name=opt: self.navigation_requested.emit(name))
+            self._nav_buttons[opt] = btn
+            data_migration_admin_layout.addWidget(btn)
+        content_layout.addWidget(self._data_migration_admin_sub_container)
+        self._data_migration_admin_sub_container.setMinimumHeight(0)
+        self._data_migration_admin_sub_container.set_content_height(len(DATA_MIGRATION_ADMIN_SUB_OPTIONS) * 36 + 20)
+
+        # 10. Data Migration Tracker (collapsible, start collapsed)
+        self._object_tracker_toggle = QPushButton("Data Migration Tracker")
         self._object_tracker_toggle.setCheckable(True)
         self._object_tracker_toggle.setChecked(False)
         self._object_tracker_toggle.setStyleSheet(_toggle_style)
@@ -388,7 +436,29 @@ class AppLeftPanel(QWidget):
         self._object_tracker_sub_container.setMinimumHeight(0)
         self._object_tracker_sub_container.set_content_height(len(OBJECT_TRACKER_SUB_OPTIONS) * 36 + 20)
 
-        # 9. App Config (collapsible, start collapsed)
+        # 11. ETL (collapsible, start collapsed)
+        self._etl_toggle = QPushButton("ETL")
+        self._etl_toggle.setCheckable(True)
+        self._etl_toggle.setChecked(False)
+        self._etl_toggle.setStyleSheet(_toggle_style)
+        self._etl_toggle.clicked.connect(self._on_etl_toggle)
+        content_layout.addWidget(self._etl_toggle)
+        self._etl_sub_container = _CollapsibleWidget()
+        self._etl_sub_container.setMaximumHeight(0)
+        etl_layout = QVBoxLayout(self._etl_sub_container)
+        etl_layout.setContentsMargins(20, 4, 0, 8)
+        etl_layout.setSpacing(6)
+        for opt in ETL_SUB_OPTIONS:
+            btn = QPushButton(opt)
+            btn.setStyleSheet(_sub_btn_style)
+            btn.clicked.connect(lambda checked=False, name=opt: self.navigation_requested.emit(name))
+            self._nav_buttons[opt] = btn
+            etl_layout.addWidget(btn)
+        content_layout.addWidget(self._etl_sub_container)
+        self._etl_sub_container.setMinimumHeight(0)
+        self._etl_sub_container.set_content_height(len(ETL_SUB_OPTIONS) * 36 + 20)
+
+        # 12. App Config (collapsible, start collapsed)
         self._app_config_toggle = QPushButton("App Config")
         self._app_config_toggle.setCheckable(True)
         self._app_config_toggle.setChecked(False)
@@ -517,12 +587,31 @@ class AppLeftPanel(QWidget):
             _apply_subs(LEAD_MANAGEMENT_SUB_OPTIONS, self._lead_mgmt_sub_container)
 
         _pair(
+            self._data_migration_toggle,
+            self._data_migration_sub_container,
+            state.show_data_migration_onboarding,
+        )
+        if state.show_data_migration_onboarding:
+            _apply_subs(DATA_MIGRATION_ONBOARDING_SUB_OPTIONS, self._data_migration_sub_container)
+
+        _pair(
+            self._data_migration_admin_toggle,
+            self._data_migration_admin_sub_container,
+            state.show_data_migration_admin,
+        )
+        if state.show_data_migration_admin:
+            _apply_subs(DATA_MIGRATION_ADMIN_SUB_OPTIONS, self._data_migration_admin_sub_container)
+
+        _pair(
             self._object_tracker_toggle,
             self._object_tracker_sub_container,
             state.show_dmt_tracker,
         )
         if state.show_dmt_tracker:
             _apply_subs(OBJECT_TRACKER_SUB_OPTIONS, self._object_tracker_sub_container)
+
+        _pair(self._etl_toggle, self._etl_sub_container, True)
+        _apply_subs(ETL_SUB_OPTIONS, self._etl_sub_container)
 
         _pair(self._api_toggle, self._api_sub_container, state.show_api_development)
         if state.show_api_development:
@@ -570,10 +659,22 @@ class AppLeftPanel(QWidget):
             self._collapse_others_except(self._lead_mgmt_toggle)
             self._lead_mgmt_toggle.setChecked(True)
             self._lead_mgmt_sub_container.expand()
+        elif item_name in DATA_MIGRATION_ONBOARDING_SUB_OPTIONS:
+            self._collapse_others_except(self._data_migration_toggle)
+            self._data_migration_toggle.setChecked(True)
+            self._data_migration_sub_container.expand()
+        elif item_name in DATA_MIGRATION_ADMIN_SUB_OPTIONS:
+            self._collapse_others_except(self._data_migration_admin_toggle)
+            self._data_migration_admin_toggle.setChecked(True)
+            self._data_migration_admin_sub_container.expand()
         elif item_name in OBJECT_TRACKER_SUB_OPTIONS:
             self._collapse_others_except(self._object_tracker_toggle)
             self._object_tracker_toggle.setChecked(True)
             self._object_tracker_sub_container.expand()
+        elif item_name in ETL_SUB_OPTIONS:
+            self._collapse_others_except(self._etl_toggle)
+            self._etl_toggle.setChecked(True)
+            self._etl_sub_container.expand()
         elif item_name in APP_CONFIG_SUB_OPTIONS:
             self._collapse_others_except(self._app_config_toggle)
             self._app_config_toggle.setChecked(True)
@@ -593,8 +694,14 @@ class AppLeftPanel(QWidget):
         self._api_sub_container.collapse()
         self._lead_mgmt_toggle.setChecked(False)
         self._lead_mgmt_sub_container.collapse()
+        self._data_migration_toggle.setChecked(False)
+        self._data_migration_sub_container.collapse()
+        self._data_migration_admin_toggle.setChecked(False)
+        self._data_migration_admin_sub_container.collapse()
         self._object_tracker_toggle.setChecked(False)
         self._object_tracker_sub_container.collapse()
+        self._etl_toggle.setChecked(False)
+        self._etl_sub_container.collapse()
         self._app_config_toggle.setChecked(False)
         self._app_config_sub_container.collapse()
 
@@ -615,12 +722,28 @@ class AppLeftPanel(QWidget):
         if except_toggle is not self._lead_mgmt_toggle:
             self._lead_mgmt_toggle.setChecked(False)
             self._lead_mgmt_sub_container.collapse()
+        if except_toggle is not self._data_migration_toggle:
+            self._data_migration_toggle.setChecked(False)
+            self._data_migration_sub_container.collapse()
+        if except_toggle is not self._data_migration_admin_toggle:
+            self._data_migration_admin_toggle.setChecked(False)
+            self._data_migration_admin_sub_container.collapse()
         if except_toggle is not self._object_tracker_toggle:
             self._object_tracker_toggle.setChecked(False)
             self._object_tracker_sub_container.collapse()
+        if except_toggle is not self._etl_toggle:
+            self._etl_toggle.setChecked(False)
+            self._etl_sub_container.collapse()
         if except_toggle is not self._app_config_toggle:
             self._app_config_toggle.setChecked(False)
             self._app_config_sub_container.collapse()
+
+    def _on_etl_toggle(self) -> None:
+        if self._etl_toggle.isChecked():
+            self._collapse_others_except(self._etl_toggle)
+            self._etl_sub_container.expand()
+        else:
+            self._etl_sub_container.collapse()
 
     def _on_org_mgmt_toggle(self) -> None:
         if self._org_mgmt_toggle.isChecked():
@@ -656,6 +779,20 @@ class AppLeftPanel(QWidget):
             self._lead_mgmt_sub_container.expand()
         else:
             self._lead_mgmt_sub_container.collapse()
+
+    def _on_data_migration_toggle(self) -> None:
+        if self._data_migration_toggle.isChecked():
+            self._collapse_others_except(self._data_migration_toggle)
+            self._data_migration_sub_container.expand()
+        else:
+            self._data_migration_sub_container.collapse()
+
+    def _on_data_migration_admin_toggle(self) -> None:
+        if self._data_migration_admin_toggle.isChecked():
+            self._collapse_others_except(self._data_migration_admin_toggle)
+            self._data_migration_admin_sub_container.expand()
+        else:
+            self._data_migration_admin_sub_container.collapse()
 
     def _on_object_tracker_toggle(self) -> None:
         if self._object_tracker_toggle.isChecked():

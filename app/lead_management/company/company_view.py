@@ -7,7 +7,7 @@ import re
 from typing import Any, Callable
 
 from PySide6.QtCore import QRegularExpression, Qt
-from PySide6.QtGui import QRegularExpressionValidator
+from PySide6.QtGui import QRegularExpressionValidator, QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -25,10 +25,13 @@ from PySide6.QtWidgets import (
 )
 
 from core.api import (
-    api_get_master_key_by_app_id_field_name,
     api_update_lead_company,
-    master_key_row_display_label,
     master_key_row_seq_value,
+)
+from core.world_locations_catalog import (
+    geo_triple_from_company_record,
+    load_world_locations_index,
+    world_locations_available,
 )
 from core.app_preferences import format_datetime_display, is_datetime_field
 from core.nav_access import collect_allowed_action_names, nav_action_visible
@@ -57,6 +60,23 @@ from ui.form_page_styles import (
     placeholder_example,
 )
 from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
+from ui.searchable_form_combo import (
+    combo_resolved_item_data,
+    combo_resolved_master_key_seq,
+    master_key_invalid_typed_text,
+    master_key_seq_for_payload,
+    require_master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    reset_searchable_combo,
+    set_searchable_combo_by_user_data,
+    wire_searchable_master_key_combo,
+)
+from ui.world_location_cascade import (
+    apply_world_location_selection,
+    clear_world_location_inline_error,
+    ensure_world_locations_cascade,
+)
+from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
 _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "jwt"})
@@ -144,6 +164,8 @@ class ViewCompanyPage(QWidget):
         self._mobile_rows: list[tuple[str, QComboBox, QLineEdit]] = []
         self._editable_keys: list[str] = []
         self._can_edit_action = True
+        self._world_locations_mode = False
+        self._world_geo_baseline: tuple[Any, Any, Any] = (None, None, None)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -210,6 +232,7 @@ class ViewCompanyPage(QWidget):
                 combo.setMinimumWidth(240)
                 combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
                 apply_form_combobox_field(combo, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX)
+                wire_searchable_master_key_combo(combo, search_field_label=canonical.title())
                 self._mk_combo_by_key[canonical] = combo
                 grid.addWidget(
                     labeled_field_block(label_widget, combo), row, col, row_span, col_span
@@ -281,8 +304,8 @@ class ViewCompanyPage(QWidget):
         basic_grid = new_section_grid()
         for row, left_key, right_key in (
             (0, "companyId", "companyName"),
-            (1, "country", "city"),
-            (2, "state", "source"),
+            (1, "country", "state"),
+            (2, "city", "source"),
             (3, "industry", "status"),
         ):
             left_label, left_keys = fields_by_key[left_key]
@@ -290,6 +313,15 @@ class ViewCompanyPage(QWidget):
             right_label, right_keys = fields_by_key[right_key]
             add_field(basic_grid, row, 1, right_label, right_keys)
         card_layout.addLayout(basic_grid)
+        self._location_hint_label = QLabel()
+        self._location_hint_label.setStyleSheet(FORM_ERROR_LABEL_STYLE)
+        self._location_hint_label.setWordWrap(True)
+        self._location_hint_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        self._location_hint_label.setVisible(False)
+        card_layout.addWidget(self._location_hint_label)
         card_layout.addSpacing(4)
 
         contact_grid = new_section_grid()
@@ -382,11 +414,55 @@ class ViewCompanyPage(QWidget):
 
         self._switch_to_view_mode()
 
+    def _reload_reference_lists(self) -> None:
+        self._world_locations_mode = world_locations_available()
+        idx = load_world_locations_index() if self._world_locations_mode else None
+        if self._world_locations_mode and idx is None:
+            self._world_locations_mode = False
+            idx = None
+        for ui_key in _MK_COMBO_KEYS:
+            if self._world_locations_mode and ui_key in ("country", "state", "city"):
+                continue
+            self._populate_mk_combo(ui_key)
+        if self._world_locations_mode and idx is not None:
+            cc = self._mk_combo_by_key.get("country")
+            st = self._mk_combo_by_key.get("state")
+            ci = self._mk_combo_by_key.get("city")
+            if cc is not None and st is not None and ci is not None:
+                ensure_world_locations_cascade(
+                    cc,
+                    st,
+                    ci,
+                    inline_error_label=self._location_hint_label,
+                )
+                gc, gs, gci = geo_triple_from_company_record(self._company, index=idx)
+                self._world_geo_baseline = (gc, gs, gci)
+                apply_world_location_selection(
+                    cc,
+                    st,
+                    ci,
+                    country_iso=gc,
+                    state_code=gs,
+                    city_geoname_id=gci,
+                    index=idx,
+                )
+            else:
+                self._world_geo_baseline = (None, None, None)
+        else:
+            self._world_geo_baseline = (None, None, None)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._refresh_edit_action_access()
+        if not self._company:
+            return
+        self._reload_reference_lists()
+        self._refresh_values()
+
     def set_company(self, company: dict[str, Any] | None, *, edit_mode: bool = False) -> None:
         self._company = dict(company) if company else {}
         self._refresh_edit_action_access()
-        for ui_key in _MK_COMBO_KEYS:
-            self._populate_mk_combo(ui_key)
+        self._reload_reference_lists()
         self._refresh_values()
         if edit_mode and self._company and self._can_edit_action:
             self._handle_edit()
@@ -419,6 +495,8 @@ class ViewCompanyPage(QWidget):
         for _label_text, keys in _COMPANY_FIELDS:
             canonical = keys[0]
             if canonical in _MK_COMBO_KEYS:
+                if self._world_locations_mode and canonical in ("country", "state", "city"):
+                    continue
                 self._apply_mk_combo_from_record(canonical, keys)
                 continue
             if canonical.startswith("contactNo"):
@@ -507,34 +585,12 @@ class ViewCompanyPage(QWidget):
         if combo is None:
             return
         field_name = _MK_FIELD_NAME_BY_UI_KEY[ui_key]
-        result = api_get_master_key_by_app_id_field_name(
-            field_name=field_name,
+        populate_master_key_by_field_name(
+            combo,
+            field_name,
             token=self._token(),
+            include_placeholder=False,
         )
-        rows = result.get("data") if result.get("success") else []
-        prev_seq = combo.currentData() if combo.currentIndex() > 0 else None
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem(f"Select {ui_key}\u2026", None)
-        if isinstance(rows, list):
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                seq_val = master_key_row_seq_value(row)
-                if seq_val is None:
-                    continue
-                label = master_key_row_display_label(row).strip()
-                if not label:
-                    continue
-                combo.addItem(label, seq_val)
-        if prev_seq is not None:
-            idx = combo.findData(prev_seq)
-            if idx < 0 and isinstance(prev_seq, int):
-                idx = combo.findData(str(prev_seq))
-            combo.setCurrentIndex(idx if idx >= 0 else 0)
-        else:
-            combo.setCurrentIndex(0)
-        combo.blockSignals(False)
 
     def _apply_mk_combo_from_record(self, ui_key: str, keys: tuple[str, ...]) -> None:
         combo = self._mk_combo_by_key.get(ui_key)
@@ -542,12 +598,9 @@ class ViewCompanyPage(QWidget):
             return
         seq = self._master_seq_from_record(keys)
         if seq is None:
-            combo.setCurrentIndex(0)
+            reset_searchable_combo(combo)
             return
-        idx = combo.findData(seq)
-        if idx < 0 and isinstance(seq, int):
-            idx = combo.findData(str(seq))
-        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        set_searchable_combo_by_user_data(combo, seq)
 
     def _show_error(self, message: str) -> None:
         # Validation handlers often set focus right after showing an error.
@@ -561,6 +614,9 @@ class ViewCompanyPage(QWidget):
         cancel_auto_hide_message(self, self._error_label)
         self._error_label.setText("")
         self._error_label.setVisible(False)
+        cmb = self._mk_combo_by_key.get("country")
+        if cmb is not None:
+            clear_world_location_inline_error(cmb)
 
     def _handle_back(self) -> None:
         if self.on_back:
@@ -620,6 +676,9 @@ class ViewCompanyPage(QWidget):
             combo = self._mk_combo_by_key.get(key)
             if combo is not None:
                 combo.setEnabled(False)
+        cmb = self._mk_combo_by_key.get("country")
+        if cmb is not None:
+            clear_world_location_inline_error(cmb)
         for _key, country, number in self._mobile_rows:
             country.setEnabled(False)
             number.setReadOnly(True)
@@ -629,12 +688,38 @@ class ViewCompanyPage(QWidget):
     def is_edit_mode(self) -> bool:
         return self._btn_stack.currentIndex() == 1
 
+    @staticmethod
+    def _norm_geo_part(x: Any) -> str:
+        if x is None:
+            return ""
+        return str(x).strip()
+
+    def _current_world_geo_triple(self) -> tuple[str, str, str]:
+        c = self._mk_combo_by_key.get("country")
+        s = self._mk_combo_by_key.get("state")
+        t = self._mk_combo_by_key.get("city")
+        return (
+            self._norm_geo_part(combo_resolved_item_data(c)),
+            self._norm_geo_part(combo_resolved_item_data(s)),
+            self._norm_geo_part(combo_resolved_item_data(t)),
+        )
+
+    def _baseline_world_geo_triple(self) -> tuple[str, str, str]:
+        a, b, c = self._world_geo_baseline
+        return (self._norm_geo_part(a), self._norm_geo_part(b), self._norm_geo_part(c))
+
     def _has_unsaved_changes(self) -> bool:
         for _label_text, keys in _COMPANY_FIELDS:
             canonical = keys[0]
             if canonical in _MK_COMBO_KEYS:
+                if self._world_locations_mode and canonical in ("country", "state", "city"):
+                    if canonical != "country":
+                        continue
+                    if self._current_world_geo_triple() != self._baseline_world_geo_triple():
+                        return True
+                    continue
                 combo = self._mk_combo_by_key.get(canonical)
-                cur = combo.currentData() if combo is not None and combo.currentIndex() > 0 else None
+                cur = combo_resolved_master_key_seq(combo) if combo is not None else None
                 prev = self._master_seq_from_record(keys)
                 if cur != prev:
                     return True
@@ -673,47 +758,58 @@ class ViewCompanyPage(QWidget):
                 name_edit.setFocus()
             return
         country_combo = self._mk_combo_by_key.get("country")
-        if country_combo is None or country_combo.currentIndex() <= 0:
+        if country_combo is None:
             self._show_error("Country is required.")
-            if country_combo is not None:
-                country_combo.setFocus()
-            return
-        country_raw = country_combo.currentData()
-        if country_raw is None:
-            self._show_error("Country is required.")
-            country_combo.setFocus()
-            return
-        city_combo = self._mk_combo_by_key.get("city")
-        if city_combo is None or city_combo.currentIndex() <= 0:
-            self._show_error("City is required.")
-            if city_combo is not None:
-                city_combo.setFocus()
-            return
-        city_raw = city_combo.currentData()
-        if city_raw is None or not str(city_raw).strip():
-            self._show_error("City is required.")
-            city_combo.setFocus()
             return
         state_combo = self._mk_combo_by_key.get("state")
-        if state_combo is None or state_combo.currentIndex() <= 0:
-            self._show_error("State is required.")
-            if state_combo is not None:
-                state_combo.setFocus()
+        city_combo = self._mk_combo_by_key.get("city")
+        if self._world_locations_mode:
+            country_raw = combo_resolved_item_data(country_combo)
+            state_raw = combo_resolved_item_data(state_combo) if state_combo else None
+            city_raw = combo_resolved_item_data(city_combo) if city_combo else None
+        else:
+            country_raw = combo_resolved_master_key_seq(country_combo)
+            state_raw = combo_resolved_master_key_seq(state_combo) if state_combo else None
+            city_raw = combo_resolved_master_key_seq(city_combo) if city_combo else None
+        if country_raw is None or not str(country_raw).strip():
+            typed = (country_combo.currentText() or "").strip()
+            if typed:
+                self._show_error(strict_list_selection_message("a country"))
+            else:
+                self._show_error("Country is required.")
+            country_combo.setFocus()
             return
-        state_raw = state_combo.currentData()
-        if state_raw is None or not str(state_raw).strip():
+        if state_combo is None:
             self._show_error("State is required.")
+            return
+        if state_raw is None or not str(state_raw).strip():
+            typed = (state_combo.currentText() or "").strip() if state_combo else ""
+            if typed:
+                self._show_error(strict_list_selection_message("a state"))
+            else:
+                self._show_error("State is required.")
             state_combo.setFocus()
             return
-        source_combo = self._mk_combo_by_key.get("source")
-        if source_combo is None or source_combo.currentIndex() <= 0:
-            self._show_error("Source is required.")
-            if source_combo is not None:
-                source_combo.setFocus()
+        if city_combo is None:
+            self._show_error("City is required.")
             return
-        source_raw = source_combo.currentData()
-        if source_raw is None:
+        if city_raw is None or not str(city_raw).strip():
+            typed = (city_combo.currentText() or "").strip() if city_combo else ""
+            if typed:
+                self._show_error(strict_list_selection_message("a city"))
+            else:
+                self._show_error("City is required.")
+            city_combo.setFocus()
+            return
+        source_combo = self._mk_combo_by_key.get("source")
+        if source_combo is None:
             self._show_error("Source is required.")
+            return
+        source_id, source_err = require_master_key_seq_for_payload(
+            source_combo, field_caption="Source", strict_phrase="a source"
+        )
+        if source_err:
+            self._show_error(source_err)
             source_combo.setFocus()
             return
         for em_key in ("email1", "email2"):
@@ -742,34 +838,58 @@ class ViewCompanyPage(QWidget):
                 ind_edit.setFocus()
             return
         status_combo = self._mk_combo_by_key.get("status")
-        if status_combo is None or status_combo.currentIndex() <= 0:
+        if status_combo is None:
             self._show_error("Status is required.")
-            if status_combo is not None:
-                status_combo.setFocus()
             return
-        status_raw = status_combo.currentData()
-        if status_raw is None:
-            self._show_error("Status is required.")
+        status_id, status_err = require_master_key_seq_for_payload(
+            status_combo, field_caption="Status", strict_phrase="a status"
+        )
+        if status_err:
+            self._show_error(status_err)
             status_combo.setFocus()
             return
-        try:
-            country_id = _coerce_master_seq_to_int(country_raw)
-            city_id = _coerce_master_seq_to_int(city_raw)
-            state_id = _coerce_master_seq_to_int(state_raw)
-            source_id = _coerce_master_seq_to_int(source_raw)
-            status_id = _coerce_master_seq_to_int(status_raw)
-        except ValueError:
-            self._show_error("Country, city, state, source, and status must be valid selections.")
-            return
-        payload: dict[str, Any] = {
-            "companyName": company_name,
-            "country": country_id,
-            "city": city_id,
-            "state": state_id,
-            "source": source_id,
-            "industry": industry_val,
-            "status": status_id,
-        }
+        if self._world_locations_mode:
+            s_city = str(city_raw).strip()
+            if not s_city.isdigit():
+                self._show_error("City must be a valid selection from the list.")
+                return
+            idx = load_world_locations_index()
+            if idx is None:
+                self._show_error(
+                    "Location data is unavailable. Run: python scripts/build_world_cities_json.py"
+                )
+                return
+            api_country, api_state, api_city = idx.display_names_for_api(
+                str(country_raw).strip().upper(),
+                str(state_raw).strip(),
+                s_city,
+            )
+            payload = {
+                "companyName": company_name,
+                "country": api_country,
+                "state": api_state,
+                "city": api_city,
+                "source": source_id,
+                "industry": industry_val,
+                "status": status_id,
+            }
+        else:
+            try:
+                country_id = _coerce_master_seq_to_int(country_raw)
+                city_id = _coerce_master_seq_to_int(city_raw)
+                state_id = _coerce_master_seq_to_int(state_raw)
+            except ValueError:
+                self._show_error("Country, city, and state must be valid selections.")
+                return
+            payload = {
+                "companyName": company_name,
+                "country": country_id,
+                "city": city_id,
+                "state": state_id,
+                "source": source_id,
+                "industry": industry_val,
+                "status": status_id,
+            }
         for _label_text, keys in _COMPANY_FIELDS:
             canonical = keys[0]
             if canonical in _READONLY_KEYS or canonical in _MK_COMBO_KEYS or canonical.startswith("contactNo"):
@@ -798,6 +918,10 @@ class ViewCompanyPage(QWidget):
         if not ok:
             return
         self._company.update(payload)
+        if self._world_locations_mode:
+            widx = load_world_locations_index()
+            if widx is not None:
+                self._world_geo_baseline = geo_triple_from_company_record(self._company, index=widx)
         self._refresh_values()
         self._switch_to_view_mode()
         schedule_after_success(

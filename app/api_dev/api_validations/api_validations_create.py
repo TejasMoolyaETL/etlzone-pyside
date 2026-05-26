@@ -6,6 +6,7 @@ import re
 from typing import Any, Callable
 
 from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QCompleter,
     QComboBox,
@@ -45,6 +46,7 @@ from ui.form_page_styles import (
     placeholder_search_select,
 )
 from ui.post_save_navigation import schedule_after_success
+from ui.searchable_form_combo import wire_searchable_labeled_rows_combo
 from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
@@ -141,9 +143,9 @@ class CreateAPIValidationPage(QWidget):
 
         placeholders = {
             "project_id": "Select a project above",
-            "project_name": placeholder_search_select("Project Id", "Project name"),
+            "project_name": placeholder_search_select("Project Id", "Project Name"),
             "api_id": "Select project first",
-            "api_name": placeholder_search_select("API Id", "API name"),
+            "api_name": placeholder_search_select("API Id", "API Name"),
             "field_name": placeholder_example("userName"),
             "api_validation_summary": "Short summary for validation",
             "role": "Select project first",
@@ -161,9 +163,13 @@ class CreateAPIValidationPage(QWidget):
                 lbl = QLabel("API Validation Status:")
                 lbl.setStyleSheet(LABEL_STYLE)
                 w = QComboBox()
-                w.addItems(["ACTIVE", "INACTIVE"])
-                w.setCurrentText("ACTIVE")
                 apply_form_combobox_field(w, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX)
+                wire_searchable_labeled_rows_combo(
+                    w,
+                    rows=[("ACTIVE", "ACTIVE"), ("INACTIVE", "INACTIVE")],
+                    search_field_label="API validation status",
+                    default_display_text="ACTIVE",
+                )
                 self.api_validation_status_combo = w
                 stack.addWidget(labeled_field_block(lbl, w))
                 return
@@ -377,6 +383,13 @@ class CreateAPIValidationPage(QWidget):
 
         completer.activated.connect(on_activated)
         self.api_name_edit.setCompleter(completer)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._setup_project_completer()
+        if self.project_id_edit.text().strip():
+            self._setup_role_combo()
+        self._setup_api_completer()
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # type: ignore[override]
         # FocusIn can fire during construction before later fields (e.g. api_name) exist.

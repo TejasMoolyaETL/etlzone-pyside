@@ -6,6 +6,7 @@ import re
 from typing import Callable
 
 from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QCompleter,
     QHBoxLayout,
@@ -102,7 +103,7 @@ class CreateUserTypePage(QWidget):
 
         label_project = field_caption_label("Project Name*", LABEL_STYLE)
         self.project_name_edit = QLineEdit()
-        self.project_name_edit.setPlaceholderText(placeholder_search_select("Project Id", "Project name"))
+        self.project_name_edit.setPlaceholderText(placeholder_search_select("Project Id", "Project Name"))
         self.project_name_edit.setStyleSheet(INPUT_STYLE)
         self.project_name_edit.installEventFilter(self)
         card_layout.addWidget(labeled_field_block(label_project, self.project_name_edit))
@@ -185,6 +186,10 @@ class CreateUserTypePage(QWidget):
 
         completer.activated.connect(on_activated)
         self.project_name_edit.setCompleter(completer)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._setup_project_completer()
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # type: ignore[override]
         if obj == self.project_name_edit and event.type() == QEvent.Type.FocusIn:

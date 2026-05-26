@@ -6,6 +6,7 @@ import re
 from typing import Any, Callable
 
 from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtGui import QShowEvent
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -29,7 +30,6 @@ from core.api import (
     api_create_api_detail,
     api_get_all_projects,
     api_get_master_key_by_app_id_field_name,
-    master_key_row_display_label,
     master_key_row_seq_value,
 )
 from core.nav_access import LEFT_PANEL_NAV_ITEM_APP_ID_KEYS
@@ -52,6 +52,15 @@ from ui.form_page_styles import (
     placeholder_search_select,
 )
 from ui.post_save_navigation import schedule_after_success
+from ui.searchable_form_combo import (
+    combo_resolved_master_key_seq,
+    master_key_invalid_typed_text,
+    master_key_seq_for_payload,
+    require_master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    set_searchable_combo_by_user_data,
+    wire_searchable_master_key_combo,
+)
 from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
@@ -152,7 +161,7 @@ class CreateAPIDetailPage(QWidget):
 
         placeholders = {
             "project_id": "Select a project above",
-            "project_name": placeholder_search_select("Project Id", "Project name"),
+            "project_name": placeholder_search_select("Project Id", "Project Name"),
             "folder": placeholder_example("/api/v1"),
             "api_name": placeholder_example("GetUser"),
             "localhost_path": placeholder_example("http://localhost:8080/api"),
@@ -171,9 +180,8 @@ class CreateAPIDetailPage(QWidget):
                 lbl = QLabel("API Status:")
                 lbl.setStyleSheet(LABEL_STYLE)
                 w = QComboBox()
-                w.addItems(["ACTIVE", "INACTIVE"])
-                w.setCurrentText("ACTIVE")
                 apply_form_combobox_field(w, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX)
+                wire_searchable_master_key_combo(w, search_field_label="API status")
                 self.api_status_combo = w
                 stack.addWidget(labeled_field_block(lbl, w))
                 return
@@ -404,6 +412,11 @@ class CreateAPIDetailPage(QWidget):
             api_name = "/" + api_name
         self.server_path_edit.setText(f"http://{server}:{port_val}{api_name}")
 
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._load_api_status_options()
+        self._setup_project_completer()
+
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # type: ignore[override]
         if obj == self.project_name_edit and event.type() == QEvent.Type.FocusIn:
             self._setup_project_completer()
@@ -426,27 +439,37 @@ class CreateAPIDetailPage(QWidget):
             token=token,
         )
         rows = result.get("data") if result.get("success") else []
-        options: list[tuple[str, Any, str]] = []
+        default_seq: Any | None = None
         if isinstance(rows, list):
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                label = (master_key_row_display_label(row) or "").strip()
-                seq = master_key_row_seq_value(row)
-                if label and seq is not None:
-                    options.append((label, seq, str(row.get("keyValue") or row.get("key_value") or "").strip().upper()))
-        if not options:
-            options = [("ACTIVE", "ACTIVE", "ACTIVE"), ("INACTIVE", "INACTIVE", "INACTIVE")]
-        self.api_status_combo.blockSignals(True)
-        self.api_status_combo.clear()
-        default_idx = 0
-        for idx, (label, seq, key_value) in enumerate(options):
-            self.api_status_combo.addItem(label, seq)
-            if key_value == "ACTIVE":
-                default_idx = idx
-        self._default_api_status = str(options[default_idx][1])
-        self.api_status_combo.setCurrentIndex(default_idx)
-        self.api_status_combo.blockSignals(False)
+                if str(row.get("keyValue") or row.get("key_value") or "").strip().upper() == "ACTIVE":
+                    default_seq = master_key_row_seq_value(row)
+                    break
+        populate_master_key_by_field_name(
+            self.api_status_combo,
+            _API_STATUS_FIELD_NAME,
+            token=token,
+            include_placeholder=False,
+        )
+        if self.api_status_combo.count() == 0:
+            self.api_status_combo.blockSignals(True)
+            self.api_status_combo.addItem("ACTIVE", "ACTIVE")
+            self.api_status_combo.addItem("INACTIVE", "INACTIVE")
+            self.api_status_combo.setCurrentIndex(-1)
+            le = self.api_status_combo.lineEdit()
+            if le is not None:
+                le.clear()
+            self.api_status_combo.blockSignals(False)
+            default_seq = "ACTIVE"
+        if default_seq is not None:
+            set_searchable_combo_by_user_data(self.api_status_combo, default_seq)
+        elif self.api_status_combo.count() > 0:
+            set_searchable_combo_by_user_data(self.api_status_combo, self.api_status_combo.itemData(0))
+        self._default_api_status = str(
+            combo_resolved_master_key_seq(self.api_status_combo) or default_seq or "ACTIVE"
+        )
 
     def reload_api_status_options(self) -> None:
         self._load_api_status_options()
@@ -515,7 +538,8 @@ class CreateAPIDetailPage(QWidget):
             or self.localhost_path_edit.text().strip() != d["localhost_path"]
             or self.server_path_edit.text().strip() != d["server_path"]
             or self.requirement_edit.text().strip() != d["requirement"]
-            or str(self.api_status_combo.currentData()).strip() != d["api_status"]
+            or str(combo_resolved_master_key_seq(self.api_status_combo) or "").strip()
+            != str(d["api_status"]).strip()
             or self.comments_edit.toPlainText().strip() != d["comments"]
             or self.request_edit.toPlainText().strip() != d["request"]
             or self.response_edit.toPlainText().strip() != d["response"]
@@ -530,12 +554,9 @@ class CreateAPIDetailPage(QWidget):
         self.localhost_path_edit.clear()
         self.server_path_edit.clear()
         self.requirement_edit.clear()
-        idx = self.api_status_combo.findData(
-            int(self._default_api_status)
-            if self._default_api_status.isdigit()
-            else self._default_api_status
-        )
-        self.api_status_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        ds = self._default_api_status
+        parsed: Any = int(ds) if str(ds).isdigit() else ds
+        set_searchable_combo_by_user_data(self.api_status_combo, parsed)
         self.comments_edit.clear()
         self.request_edit.clear()
         self.response_edit.clear()
@@ -616,6 +637,14 @@ class CreateAPIDetailPage(QWidget):
         )
         token = str(token) if token else None
 
+        api_status_val, api_status_err = require_master_key_seq_for_payload(
+            self.api_status_combo, field_caption="API Status", strict_phrase="an API status"
+        )
+        if api_status_err:
+            self._show_error(api_status_err)
+            self.api_status_combo.setFocus()
+            return
+
         result = api_create_api_detail(
             project_id,
             token=token,
@@ -626,7 +655,7 @@ class CreateAPIDetailPage(QWidget):
             localhost_path=self.localhost_path_edit.text().strip(),
             server_path=self.server_path_edit.text().strip(),
             requirement=self.requirement_edit.text().strip(),
-            api_status=self.api_status_combo.currentData(),
+            api_status=api_status_val,
             comments=self.comments_edit.toPlainText().strip(),
             request_body=self.request_edit.toPlainText().strip(),
             response_body=self.response_edit.toPlainText().strip(),

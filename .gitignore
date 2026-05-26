@@ -21,3 +21,6 @@ env/
 # Python tooling caches
 .pytest_cache/
 .mypy_cache/
+
+# GeoNames-derived locations (generate with scripts/build_world_cities_json.py)
+data/world_locations.json

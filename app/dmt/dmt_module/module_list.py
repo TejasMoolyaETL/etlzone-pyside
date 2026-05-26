@@ -47,6 +47,7 @@ from ui.theme import Theme
 _MODULE_COLUMN_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Module Id", ("moduleId", "id")),
     ("Module Name", ("moduleName", "name")),
+    ("Status", ("statusName", "statusLabel", "status", "statusSeq", "status_seq", "dmt_module_status")),
     ("Created At", ("createdAt", "created_at")),
     ("Created By", ("createdBy", "created_by")),
     ("Modified At", ("modifiedAt", "modified_at")),
@@ -63,6 +64,12 @@ def _module_value_for_column(row: dict[str, Any], keys: tuple[str, ...]) -> tupl
 
 def _format_cell(value: Any, key: str = "", key_candidates: tuple[str, ...] = ()) -> str:
     if is_blank_display_value(value):
+        return ""
+    if isinstance(value, dict):
+        for k in ("keyValue", "key_value", "name", "label", "displayName"):
+            t = str(value.get(k) or "").strip()
+            if t:
+                return t
         return ""
     if is_datetime_field(key, key_candidates):
         return format_datetime_display(value)

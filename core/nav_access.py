@@ -31,6 +31,8 @@ from core.left_panel_nav_items import (
     API_MANAGEMENT_SUB_OPTIONS,
     API_SUB_OPTIONS,
     APP_CONFIG_SUB_OPTIONS,
+    DATA_MIGRATION_ADMIN_SUB_OPTIONS,
+    DATA_MIGRATION_ONBOARDING_SUB_OPTIONS,
     LEAD_MANAGEMENT_SUB_OPTIONS,
     OBJECT_TRACKER_SUB_OPTIONS,
     ORG_MANAGEMENT_SUB_OPTIONS,
@@ -71,11 +73,18 @@ LEFT_PANEL_NAV_ITEM_APP_ID_KEYS: dict[str, tuple[str, ...]] = {
     "Lead: Contact Person": ("LEAD_MGMT_CONTACT_PERSON",),
     "Lead: Company Contact Assignment": ("LEAD_MGMT_COMPANY_CONTACT_ASSIGNMENT",),
     "Leads": ("LEAD_MGMT_LEAD",),
+    # Data Migration Setup (align appIdDescription with backend getAppStepList when available)
+    "DM: Company": ("DM_COMPANY",),
+    "DM: Contact Person": ("DM_CONTACT_PERSON",),
+    "DM: Company Contact Assignment": ("DM_COMPANY_CONTACT_ASSIGNMENT",),
+    "DM: Project": ("DM_PROJECT",),
+    "DM: User": ("DMT_USERS",),
+    "DM: User Project Mapping": ("DM_USER_PROJECT_MAPPING",),
     # DMT Tracker (align appIdDescription with backend getAppStepList when available)
     "DMT - Category": ("DMT_CATEGORY",),
     "DMT - Module": ("DMT_MODULE",),
+    "DMT: User Module Assignment": ("DMT_USER_MODULE_ASSIGNMENT",),
     "DMT - Object": ("DMT_OBJECT",),
-    "DMT - Users": ("DMT_USERS",),
     "DMT - Object List Tracker": ("DMT_OBJECT_LIST_TRACKER",),
     "DMT - Issue Tracker": ("DMT_ISSUE_TRACKER",),
     # App Config (align appIdDescription with backend getAppStepList when available)
@@ -125,6 +134,33 @@ LEFT_PANEL_ACTION_STEP_ID_KEYS: dict[str, dict[str, tuple[str, ...]]] = {
         "edit": ("lead-company-edit",),
         "delete": ("lead-company-delete",),
     },
+    "DM: Company": {
+        "create": ("dm-company-create",),
+        "display": ("dm-company-display",),
+        "edit": ("dm-company-edit",),
+        "delete": ("dm-company-delete",),
+    },
+    "DM: Contact Person": {
+        "create": ("dm-contact-person-create",),
+        "display": ("dm-contact-person-display",),
+        "edit": ("dm-contact-person-edit",),
+        "delete": ("dm-contact-person-delete",),
+    },
+    "DM: Company Contact Assignment": {
+        "create": ("dm-company-contact-assignment-create",),
+        "display": ("dm-company-contact-assignment-display",),
+        "edit": (
+            "dm-company-contact-assignment-edit",
+            "dm-company-contact-assignment-update",
+        ),
+        "delete": ("dm-company-contact-assignment-delete",),
+    },
+    "DM: Project": {
+        "create": ("dm-project-create",),
+        "display": ("dm-project-display",),
+        "edit": ("dm-project-edit",),
+        "delete": ("dm-project-delete",),
+    },
     "Lead: Contact Person": {
         "create": ("lead-contact-person-create",),
         "display": ("lead-contact-person-display",),
@@ -150,6 +186,13 @@ LEFT_PANEL_ACTION_STEP_ID_KEYS: dict[str, dict[str, tuple[str, ...]]] = {
         "comment_edit": ("lead-comment-edit",),
         "comment_delete": ("lead-comment-delete",),
     },
+    "DMT: User Module Assignment": {
+        "create": ("dmt-user-module-assign",),
+        "display": ("dmt-user-module-display",),
+        "edit": ("dmt-user-module-edit",),
+        "change_status": ("dmt-user-module-change-status",),
+        "delete": ("dmt-user-module-remove",),
+    },
 }
 
 
@@ -171,7 +214,9 @@ def format_nav_app_id_descriptions_by_section() -> str:
         ("API Development", list(API_SUB_OPTIONS)),
         ("DB Design Project", ["DB Design Project"]),
         ("Lead Management", list(LEAD_MANAGEMENT_SUB_OPTIONS)),
-        ("DMT Tracker", list(OBJECT_TRACKER_SUB_OPTIONS)),
+        ("Data Migration Onboarding", list(DATA_MIGRATION_ONBOARDING_SUB_OPTIONS)),
+        ("Data Migration - Admin", list(DATA_MIGRATION_ADMIN_SUB_OPTIONS)),
+        ("Data Migration Tracker", list(OBJECT_TRACKER_SUB_OPTIONS)),
         ("App Config", list(APP_CONFIG_SUB_OPTIONS)),
     ]
     for section_title, labels in groups:
@@ -279,6 +324,8 @@ class LeftPanelAccessState:
     show_db_design_project: bool
     show_api_development: bool
     show_lead_management: bool
+    show_data_migration_onboarding: bool
+    show_data_migration_admin: bool
     show_dmt_tracker: bool
     show_app_config: bool
     api_development_title: str
@@ -302,6 +349,8 @@ def build_left_panel_access_state(steps: list[dict[str, Any]] | None) -> LeftPan
             True,
             True,
             True,
+            True,
+            True,
             default_title,
             True,
             empty_visible,
@@ -317,6 +366,8 @@ def build_left_panel_access_state(steps: list[dict[str, Any]] | None) -> LeftPan
     show_db = nav_item_visible("DB Design Project", allowed)
     show_api_dev = any(nav_item_visible(lbl, allowed) for lbl in API_SUB_OPTIONS)
     show_lead_mgmt = any(nav_item_visible(lbl, allowed) for lbl in LEAD_MANAGEMENT_SUB_OPTIONS)
+    show_dm_onboarding = any(nav_item_visible(lbl, allowed) for lbl in DATA_MIGRATION_ONBOARDING_SUB_OPTIONS)
+    show_dm_admin = any(nav_item_visible(lbl, allowed) for lbl in DATA_MIGRATION_ADMIN_SUB_OPTIONS)
     show_dmt = any(nav_item_visible(lbl, allowed) for lbl in OBJECT_TRACKER_SUB_OPTIONS)
     show_app_cfg = any(nav_item_visible(lbl, allowed) for lbl in APP_CONFIG_SUB_OPTIONS)
 
@@ -327,6 +378,8 @@ def build_left_panel_access_state(steps: list[dict[str, Any]] | None) -> LeftPan
         show_db,
         show_api_dev,
         show_lead_mgmt,
+        show_dm_onboarding,
+        show_dm_admin,
         show_dmt,
         show_app_cfg,
         default_title,

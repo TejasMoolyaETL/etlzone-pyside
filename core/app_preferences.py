@@ -88,12 +88,50 @@ DATE_KEYS = frozenset(
         "revokedAt", "revoked_at", "deletedAt", "deleted_at",
         "lastLogin", "last_login", "LastLogin", "loginAt", "login_at",
         "startDate", "start_date", "endDate", "end_date",
+        "goLiveDate", "go_live_date",
         "effectiveFrom", "effective_from", "effectiveTo", "effective_to",
         "timestamp", "Timestamp", "timeStamp", "time_stamp",
         "functionalUnitTestingCompletionDate",
         "functional_unit_testing_completion_date",
+        # ETL scan / import metadata
+        "LAST_SCAN_DATE",
+        "lastScanDate",
+        "last_scan_date",
+        "LAST_IMPORT_DATE",
+        "lastImportDate",
+        "last_import_date",
+        "startTime",
+        "start_time",
+        "endTime",
+        "end_time",
+        "scannedAt",
+        "scanned_at",
+        "commentOnDate",
+        "comment_on_date",
     }
 )
+
+# Calendar dates without a meaningful time component (display ``dd Mon YYYY`` only).
+DATE_ONLY_KEYS = frozenset(
+    {
+        "startDate",
+        "start_date",
+        "goLiveDate",
+        "go_live_date",
+        "endDate",
+        "end_date",
+        "effectiveFrom",
+        "effective_from",
+        "effectiveTo",
+        "effective_to",
+    }
+)
+
+
+def is_date_only_field(key: str, key_candidates: tuple[str, ...] = ()) -> bool:
+    if key in DATE_ONLY_KEYS:
+        return True
+    return any(k in DATE_ONLY_KEYS for k in key_candidates)
 
 
 def is_datetime_field(key: str, key_candidates: tuple[str, ...] = ()) -> bool:
@@ -118,9 +156,10 @@ def is_datetime_field(key: str, key_candidates: tuple[str, ...] = ()) -> bool:
             "validto",
             "fromdate",
             "todate",
-            "on",
         )
-        if low.endswith(("at", "_at", "date", "_date", "time", "_time", "timestamp", "_timestamp")):
+        if low.endswith(
+            ("at", "_at", "on", "_on", "date", "_date", "time", "_time", "timestamp", "_timestamp")
+        ):
             return True
         return any(h in low for h in date_hints)
 
@@ -242,19 +281,12 @@ def to_utc_iso(
         return None
 
 
-def format_datetime(value: Any) -> str | None:
-    """Convert backend date/datetime (UTC) to user's timezone for display.
-
-    Use everywhere a date or datetime is shown on screen. The timezone comes from
-    the user's Settings (stored in backend, loaded into profile).
-    Handles: int/float (timestamp ms or s), ISO strings with/without Z.
-    Returns None if not parseable.
-    """
+def _parse_api_datetime_for_display(value: Any) -> datetime | None:
+    """Parse API date/datetime values and convert to the user's display timezone."""
     if value is None:
         return None
     if isinstance(value, str) and value.strip().lower() in ("", "null", "none"):
         return None
-    # Some APIs return {"date": "...", "time": "..."} or {"timestamp": ...}
     if isinstance(value, dict):
         value = value.get("date") or value.get("time") or value.get("timestamp") or value.get("$date")
         if value is None:
@@ -265,17 +297,14 @@ def format_datetime(value: Any) -> str | None:
             ts = float(value)
             if ts > 1e12:
                 ts /= 1000
-            dt = datetime.fromtimestamp(ts, tz=timezone.utc)  # timestamps are UTC
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
         elif isinstance(value, str) and value.strip():
             s = value.strip()
             try:
                 s_iso = s.replace("Z", "+00:00").replace("z", "+00:00")
-                # Backend often uses space: "2026-03-10 11:10:07.289347" -> use T for fromisoformat
                 if len(s_iso) >= 10 and s_iso[10:11] == " ":
                     s_iso = s_iso[:10] + "T" + s_iso[11:]
-                # Java/Spring: +0000 -> +00:00 (fromisoformat needs colon)
                 s_iso = _OFFSET_FIX.sub(r"\1\2:\3", s_iso)
-                # Parse; allow up to 40 chars to include timezone (e.g. 2025-02-25T10:30:00.000+00:00)
                 parse_str = s_iso[:40].rstrip()
                 dt = datetime.fromisoformat(parse_str)
                 if dt.tzinfo is None:
@@ -307,6 +336,7 @@ def format_datetime(value: Any) -> str | None:
             if dt is None:
                 try:
                     from dateutil.parser import parse as dateutil_parse
+
                     dt = dateutil_parse(s)
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=timezone.utc)
@@ -316,9 +346,6 @@ def format_datetime(value: Any) -> str | None:
                     pass
         if dt is None:
             return None
-        # Convert UTC to user's timezone (from Settings/backend, e.g. Asia/Kolkata).
-        # Very large years (e.g. 9999 "forever" validTo) can make astimezone() raise
-        # OverflowError on Windows; keep UTC and still apply the display strftime below.
         tz_id = get_timezone()
         if tz_id:
             target_tz = _get_zoneinfo(tz_id)
@@ -327,20 +354,65 @@ def format_datetime(value: Any) -> str | None:
                     dt = dt.astimezone(target_tz)
                 except OverflowError:
                     pass
-            # else: ZoneInfo failed, keep UTC
         else:
             try:
                 dt = dt.astimezone()
             except OverflowError:
                 pass
-        try:
-            return dt.strftime("%d %b %Y %I:%M %p")
-        except OverflowError:
-            # Rare: platform strftime limits on extreme years; keep raw string.
-            s = str(value).strip() if not isinstance(value, (int, float)) else ""
-            return s if s else ""
+        return dt
     except (ValueError, OSError, OverflowError):
         return None
+
+
+def format_datetime(value: Any) -> str | None:
+    """Convert backend date/datetime (UTC) to user's timezone for display.
+
+    Use everywhere a date or datetime is shown on screen. The timezone comes from
+    the user's Settings (stored in backend, loaded into profile).
+    Handles: int/float (timestamp ms or s), ISO strings with/without Z.
+    Returns None if not parseable.
+    """
+    dt = _parse_api_datetime_for_display(value)
+    if dt is None:
+        return None
+    try:
+        return dt.strftime("%d %b %Y %I:%M %p")
+    except OverflowError:
+        s = str(value).strip() if not isinstance(value, (int, float)) else ""
+        return s if s else ""
+
+
+def _is_blank_datetime_source(value: Any) -> bool:
+    """Skip empty / placeholder values when picking the latest datetime."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        t = value.strip()
+        if not t or t.lower() in ("null", "none", "undefined", "n/a"):
+            return True
+        if t in ("-", "\u2014", "\u2013", "0"):
+            return True
+    if isinstance(value, (list, dict)) and len(value) == 0:
+        return True
+    return False
+
+
+def latest_datetime_display(*values: Any) -> str:
+    """Pick the latest API datetime among ``values`` and return timezone-aware display text."""
+    best_dt: datetime | None = None
+    best_raw: Any = None
+    for value in values:
+        if _is_blank_datetime_source(value):
+            continue
+        dt = _parse_api_datetime_for_display(value)
+        if dt is None:
+            continue
+        if best_dt is None or dt > best_dt:
+            best_dt = dt
+            best_raw = value
+    if best_raw is not None:
+        return format_datetime_display(best_raw)
+    return "--"
 
 
 def format_datetime_display(value: Any) -> str:
@@ -356,6 +428,31 @@ def format_datetime_display(value: Any) -> str:
     out = format_datetime(value)
     if out is not None:
         return out
+    s = str(value).strip()
+    return s if s else ""
+
+
+def format_date_display(value: Any) -> str:
+    """Format API calendar dates for UI: user timezone, ``dd Mon YYYY`` (no time)."""
+    if value is None:
+        return ""
+    if isinstance(value, str) and value.strip().lower() in ("", "null", "none"):
+        return ""
+    dt = _parse_api_datetime_for_display(value)
+    if dt is not None:
+        try:
+            return dt.strftime("%d %b %Y")
+        except OverflowError:
+            pass
+    if isinstance(value, str):
+        s = value.strip()
+        if "T" in s:
+            s = s.split("T", 1)[0].strip()
+        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+            try:
+                return datetime.strptime(s[:10], "%Y-%m-%d").strftime("%d %b %Y")
+            except ValueError:
+                pass
     s = str(value).strip()
     return s if s else ""
 
@@ -416,13 +513,15 @@ def format_field_display_value(value: Any, key: str = "", key_candidates: tuple[
                 out = str(m.group(1) or "").strip()
                 if out:
                     return out
-    if is_datetime_field(key, key_candidates):
-        return format_datetime_display(value)
     if isinstance(value, dict):
         nested_out = _extract_nested_display(value)
         if nested_out:
             return nested_out
         return ""
+    if is_date_only_field(key, key_candidates):
+        return format_date_display(value)
+    if is_datetime_field(key, key_candidates):
+        return format_datetime_display(value)
     if isinstance(value, bool):
         return "Yes" if value else "No"
     text = str(value).strip()

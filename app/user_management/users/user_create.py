@@ -9,8 +9,8 @@ import re
 from datetime import date
 from typing import Callable
 
-from PySide6.QtCore import QPoint, QDate, Qt, QRegularExpression, Signal, QTimer
-from PySide6.QtGui import QRegularExpressionValidator
+from PySide6.QtCore import QEvent, QObject, QPoint, QDate, Qt, QRegularExpression, Signal, QTimer
+from PySide6.QtGui import QKeyEvent, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QCalendarWidget,
     QComboBox,
@@ -33,8 +33,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from PySide6.QtCore import QStringListModel
-
 from core.api import api_create_user, api_get_all_depts, api_get_all_orgs, api_get_all_positions
 from core.user_context import get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
@@ -55,10 +53,10 @@ from ui.form_page_styles import (
     FORM_PRIMARY_BUTTON_STYLESHEET,
     FORM_READONLY_INPUT_STYLE as READONLY_INPUT_STYLE,
     FORM_SECONDARY_BUTTON_STYLESHEET,
-    placeholder_auto_filled,
     placeholder_search_select,
 )
 from ui.post_save_navigation import schedule_after_success
+from ui.searchable_form_combo import wire_searchable_labeled_rows_combo
 from ui.strict_completer import strict_list_selection_message
 from ui.styles import CONTEXT_MENU_STYLESHEET
 from ui.widgets.password_edit import PasswordLineEdit
@@ -483,7 +481,7 @@ class CreateUserPage(QWidget):
         _add_field_group(left_col, label_last, self.last_name_edit)
 
         # Right column
-        label_org = QLabel("Org Name:")
+        label_org = QLabel("Org:")
         label_org.setStyleSheet(LABEL_STYLE)
         self.org_name_edit = QLineEdit()
         self.org_name_edit.setPlaceholderText(placeholder_search_select("Org Id", "Org Name"))
@@ -491,27 +489,10 @@ class CreateUserPage(QWidget):
         self.org_name_edit.setFixedHeight(field_h)
         self.org_name_edit.setMinimumWidth(240)
         self.org_name_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.org_name_edit.textEdited.connect(lambda _t: self.org_id_edit.clear())
-        self.org_name_completer = QCompleter(self.org_name_edit)
-        self.org_name_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self.org_name_completer.setFilterMode(Qt.MatchFlag.MatchContains)
-        self.org_name_completer.setMaxVisibleItems(12)
-        self.org_name_edit.setCompleter(self.org_name_completer)
-        self.org_name_completer.activated.connect(self._on_org_selected)
+        self.org_name_edit.installEventFilter(self)
         _add_field_group(right_col, label_org, self.org_name_edit)
 
-        label_org_id = QLabel("Org Id:")
-        label_org_id.setStyleSheet(LABEL_STYLE)
-        self.org_id_edit = QLineEdit()
-        self.org_id_edit.setReadOnly(True)
-        self.org_id_edit.setPlaceholderText(placeholder_auto_filled("Org Name"))
-        self.org_id_edit.setStyleSheet(READONLY_INPUT_STYLE)
-        self.org_id_edit.setFixedHeight(field_h)
-        self.org_id_edit.setMinimumWidth(240)
-        self.org_id_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        _add_field_group(right_col, label_org_id, self.org_id_edit)
-
-        label_dept = QLabel("Dept Name:")
+        label_dept = QLabel("Dept:")
         label_dept.setStyleSheet(LABEL_STYLE)
         self.dept_name_edit = QLineEdit()
         self.dept_name_edit.setPlaceholderText(placeholder_search_select("Dept Id", "Dept Name"))
@@ -519,27 +500,10 @@ class CreateUserPage(QWidget):
         self.dept_name_edit.setFixedHeight(field_h)
         self.dept_name_edit.setMinimumWidth(240)
         self.dept_name_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.dept_name_edit.textEdited.connect(lambda _t: self.dept_id_value_edit.clear())
-        self.dept_id_completer = QCompleter(self.dept_name_edit)
-        self.dept_id_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self.dept_id_completer.setFilterMode(Qt.MatchFlag.MatchContains)
-        self.dept_id_completer.setMaxVisibleItems(12)
-        self.dept_name_edit.setCompleter(self.dept_id_completer)
-        self.dept_id_completer.activated.connect(self._on_dept_selected)
+        self.dept_name_edit.installEventFilter(self)
         _add_field_group(right_col, label_dept, self.dept_name_edit)
 
-        label_dept_id = QLabel("Dept Id:")
-        label_dept_id.setStyleSheet(LABEL_STYLE)
-        self.dept_id_value_edit = QLineEdit()
-        self.dept_id_value_edit.setReadOnly(True)
-        self.dept_id_value_edit.setPlaceholderText(placeholder_auto_filled("Dept Name"))
-        self.dept_id_value_edit.setStyleSheet(READONLY_INPUT_STYLE)
-        self.dept_id_value_edit.setFixedHeight(field_h)
-        self.dept_id_value_edit.setMinimumWidth(240)
-        self.dept_id_value_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        _add_field_group(right_col, label_dept_id, self.dept_id_value_edit)
-
-        label_position = QLabel("Position Name:")
+        label_position = QLabel("Position:")
         label_position.setStyleSheet(LABEL_STYLE)
         self.position_name_edit = QLineEdit()
         self.position_name_edit.setPlaceholderText(placeholder_search_select("Position Id", "Position Name"))
@@ -547,25 +511,8 @@ class CreateUserPage(QWidget):
         self.position_name_edit.setFixedHeight(field_h)
         self.position_name_edit.setMinimumWidth(240)
         self.position_name_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.position_name_edit.textEdited.connect(lambda _t: self.position_id_value_edit.clear())
-        self.position_id_completer = QCompleter(self.position_name_edit)
-        self.position_id_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self.position_id_completer.setFilterMode(Qt.MatchFlag.MatchContains)
-        self.position_id_completer.setMaxVisibleItems(12)
-        self.position_name_edit.setCompleter(self.position_id_completer)
-        self.position_id_completer.activated.connect(self._on_position_selected)
+        self.position_name_edit.installEventFilter(self)
         _add_field_group(right_col, label_position, self.position_name_edit)
-
-        label_position_id = QLabel("Position Id:")
-        label_position_id.setStyleSheet(LABEL_STYLE)
-        self.position_id_value_edit = QLineEdit()
-        self.position_id_value_edit.setReadOnly(True)
-        self.position_id_value_edit.setPlaceholderText(placeholder_auto_filled("Position Name"))
-        self.position_id_value_edit.setStyleSheet(READONLY_INPUT_STYLE)
-        self.position_id_value_edit.setFixedHeight(field_h)
-        self.position_id_value_edit.setMinimumWidth(240)
-        self.position_id_value_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        _add_field_group(right_col, label_position_id, self.position_id_value_edit)
 
         label_mobile = field_caption_label("Mobile", LABEL_STYLE, required=True)
         mobile_container = QWidget()
@@ -594,8 +541,13 @@ class CreateUserPage(QWidget):
         label_status = QLabel("Status:")
         label_status.setStyleSheet(LABEL_STYLE)
         self.status_combo = QComboBox()
-        self.status_combo.addItems(["ACTIVE", "INACTIVE"])
         apply_form_combobox_field(self.status_combo, height_px=field_h, min_width=140)
+        wire_searchable_labeled_rows_combo(
+            self.status_combo,
+            rows=[("ACTIVE", "ACTIVE"), ("INACTIVE", "INACTIVE")],
+            search_field_label="Status",
+            default_display_text="ACTIVE",
+        )
         self.status_combo.currentIndexChanged.connect(self._on_status_changed)
         _add_field_group(left_col, label_status, self.status_combo)
 
@@ -664,11 +616,8 @@ class CreateUserPage(QWidget):
             "first_name": "",
             "last_name": "",
             "org_name": "",
-            "org_id": "",
             "dept_name": "",
-            "dept_id": "",
             "position_name": "",
-            "position_id": "",
             "mobile_country_index": 0,
             "mobile_number": "",
             "status": "ACTIVE",
@@ -687,15 +636,9 @@ class CreateUserPage(QWidget):
             return True
         if self.org_name_edit.text().strip() != d["org_name"]:
             return True
-        if self.org_id_edit.text().strip() != d["org_id"]:
-            return True
         if self.dept_name_edit.text().strip() != d["dept_name"]:
             return True
-        if self.dept_id_value_edit.text().strip() != d["dept_id"]:
-            return True
         if self.position_name_edit.text().strip() != d["position_name"]:
-            return True
-        if self.position_id_value_edit.text().strip() != d["position_id"]:
             return True
         if self.mobile_country.currentIndex() != d["mobile_country_index"]:
             return True
@@ -712,11 +655,8 @@ class CreateUserPage(QWidget):
         self.first_name_edit.clear()
         self.last_name_edit.clear()
         self.org_name_edit.clear()
-        self.org_id_edit.clear()
         self.dept_name_edit.clear()
-        self.dept_id_value_edit.clear()
         self.position_name_edit.clear()
-        self.position_id_value_edit.clear()
         self.mobile_country.blockSignals(True)
         self.mobile_country.setCurrentIndex(0)
         self.mobile_country.blockSignals(False)
@@ -733,7 +673,7 @@ class CreateUserPage(QWidget):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self._clear_message()
-        self._ensure_reference_data_loaded()
+        self._ensure_reference_data_loaded(force=True)
 
     def request_back(self) -> None:
         """Navigate back, showing confirmation if form has unsaved changes."""
@@ -757,8 +697,40 @@ class CreateUserPage(QWidget):
         # No validity dates in create-user; keep handler for future use.
         return None
 
-    def _ensure_reference_data_loaded(self) -> None:
-        if self._ref_loaded:
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        """Match Create BU org field: Space opens the completer popup (no space inserted)."""
+        if event.type() == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
+            if event.key() == Qt.Key.Key_Space and obj in (
+                self.org_name_edit,
+                self.dept_name_edit,
+                self.position_name_edit,
+            ):
+                self._ensure_reference_data_loaded()
+                edit = obj
+                c = edit.completer()
+                if c is not None:
+                    c.setCompletionPrefix(edit.text())
+                    c.complete()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _setup_lookup_completers(self) -> None:
+        """Same pattern as Create BU: ``QCompleter`` built from string rows + popup completion."""
+        for displays, edit, on_activated in (
+            (self._format_items(self._org_items), self.org_name_edit, self._on_org_selected),
+            (self._format_items(self._dept_items), self.dept_name_edit, self._on_dept_selected),
+            (self._format_items(self._position_items), self.position_name_edit, self._on_position_selected),
+        ):
+            c = QCompleter(displays, edit)
+            c.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            c.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+            c.setFilterMode(Qt.MatchFlag.MatchContains)
+            c.setMaxVisibleItems(12)
+            c.activated.connect(on_activated)
+            edit.setCompleter(c)
+
+    def _ensure_reference_data_loaded(self, *, force: bool = False) -> None:
+        if self._ref_loaded and not force:
             return
         profile = get_user_profile()
         token = (
@@ -775,7 +747,7 @@ class CreateUserPage(QWidget):
 
         self._org_items = self._extract_id_name_items(
             orgs.get("data") or [],
-            id_keys=("orgId", "org_id", "organizationId", "id"),
+            id_keys=("orgID", "orgId", "org_id", "organizationId", "id"),
             name_keys=("orgName", "org_name", "organizationName", "name"),
         )
         self._dept_items = self._extract_id_name_items(
@@ -789,9 +761,7 @@ class CreateUserPage(QWidget):
             name_keys=("positionName", "position_name", "name"),
         )
 
-        self.org_name_completer.setModel(QStringListModel(self._format_items(self._org_items)))
-        self.dept_id_completer.setModel(QStringListModel(self._format_items(self._dept_items)))
-        self.position_id_completer.setModel(QStringListModel(self._format_items(self._position_items)))
+        self._setup_lookup_completers()
 
         self._ref_loaded = True
 
@@ -832,18 +802,13 @@ class CreateUserPage(QWidget):
         return (text or "").split("|", 1)[0].strip()
 
     def _on_org_selected(self, text: str) -> None:
-        selected_id = self._parse_selected_id(text)
-        self.org_id_edit.setText(selected_id)
-        # Keep display text in "id | name" form from completer selection.
         self.org_name_edit.setText(text)
 
     def _on_dept_selected(self, text: str) -> None:
         self.dept_name_edit.setText(text)
-        self.dept_id_value_edit.setText(self._parse_selected_id(text))
 
     def _on_position_selected(self, text: str) -> None:
         self.position_name_edit.setText(text)
-        self.position_id_value_edit.setText(self._parse_selected_id(text))
 
     def _update_email_style(self, widget: QLineEdit, text: str) -> None:
         """Update email field border color based on validity (like View Profile)."""
@@ -944,10 +909,6 @@ class CreateUserPage(QWidget):
             position_id = self._parse_selected_id(pos_text)
         else:
             position_id = None
-
-        self.org_id_edit.setText(org_id or "")
-        self.dept_id_value_edit.setText(dept_id or "")
-        self.position_id_value_edit.setText(position_id or "")
 
         profile = get_user_profile()
         token = (

@@ -36,7 +36,20 @@ from ui.form_page_styles import (
     placeholder_example,
 )
 from ui.post_save_navigation import schedule_after_success
+from ui.searchable_form_combo import (
+    combo_resolved_master_key_seq,
+    master_key_invalid_typed_text,
+    master_key_seq_for_payload,
+    require_master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    reset_searchable_combo,
+    wire_searchable_master_key_combo,
+)
+from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
+
+
+_DMT_OBJECT_STATUS_FIELD_NAME = "dmt_object_status"
 
 
 class CreateDmtObjectPage(QWidget):
@@ -48,6 +61,7 @@ class CreateDmtObjectPage(QWidget):
         super().__init__()
         self.on_back = on_back
         self.on_create_success = on_create_success
+        self._status_combo: QComboBox | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -108,6 +122,15 @@ class CreateDmtObjectPage(QWidget):
         self.object_name_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         card_layout.addWidget(labeled_field_block(name_lbl, self.object_name_edit))
 
+        status_lbl = field_caption_label("Status*", LABEL_STYLE)
+        status_combo = QComboBox()
+        status_combo.setMinimumWidth(360)
+        status_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        apply_form_combobox_field(status_combo, height_px=field_h)
+        wire_searchable_master_key_combo(status_combo, search_field_label="Status")
+        self._status_combo = status_combo
+        card_layout.addWidget(labeled_field_block(status_lbl, status_combo))
+
         card_layout.addSpacing(16)
         self.error_label = QLabel()
         self.error_label.setStyleSheet(FORM_ERROR_LABEL_STYLE)
@@ -142,10 +165,16 @@ class CreateDmtObjectPage(QWidget):
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
-        # Always refresh so newly created modules appear immediately.
         self._load_modules_into_combo()
+        if self._status_combo is not None:
+            populate_master_key_by_field_name(
+                self._status_combo,
+                _DMT_OBJECT_STATUS_FIELD_NAME,
+                token=self._token(),
+                include_placeholder=False,
+            )
 
-    def _load_modules_into_combo(self) -> None:
+    def _token(self) -> str | None:
         profile = get_user_profile()
         token = (
             profile.get("token")
@@ -153,7 +182,10 @@ class CreateDmtObjectPage(QWidget):
             or profile.get("access_token")
             or profile.get("jwt")
         )
-        token = str(token) if token else None
+        return str(token) if token else None
+
+    def _load_modules_into_combo(self) -> None:
+        token = self._token()
         self.module_combo.blockSignals(True)
         self.module_combo.clear()
         self.module_combo.addItem("— Select module —", None)
@@ -186,11 +218,19 @@ class CreateDmtObjectPage(QWidget):
     def is_dirty(self) -> bool:
         if self.object_name_edit.text().strip():
             return True
-        return self.module_combo.currentData() is not None
+        if self.module_combo.currentData() is not None:
+            return True
+        if self._status_combo is not None:
+            seq = combo_resolved_master_key_seq(self._status_combo)
+            if seq is not None and str(seq).strip() != "":
+                return True
+        return False
 
     def reset_to_default(self) -> None:
         self.object_name_edit.clear()
         self.module_combo.setCurrentIndex(0)
+        if self._status_combo is not None:
+            reset_searchable_combo(self._status_combo)
         self._clear_error()
 
     def _handle_back(self) -> None:
@@ -222,15 +262,15 @@ class CreateDmtObjectPage(QWidget):
             self._show_error("Object name is required.")
             self.object_name_edit.setFocus()
             return
-        profile = get_user_profile()
-        token = (
-            profile.get("token")
-            or profile.get("accessToken")
-            or profile.get("access_token")
-            or profile.get("jwt")
+        status_id, status_err = require_master_key_seq_for_payload(
+            self._status_combo, field_caption="Status", strict_phrase="a status"
         )
-        token = str(token) if token else None
-        result = api_create_object(name, mid, token=token)
+        if status_err:
+            self._show_error(status_err)
+            if self._status_combo is not None:
+                self._status_combo.setFocus()
+            return
+        result = api_create_object(name, mid, status=status_id, token=self._token())
         if result.get("success"):
             self._show_success(str(result.get("message") or "Object created successfully."))
             schedule_after_success(

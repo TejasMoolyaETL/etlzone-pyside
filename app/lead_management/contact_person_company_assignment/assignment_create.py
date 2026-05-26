@@ -21,8 +21,6 @@ from core.api import (
     api_create_contact_person_company_assignment,
     api_get_all_contact_persons,
     api_get_all_lead_companies,
-    api_get_master_key_by_app_id_field_name,
-    master_key_row_seq_value,
 )
 from core.nav_access import collect_allowed_action_names, nav_action_visible
 from core.user_context import get_nav_access_steps, get_user_profile
@@ -40,6 +38,18 @@ from ui.form_page_styles import (
     MODAL_FIELD_HEIGHT_PX,
 )
 from ui.post_save_navigation import schedule_after_success
+from ui.searchable_form_combo import (
+    combo_resolved_item_data,
+    combo_resolved_master_key_seq,
+    master_key_invalid_typed_text,
+    master_key_seq_for_payload,
+    require_master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    reset_searchable_combo,
+    set_searchable_combo_by_user_data,
+    wire_searchable_master_key_combo,
+)
+from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
 _ASSIGNMENT_STATUS_FIELD_NAME = "lead_company_contact_assignment_status"
@@ -87,16 +97,19 @@ class CreateContactPersonCompanyAssignmentPage(QWidget):
         self._company_combo.setMinimumWidth(260)
         self._company_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         apply_form_combobox_field(self._company_combo, height_px=h)
+        wire_searchable_master_key_combo(self._company_combo, search_field_label="Company")
         cl.addWidget(labeled_field_block(field_caption_label("Company*", LABEL_STYLE), self._company_combo))
         self._contact_person_combo = QComboBox()
         self._contact_person_combo.setMinimumWidth(260)
         self._contact_person_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         apply_form_combobox_field(self._contact_person_combo, height_px=h)
+        wire_searchable_master_key_combo(self._contact_person_combo, search_field_label="Contact Person")
         cl.addWidget(labeled_field_block(field_caption_label("Contact Person*", LABEL_STYLE), self._contact_person_combo))
         self._status_combo = QComboBox()
         self._status_combo.setMinimumWidth(260)
         self._status_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         apply_form_combobox_field(self._status_combo, height_px=h)
+        wire_searchable_master_key_combo(self._status_combo, search_field_label="Status")
         cl.addWidget(labeled_field_block(field_caption_label("Status*", LABEL_STYLE), self._status_combo))
         self.error_label = QLabel()
         self.error_label.setStyleSheet(FORM_ERROR_LABEL_STYLE)
@@ -160,7 +173,6 @@ class CreateContactPersonCompanyAssignmentPage(QWidget):
         rows = result.get("data") if result.get("success") else []
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("Select company…", None)
         if isinstance(rows, list):
             for row in rows:
                 if not isinstance(row, dict):
@@ -171,7 +183,10 @@ class CreateContactPersonCompanyAssignmentPage(QWidget):
                 name = str(row.get("companyName") or row.get("name") or "").strip()
                 label = f"{cid} | {name}" if name else str(cid)
                 combo.addItem(label, cid)
-        combo.setCurrentIndex(0)
+        combo.setCurrentIndex(-1)
+        le = combo.lineEdit()
+        if le is not None:
+            le.clear()
         combo.blockSignals(False)
 
     def _populate_contact_person_combo(self) -> None:
@@ -182,7 +197,6 @@ class CreateContactPersonCompanyAssignmentPage(QWidget):
         rows = result.get("data") if result.get("success") else []
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("Select contact person…", None)
         if isinstance(rows, list):
             for row in rows:
                 if not isinstance(row, dict):
@@ -193,34 +207,19 @@ class CreateContactPersonCompanyAssignmentPage(QWidget):
                 name = str(row.get("name") or row.get("contactPersonName") or "").strip()
                 label = f"{contact_id} | {name}" if name else str(contact_id)
                 combo.addItem(label, contact_id)
-        combo.setCurrentIndex(0)
+        combo.setCurrentIndex(-1)
+        le = combo.lineEdit()
+        if le is not None:
+            le.clear()
         combo.blockSignals(False)
 
     def _populate_status_combo(self) -> None:
-        combo = self._status_combo
-        if combo is None:
-            return
-        result = api_get_master_key_by_app_id_field_name(
-            field_name=_ASSIGNMENT_STATUS_FIELD_NAME,
+        populate_master_key_by_field_name(
+            self._status_combo,
+            _ASSIGNMENT_STATUS_FIELD_NAME,
             token=self._token(),
+            include_placeholder=False,
         )
-        rows = result.get("data") if result.get("success") else []
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem("Select status…", None)
-        if isinstance(rows, list):
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                seq_val = master_key_row_seq_value(row)
-                if seq_val is None:
-                    continue
-                key_value = str(row.get("keyValue") or row.get("key_value") or "").strip()
-                if not key_value:
-                    continue
-                combo.addItem(f"{seq_val} | {key_value}", seq_val)
-        combo.setCurrentIndex(0)
-        combo.blockSignals(False)
 
     def set_prefill(self, prefill: dict[str, Any] | None) -> None:
         self._pending_prefill = dict(prefill) if isinstance(prefill, dict) else None
@@ -228,15 +227,7 @@ class CreateContactPersonCompanyAssignmentPage(QWidget):
     def _set_combo_to_data(self, combo: QComboBox | None, value: Any) -> None:
         if combo is None or value is None:
             return
-        idx = combo.findData(value)
-        if idx < 0 and isinstance(value, int):
-            idx = combo.findData(str(value))
-        elif idx < 0:
-            s = str(value).strip()
-            if s.isdigit():
-                idx = combo.findData(int(s))
-        if idx >= 0:
-            combo.setCurrentIndex(idx)
+        set_searchable_combo_by_user_data(combo, value)
 
     def _apply_pending_prefill(self) -> None:
         if not isinstance(self._pending_prefill, dict):
@@ -260,14 +251,17 @@ class CreateContactPersonCompanyAssignmentPage(QWidget):
 
     def is_dirty(self) -> bool:
         for combo in (self._company_combo, self._contact_person_combo, self._status_combo):
-            if combo is not None and combo.currentIndex() > 0 and combo.currentData() is not None:
+            if combo is None:
+                continue
+            data = combo_resolved_item_data(combo)
+            if data is not None and str(data).strip() != "":
                 return True
         return False
 
     def reset_to_default(self) -> None:
-        for combo in (self._company_combo, self._contact_person_combo, self._status_combo):
-            if combo is not None:
-                combo.setCurrentIndex(0)
+        reset_searchable_combo(self._company_combo)
+        reset_searchable_combo(self._contact_person_combo)
+        reset_searchable_combo(self._status_combo)
         self._clear_error()
 
     def _handle_back(self) -> None:
@@ -293,28 +287,38 @@ class CreateContactPersonCompanyAssignmentPage(QWidget):
             )
             return
         self._clear_error()
-        if self._company_combo is None or self._company_combo.currentIndex() <= 0 or self._company_combo.currentData() is None:
-            self._show_error("Company is required.")
+        company_id = combo_resolved_item_data(self._company_combo)
+        if company_id is None or not str(company_id).strip():
+            typed = (self._company_combo.currentText() or "").strip() if self._company_combo else ""
+            if typed:
+                self._show_error(strict_list_selection_message("a company"))
+            else:
+                self._show_error("Company is required.")
             if self._company_combo is not None:
                 self._company_combo.setFocus()
             return
-        if (
-            self._contact_person_combo is None
-            or self._contact_person_combo.currentIndex() <= 0
-            or self._contact_person_combo.currentData() is None
-        ):
-            self._show_error("Contact Person is required.")
+        contact_id = combo_resolved_item_data(self._contact_person_combo)
+        if contact_id is None or not str(contact_id).strip():
+            typed = (
+                (self._contact_person_combo.currentText() or "").strip()
+                if self._contact_person_combo is not None
+                else ""
+            )
+            if typed:
+                self._show_error(strict_list_selection_message("a contact person"))
+            else:
+                self._show_error("Contact Person is required.")
             if self._contact_person_combo is not None:
                 self._contact_person_combo.setFocus()
             return
-        if self._status_combo is None or self._status_combo.currentIndex() <= 0 or self._status_combo.currentData() is None:
-            self._show_error("Status is required.")
+        status_seq, status_err = require_master_key_seq_for_payload(
+            self._status_combo, field_caption="Status", strict_phrase="a status"
+        )
+        if status_err:
+            self._show_error(status_err)
             if self._status_combo is not None:
                 self._status_combo.setFocus()
             return
-        company_id = self._company_combo.currentData() if self._company_combo is not None else None
-        contact_id = self._contact_person_combo.currentData() if self._contact_person_combo is not None else None
-        status_seq = self._status_combo.currentData() if self._status_combo is not None else None
         payload: dict[str, Any] = {
             "companyId": company_id,
             "contactPersonId": contact_id,

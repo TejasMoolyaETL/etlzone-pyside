@@ -22,9 +22,7 @@ from PySide6.QtWidgets import (
 from core.api import (
     api_get_all_contact_persons,
     api_get_all_lead_companies,
-    api_get_master_key_by_app_id_field_name,
     api_update_contact_person_company_assignment,
-    master_key_row_seq_value,
 )
 from core.nav_access import collect_allowed_action_names, nav_action_visible
 from core.user_context import get_nav_access_steps, get_user_profile
@@ -44,6 +42,16 @@ from ui.form_page_styles import (
     LIST_PAGE_HEADER_LAYOUT_SPACING,
 )
 from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
+from ui.searchable_form_combo import (
+    combo_resolved_master_key_seq,
+    master_key_invalid_typed_text,
+    master_key_seq_for_payload,
+    require_master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    set_searchable_combo_by_user_data,
+    wire_searchable_master_key_combo,
+)
+from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
 _ASSIGNMENT_STATUS_FIELD_NAME = "lead_company_contact_assignment_status"
@@ -94,18 +102,21 @@ class ViewContactPersonCompanyAssignmentPage(QWidget):
         self._company_combo.setMinimumWidth(260)
         self._company_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         apply_form_combobox_field(self._company_combo, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX)
+        wire_searchable_master_key_combo(self._company_combo, search_field_label="Company")
         cl.addWidget(labeled_field_block(field_caption_label("Company*", LABEL_STYLE), self._company_combo))
 
         self._contact_person_combo = QComboBox()
         self._contact_person_combo.setMinimumWidth(260)
         self._contact_person_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         apply_form_combobox_field(self._contact_person_combo, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX)
+        wire_searchable_master_key_combo(self._contact_person_combo, search_field_label="Contact Person")
         cl.addWidget(labeled_field_block(field_caption_label("Contact Person*", LABEL_STYLE), self._contact_person_combo))
 
         self._status_combo = QComboBox()
         self._status_combo.setMinimumWidth(260)
         self._status_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         apply_form_combobox_field(self._status_combo, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX)
+        wire_searchable_master_key_combo(self._status_combo, search_field_label="Status")
         cl.addWidget(labeled_field_block(field_caption_label("Status*", LABEL_STYLE), self._status_combo))
         self._error = QLabel()
         self._error.setStyleSheet(FORM_ERROR_LABEL_STYLE)
@@ -231,22 +242,14 @@ class ViewContactPersonCompanyAssignmentPage(QWidget):
     def _set_combo_to_data(self, combo: QComboBox | None, value: Any) -> None:
         if combo is None or value is None:
             return
-        idx = combo.findData(value)
-        if idx < 0 and isinstance(value, int):
-            idx = combo.findData(str(value))
-        elif idx < 0:
-            s = str(value).strip()
-            if s.isdigit():
-                idx = combo.findData(int(s))
-        if idx >= 0:
-            combo.setCurrentIndex(idx)
+        set_searchable_combo_by_user_data(combo, value)
 
     def _apply_record_to_fields(self) -> None:
         self.assignment_id.setText(str(self._assignment_id() or ""))
         self._set_combo_to_data(self._company_combo, self._record_company_id())
         self._set_combo_to_data(self._contact_person_combo, self._record_contact_id())
         self._set_combo_to_data(self._status_combo, self._record_status_seq())
-        self._initial_status_seq = self._status_combo.currentData() if self._status_combo is not None else None
+        self._initial_status_seq = self._record_status_seq()
 
     def _populate_company_combo(self) -> None:
         combo = self._company_combo
@@ -256,7 +259,6 @@ class ViewContactPersonCompanyAssignmentPage(QWidget):
         rows = result.get("data") if result.get("success") else []
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("Select company…", None)
         if isinstance(rows, list):
             for row in rows:
                 if not isinstance(row, dict):
@@ -267,6 +269,10 @@ class ViewContactPersonCompanyAssignmentPage(QWidget):
                 name = str(row.get("companyName") or row.get("name") or "").strip()
                 label = f"{cid} | {name}" if name else str(cid)
                 combo.addItem(label, cid)
+        combo.setCurrentIndex(-1)
+        le = combo.lineEdit()
+        if le is not None:
+            le.clear()
         combo.blockSignals(False)
 
     def _populate_contact_person_combo(self) -> None:
@@ -277,7 +283,6 @@ class ViewContactPersonCompanyAssignmentPage(QWidget):
         rows = result.get("data") if result.get("success") else []
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("Select contact person…", None)
         if isinstance(rows, list):
             for row in rows:
                 if not isinstance(row, dict):
@@ -288,32 +293,19 @@ class ViewContactPersonCompanyAssignmentPage(QWidget):
                 name = str(row.get("name") or row.get("contactPersonName") or "").strip()
                 label = f"{contact_id} | {name}" if name else str(contact_id)
                 combo.addItem(label, contact_id)
+        combo.setCurrentIndex(-1)
+        le = combo.lineEdit()
+        if le is not None:
+            le.clear()
         combo.blockSignals(False)
 
     def _populate_status_combo(self) -> None:
-        combo = self._status_combo
-        if combo is None:
-            return
-        result = api_get_master_key_by_app_id_field_name(
-            field_name=_ASSIGNMENT_STATUS_FIELD_NAME,
+        populate_master_key_by_field_name(
+            self._status_combo,
+            _ASSIGNMENT_STATUS_FIELD_NAME,
             token=self._token(),
+            include_placeholder=False,
         )
-        rows = result.get("data") if result.get("success") else []
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem("Select status…", None)
-        if isinstance(rows, list):
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                seq_val = master_key_row_seq_value(row)
-                if seq_val is None:
-                    continue
-                key_value = str(row.get("keyValue") or row.get("key_value") or "").strip()
-                if not key_value:
-                    continue
-                combo.addItem(f"{seq_val} | {key_value}", seq_val)
-        combo.blockSignals(False)
 
     def _switch_view(self) -> None:
         if self._company_combo is not None:
@@ -365,14 +357,22 @@ class ViewContactPersonCompanyAssignmentPage(QWidget):
         if aid is None:
             self._show_error("Assignment ID missing.")
             return
-        if self._status_combo is None or self._status_combo.currentIndex() <= 0 or self._status_combo.currentData() is None:
-            self._show_error("Status is required.")
+        status_seq, status_err = require_master_key_seq_for_payload(
+            self._status_combo, field_caption="Status", strict_phrase="a status"
+        )
+        if status_err:
+            self._show_error(status_err)
             if self._status_combo is not None:
                 self._status_combo.setFocus()
             return
-        status_seq = self._status_combo.currentData()
         if status_seq == self._initial_status_seq:
-            self._show_error("No changes to update.")
+            navigate_after_no_changes(
+                show_non_error_message=self._show_success,
+                clear_message=self._clear_error,
+                on_back=self.on_back,
+                delay_ms=2000,
+                message="No changes to update.",
+            )
             return
         payload = {"status": status_seq}
         res = api_update_contact_person_company_assignment(aid, payload, token=self._token())

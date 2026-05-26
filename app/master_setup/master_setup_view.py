@@ -211,22 +211,38 @@ def _parse_category_id_from_label_text(text: str) -> int | None:
 def category_id_from_master_setup_category_combo(combo: QComboBox) -> int | None:
     """Integer ``categoryId`` for master key value create/update API bodies only.
 
-    Prefer ``UserRole`` on the current row (always the numeric id). If missing, parse
-    only a leading integer from the visible text (``id | name`` → ``id``). Display
-    names are never sent to the API — only this int is passed as ``categoryId``.
+    Uses only the visible field text (and rows whose label matches it). A stale
+    ``currentIndex`` after clearing the field is ignored.
     """
-    idx = combo.currentIndex()
-    for raw in (
-        combo.currentData(Qt.ItemDataRole.UserRole),
-        combo.itemData(idx, Qt.ItemDataRole.UserRole) if idx >= 0 else None,
-    ):
+    from ui.searchable_form_combo import combo_resolved_master_key_seq, is_searchable_form_combo
+
+    if is_searchable_form_combo(combo):
+        raw = combo_resolved_master_key_seq(combo)
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    text = (combo.currentText() or "").strip()
+    if not text:
+        return None
+    parsed = _parse_category_id_from_label_text(text)
+    if parsed is not None:
+        return parsed
+    needle = text.lower()
+    for i in range(combo.count()):
+        if (combo.itemText(i) or "").strip().lower() != needle:
+            continue
+        raw = combo.itemData(i, Qt.ItemDataRole.UserRole)
         if raw is None:
             continue
         try:
             return int(raw)
         except (TypeError, ValueError):
             continue
-    return _parse_category_id_from_label_text(combo.currentText())
+    return None
 
 
 _MASTER_SETUP_COL1 = (

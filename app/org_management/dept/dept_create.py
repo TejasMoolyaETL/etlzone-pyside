@@ -24,14 +24,7 @@ from app.org_management.bu.bu_utils import (
     get_bu_name,
     get_organization_name_from_bu,
 )
-from core.api import (
-    api_create_dept,
-    api_get_all_bu,
-    api_get_all_depts,
-    api_get_master_key_by_app_id_field_name,
-    master_key_row_display_label,
-    master_key_row_seq_value,
-)
+from core.api import api_create_dept, api_get_all_bu, api_get_all_depts
 from core.user_context import get_user_profile
 from ui.auto_hide_message import (
     cancel_auto_hide_message,
@@ -49,13 +42,20 @@ from ui.form_page_styles import (
     LIST_PAGE_HEADER_LAYOUT_MARGINS,
     LIST_PAGE_HEADER_LAYOUT_SPACING,
     FORM_PRIMARY_BUTTON_STYLESHEET,
-    FORM_READONLY_INPUT_STYLE as READONLY_INPUT_STYLE,
     FORM_SECONDARY_BUTTON_STYLESHEET,
-    placeholder_auto_filled,
     placeholder_enter,
     placeholder_search_select,
 )
 from ui.post_save_navigation import schedule_after_success
+from ui.searchable_form_combo import (
+    combo_resolved_master_key_seq,
+    master_key_invalid_typed_text,
+    master_key_seq_for_payload,
+    require_master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    reset_searchable_combo,
+    wire_searchable_master_key_combo,
+)
 from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
@@ -98,7 +98,7 @@ def _bu_name_from_dept_row(row: dict[str, Any]) -> str:
 
 
 class CreateDeptPage(QWidget):
-    """Form: deptName + BU (id + search) + optional parent department (id + search)."""
+    """Form: deptName + BU (search) + optional parent department (search)."""
 
     def __init__(
         self,
@@ -158,20 +158,11 @@ class CreateDeptPage(QWidget):
         self.dept_name_edit.setStyleSheet(INPUT_STYLE)
         card_layout.addWidget(labeled_field_block(label_dept_name, self.dept_name_edit))
 
-        label_bu_id = QLabel("BU Id:")
-        label_bu_id.setStyleSheet(LABEL_STYLE)
-        self.bu_id_edit = QLineEdit()
-        self.bu_id_edit.setReadOnly(True)
-        self.bu_id_edit.setPlaceholderText(placeholder_auto_filled("BU"))
-        self.bu_id_edit.setStyleSheet(READONLY_INPUT_STYLE)
-        card_layout.addWidget(labeled_field_block(label_bu_id, self.bu_id_edit))
-
         label_bu = field_caption_label("BU*", LABEL_STYLE)
         self.bu_edit = QLineEdit()
         self.bu_edit.setPlaceholderText(placeholder_search_select("BU Id", "BU Name", "Org Name"))
         self.bu_edit.setStyleSheet(INPUT_STYLE)
         self.bu_edit.installEventFilter(self)
-        self.bu_edit.textChanged.connect(self._on_bu_text_changed)
         bu_completer = QCompleter(self.bu_edit)
         bu_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         bu_completer.setFilterMode(Qt.MatchFlag.MatchContains)
@@ -179,23 +170,13 @@ class CreateDeptPage(QWidget):
         self.bu_edit.setCompleter(bu_completer)
         card_layout.addWidget(labeled_field_block(label_bu, self.bu_edit))
 
-        label_parent_dept_id = QLabel("Parent Dept Id:")
-        label_parent_dept_id.setStyleSheet(LABEL_STYLE)
-        self.parent_dept_id_edit = QLineEdit()
-        self.parent_dept_id_edit.setReadOnly(True)
-        self.parent_dept_id_edit.setPlaceholderText(placeholder_auto_filled("Parent Dept"))
-        self.parent_dept_id_edit.setStyleSheet(READONLY_INPUT_STYLE)
-        card_layout.addWidget(labeled_field_block(label_parent_dept_id, self.parent_dept_id_edit))
-
-        label_parent_dept = QLabel("Parent Dept (optional):")
-        label_parent_dept.setStyleSheet(LABEL_STYLE)
+        label_parent_dept = field_caption_label("Parent Dept", LABEL_STYLE)
         self.parent_dept_edit = QLineEdit()
         self.parent_dept_edit.setPlaceholderText(
             placeholder_search_select("Dept Id", "Dept Name", "BU: BU Name")
         )
         self.parent_dept_edit.setStyleSheet(INPUT_STYLE)
         self.parent_dept_edit.installEventFilter(self)
-        self.parent_dept_edit.textChanged.connect(self._on_parent_dept_text_changed)
         parent_completer = QCompleter(self.parent_dept_edit)
         parent_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         parent_completer.setFilterMode(Qt.MatchFlag.MatchContains)
@@ -206,6 +187,7 @@ class CreateDeptPage(QWidget):
         label_status = field_caption_label("Status*", LABEL_STYLE)
         self.status_combo = QComboBox()
         apply_form_combobox_field(self.status_combo, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX)
+        wire_searchable_master_key_combo(self.status_combo, search_field_label="Status")
         card_layout.addWidget(labeled_field_block(label_status, self.status_combo))
 
         card_layout.addSpacing(16)
@@ -272,10 +254,6 @@ class CreateDeptPage(QWidget):
 
         def on_activated(text: str) -> None:
             self.bu_edit.setText(text)
-            for disp, bid in self._bu_completions:
-                if disp == text:
-                    self.bu_id_edit.setText(str(bid))
-                    break
 
         completer.activated.connect(on_activated)
         self.bu_edit.setCompleter(completer)
@@ -312,10 +290,6 @@ class CreateDeptPage(QWidget):
 
         def on_activated(text: str) -> None:
             self.parent_dept_edit.setText(text)
-            for disp, pid in self._parent_dept_completions:
-                if disp == text:
-                    self.parent_dept_id_edit.setText(str(pid))
-                    break
 
         completer.activated.connect(on_activated)
         self.parent_dept_edit.setCompleter(completer)
@@ -324,10 +298,11 @@ class CreateDeptPage(QWidget):
         super().showEvent(event)
         self._setup_bu_completer()
         self._load_parent_depts()
-        self._populate_master_key_seq_combo(
+        populate_master_key_by_field_name(
             self.status_combo,
             _DEPT_STATUS_FIELD_NAME,
-            "Select status…",
+            token=self._token(),
+            include_placeholder=False,
         )
 
     def _token(self) -> str | None:
@@ -340,36 +315,6 @@ class CreateDeptPage(QWidget):
         )
         return str(token) if token else None
 
-    def _populate_master_key_seq_combo(
-        self,
-        combo: QComboBox | None,
-        field_name: str,
-        placeholder: str,
-    ) -> None:
-        if combo is None:
-            return
-        result = api_get_master_key_by_app_id_field_name(
-            field_name=field_name,
-            token=self._token(),
-        )
-        rows = result.get("data") if result.get("success") else []
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem(placeholder, None)
-        if isinstance(rows, list):
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                seq_val = master_key_row_seq_value(row)
-                if seq_val is None:
-                    continue
-                label = master_key_row_display_label(row).strip()
-                if not label:
-                    continue
-                combo.addItem(label, seq_val)
-        combo.setCurrentIndex(0)
-        combo.blockSignals(False)
-
     def eventFilter(self, obj, event) -> bool:
         if obj == self.bu_edit and event.type() == QEvent.Type.FocusIn:
             self._setup_bu_completer()
@@ -377,26 +322,6 @@ class CreateDeptPage(QWidget):
         if parent_edit is not None and obj == parent_edit and event.type() == QEvent.Type.FocusIn:
             self._load_parent_depts()
         return super().eventFilter(obj, event)
-
-    def _on_bu_text_changed(self, text: str) -> None:
-        if not text.strip():
-            self.bu_id_edit.clear()
-            return
-        for disp, bid in self._bu_completions:
-            if disp == text:
-                self.bu_id_edit.setText(str(bid))
-                return
-        self.bu_id_edit.clear()
-
-    def _on_parent_dept_text_changed(self, text: str) -> None:
-        if not text.strip():
-            self.parent_dept_id_edit.clear()
-            return
-        for disp, pid in self._parent_dept_completions:
-            if disp == text:
-                self.parent_dept_id_edit.setText(str(pid))
-                return
-        self.parent_dept_id_edit.clear()
 
     def _is_valid_bu_selection(self) -> bool:
         text = self.bu_edit.text().strip()
@@ -446,25 +371,19 @@ class CreateDeptPage(QWidget):
     def is_dirty(self) -> bool:
         if self.dept_name_edit.text().strip():
             return True
-        if self.bu_id_edit.text().strip():
-            return True
         if self.bu_edit.text().strip():
-            return True
-        if self.parent_dept_id_edit.text().strip():
             return True
         if self.parent_dept_edit.text().strip():
             return True
-        if self.status_combo.currentIndex() > 0:
+        if combo_resolved_master_key_seq(self.status_combo) is not None:
             return True
         return False
 
     def reset_to_default(self) -> None:
         self.dept_name_edit.clear()
-        self.bu_id_edit.clear()
         self.bu_edit.clear()
-        self.parent_dept_id_edit.clear()
         self.parent_dept_edit.clear()
-        self.status_combo.setCurrentIndex(0)
+        reset_searchable_combo(self.status_combo)
 
     def _handle_back(self) -> None:
         if not self.is_dirty():
@@ -499,7 +418,7 @@ class CreateDeptPage(QWidget):
             return
         bu_id = self._resolve_bu_id()
         if bu_id is None:
-            self._show_error("BU Id is invalid. Please select a BU from the list.")
+            self._show_error("Please select a valid BU from the list.")
             return
 
         if self.parent_dept_edit.text().strip():
@@ -508,19 +427,11 @@ class CreateDeptPage(QWidget):
                 return
         parent_dept = self._resolve_parent_dept_id()
 
-        if self.status_combo.currentIndex() <= 0:
-            self._show_error("Status is required.")
-            self.status_combo.setFocus()
-            return
-        status_raw = self.status_combo.currentData()
-        if status_raw is None:
-            self._show_error("Status is required.")
-            self.status_combo.setFocus()
-            return
-        try:
-            status = _coerce_master_seq_to_int(status_raw)
-        except ValueError:
-            self._show_error("Status must be a valid selection.")
+        status, status_err = require_master_key_seq_for_payload(
+            self.status_combo, field_caption="Status", strict_phrase="a status"
+        )
+        if status_err:
+            self._show_error(status_err)
             self.status_combo.setFocus()
             return
 

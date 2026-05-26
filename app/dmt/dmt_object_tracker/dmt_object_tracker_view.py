@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -16,7 +17,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSplitter,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -25,11 +25,10 @@ from PySide6.QtWidgets import (
 from core.api import (
     api_get_all_modules,
     api_get_all_objects,
-    api_get_master_key_category_entries,
     api_update_object_tracker,
+    master_key_row_seq_value,
 )
 from core.app_preferences import to_utc_iso
-from app.dmt.dmt_object_tracker.dmt_object_tracker_comment_panel import ObjectTrackerCommentPanel
 from app.dmt.dmt_object_tracker.dmt_object_tracker_create import _DateTimePickerField
 from core.user_context import get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
@@ -49,15 +48,52 @@ from ui.form_page_styles import (
     placeholder_example,
 )
 from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
+from ui.strict_completer import strict_list_selection_message
+from ui.searchable_form_combo import (
+    combo_resolved_master_key_seq,
+    master_key_invalid_typed_text,
+    master_key_seq_for_payload,
+    require_master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    reset_searchable_combo,
+    set_searchable_combo_by_user_data,
+    wire_searchable_master_key_combo,
+)
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
 _TRACKER_ID_KEYS = ("objectTrackerId", "trackerId", "id")
-_MASTER_KEY_BUSINESS_OBJECT_TYPE = "BUSINESS_OBJECT_TYPE"
-_MASTER_KEY_SCOPE = "SCOPE"
-_MASTER_KEY_LOAD_APPROACH = "LOAD_APPROACH"
-_MASTER_KEY_UPLOAD_TOOL = "UPLOAD_TOOL"
-_MASTER_KEY_CUSTOMIZATION_STATUS = "CUSTOMIZATION_STATUS"
-_MASTER_KEY_STATUS1 = "STATUS1"
+
+_FIELD_STATUS = "dmt_object_list_tracker_status"
+_FIELD_BUSINESS_OBJECT_TYPE = "dmt_business_object_type"
+_FIELD_SCOPE = "dmt_scope"
+_FIELD_LOAD_APPROACH = "dmt_load_approach"
+_FIELD_UPLOAD_TOOL = "dmt_upload_tool"
+_FIELD_CUSTOMIZATION_STATUS = "dmt_customization_status"
+_FIELD_BUILD_STATUS = "dmt_buildStatus"
+_FIELD_FUNCTIONAL_UNIT_TESTING_STATUS = "dmt_functionalUnitTestingStatus"
+_FIELD_BUSINESS_UNIT_TESTING_STATUS = "dmt_businessUnitTestingStatus"
+
+
+def _seq_from_record(rec: dict[str, Any], *keys: str) -> Any | None:
+    for key in keys:
+        v = rec.get(key)
+        if v is None:
+            continue
+        if isinstance(v, dict):
+            seq = master_key_row_seq_value(v)
+            if seq is not None:
+                return seq
+            continue
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, int):
+            return v
+        if isinstance(v, float) and v == int(v):
+            return int(v)
+        s = str(v).strip()
+        if s.isdigit():
+            return int(s)
+    return None
 
 
 def _ids_equal(a: Any, b: Any) -> bool:
@@ -72,35 +108,6 @@ def _ids_equal(a: Any, b: Any) -> bool:
         return False
 
 
-def _seq_sort_key(row: dict[str, Any]) -> tuple[int, Any]:
-    s = row.get("seq")
-    try:
-        return (0, int(s))
-    except (TypeError, ValueError):
-        return (1, s or "")
-
-
-def _label_for_master_key_row(row: dict[str, Any]) -> str:
-    seq = row.get("seq")
-    kv = str(row.get("keyValue") or row.get("key_value") or "").strip()
-    desc = str(row.get("description") or row.get("desc") or "").strip()
-    parts: list[str] = []
-    if kv:
-        parts.append(kv)
-    if desc:
-        parts.append(desc)
-    if parts:
-        return f"{seq} — {' — '.join(parts)}" if seq is not None else " — ".join(parts)
-    return str(seq) if seq is not None else ""
-
-
-def _seq_payload_value(seq: Any) -> Any:
-    if seq is None:
-        return seq
-    s = str(seq).strip()
-    return int(s) if s.isdigit() else seq
-
-
 class ViewDmtObjectTrackerPage(QWidget):
     def __init__(
         self,
@@ -113,7 +120,6 @@ class ViewDmtObjectTrackerPage(QWidget):
         self._record: dict[str, Any] = {}
         self._all_object_rows: list[dict[str, Any]] = []
         self._loading_refs = False
-        self._comment_context_listeners: list[Callable[[], None]] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -136,10 +142,6 @@ class ViewDmtObjectTrackerPage(QWidget):
         self._refresh_btn.clicked.connect(self._load_reference_data)
         header_layout.addWidget(self._refresh_btn)
         layout.addWidget(header)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(6)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -173,6 +175,7 @@ class ViewDmtObjectTrackerPage(QWidget):
         self.module_combo = QComboBox()
         self.object_combo = QComboBox()
         self.business_object_type_combo = QComboBox()
+        self.status_combo = QComboBox()
         self.scope_combo = QComboBox()
         self.load_approach_combo = QComboBox()
         self.upload_tool_combo = QComboBox()
@@ -186,6 +189,7 @@ class ViewDmtObjectTrackerPage(QWidget):
             self.module_combo,
             self.object_combo,
             self.business_object_type_combo,
+            self.status_combo,
             self.scope_combo,
             self.load_approach_combo,
             self.upload_tool_combo,
@@ -197,6 +201,18 @@ class ViewDmtObjectTrackerPage(QWidget):
         )
         for c in combo_specs:
             apply_form_combobox_field(c, height_px=field_h, min_width=260)
+        for combo, label in (
+            (self.status_combo, "Status"),
+            (self.business_object_type_combo, "Business object type"),
+            (self.scope_combo, "Scope"),
+            (self.load_approach_combo, "Load approach"),
+            (self.upload_tool_combo, "Upload tool"),
+            (self.customization_status_combo, "Customization status"),
+            (self.build_status_combo, "Build status"),
+            (self.functional_unit_testing_status_combo, "Functional unit testing status"),
+            (self.business_unit_testing_status_combo, "Business unit testing status"),
+        ):
+            wire_searchable_master_key_combo(combo, search_field_label=label)
 
         self.module_combo.currentIndexChanged.connect(self._on_module_selection_changed)
 
@@ -249,6 +265,13 @@ class ViewDmtObjectTrackerPage(QWidget):
             2,
         )
         grid.addWidget(labeled_field_block(field_caption_label("TCode", LABEL_STYLE), self.tcode_edit), 1, 0)
+        grid.addWidget(
+            labeled_field_block(field_caption_label("Status*", LABEL_STYLE), self.status_combo),
+            1,
+            1,
+            1,
+            2,
+        )
 
         add_separator(2)
         grid.addWidget(labeled_field_block(field_caption_label("Scope*", LABEL_STYLE), self.scope_combo), 3, 0)
@@ -368,6 +391,7 @@ class ViewDmtObjectTrackerPage(QWidget):
         self._save_btn.clicked.connect(self._handle_save)
 
         display_btns = QWidget()
+        display_btns.setStyleSheet("background: transparent; border: none;")
         dbl = QHBoxLayout(display_btns)
         dbl.setContentsMargins(0, 0, 0, 0)
         dbl.setSpacing(12)
@@ -376,6 +400,7 @@ class ViewDmtObjectTrackerPage(QWidget):
         dbl.addWidget(self._back_btn)
 
         edit_btns = QWidget()
+        edit_btns.setStyleSheet("background: transparent; border: none;")
         ebl = QHBoxLayout(edit_btns)
         ebl.setContentsMargins(0, 0, 0, 0)
         ebl.setSpacing(12)
@@ -383,6 +408,8 @@ class ViewDmtObjectTrackerPage(QWidget):
         ebl.addWidget(self._cancel_btn)
 
         self._btn_stack = QStackedWidget()
+        self._btn_stack.setStyleSheet("QStackedWidget { background: transparent; border: none; }")
+        self._btn_stack.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._btn_stack.addWidget(display_btns)
         self._btn_stack.addWidget(edit_btns)
 
@@ -398,13 +425,7 @@ class ViewDmtObjectTrackerPage(QWidget):
         content_layout.addWidget(card)
         content_layout.addStretch()
         scroll.setWidget(scroll_content)
-        splitter.addWidget(scroll)
-        self._comment_panel = ObjectTrackerCommentPanel(self)
-        splitter.addWidget(self._comment_panel)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-        splitter.setSizes([700, 300])
-        layout.addWidget(splitter, 1)
+        layout.addWidget(scroll, 1)
         self._switch_to_view_mode()
 
     def _token(self) -> str | None:
@@ -418,20 +439,6 @@ class ViewDmtObjectTrackerPage(QWidget):
             if value is not None:
                 return value
         return None
-
-    def get_selected_row(self) -> dict[str, Any] | None:
-        return self._record if self._record else None
-
-    def register_comment_context_listener(self, listener: Callable[[], None]) -> None:
-        if listener not in self._comment_context_listeners:
-            self._comment_context_listeners.append(listener)
-
-    def _notify_comment_context_changed(self) -> None:
-        for listener in self._comment_context_listeners:
-            try:
-                listener()
-            except Exception:
-                continue
 
     def _set_combo_by_data(self, combo: QComboBox, value: Any, *, fallback_text: str = "") -> None:
         idx = combo.findData(value)
@@ -449,24 +456,26 @@ class ViewDmtObjectTrackerPage(QWidget):
             return
         combo.setCurrentIndex(0)
 
-    def _populate_master_key_combo(self, combo: QComboBox, category: str, placeholder: str) -> None:
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem(placeholder, None)
-        result = api_get_master_key_category_entries(category, token=self._token())
-        if result.get("success"):
-            rows = [r for r in (result.get("data") or []) if isinstance(r, dict)]
-            rows.sort(key=_seq_sort_key)
-            for row in rows:
-                seq = row.get("seq")
-                if seq is None:
-                    continue
-                label = _label_for_master_key_row(row) or str(seq)
-                seq_str = str(seq).strip()
-                seq_data: int | str = int(seq_str) if seq_str.isdigit() else seq_str
-                combo.addItem(label, seq_data)
-        combo.setCurrentIndex(0)
-        combo.blockSignals(False)
+    def _populate_tracker_master_field_combos(self) -> None:
+        tk = self._token()
+        specs: tuple[tuple[QComboBox, str], ...] = (
+            (self.status_combo, _FIELD_STATUS),
+            (self.business_object_type_combo, _FIELD_BUSINESS_OBJECT_TYPE),
+            (self.scope_combo, _FIELD_SCOPE),
+            (self.load_approach_combo, _FIELD_LOAD_APPROACH),
+            (self.upload_tool_combo, _FIELD_UPLOAD_TOOL),
+            (self.customization_status_combo, _FIELD_CUSTOMIZATION_STATUS),
+            (self.build_status_combo, _FIELD_BUILD_STATUS),
+            (self.functional_unit_testing_status_combo, _FIELD_FUNCTIONAL_UNIT_TESTING_STATUS),
+            (self.business_unit_testing_status_combo, _FIELD_BUSINESS_UNIT_TESTING_STATUS),
+        )
+        for combo, field_name in specs:
+            populate_master_key_by_field_name(
+                combo,
+                field_name,
+                token=tk,
+                include_placeholder=False,
+            )
 
     def _load_reference_data(self) -> None:
         if self._loading_refs:
@@ -495,22 +504,7 @@ class ViewDmtObjectTrackerPage(QWidget):
         objects_result = api_get_all_objects(token=self._token())
         self._all_object_rows = [r for r in (objects_result.get("data") or []) if isinstance(r, dict)] if objects_result.get("success") else []
 
-        self._populate_master_key_combo(
-            self.business_object_type_combo, _MASTER_KEY_BUSINESS_OBJECT_TYPE, "— Select business object type —"
-        )
-        self._populate_master_key_combo(self.scope_combo, _MASTER_KEY_SCOPE, "— Select scope —")
-        self._populate_master_key_combo(self.load_approach_combo, _MASTER_KEY_LOAD_APPROACH, "— Select load approach —")
-        self._populate_master_key_combo(self.upload_tool_combo, _MASTER_KEY_UPLOAD_TOOL, "— Select upload tool —")
-        self._populate_master_key_combo(
-            self.customization_status_combo, _MASTER_KEY_CUSTOMIZATION_STATUS, "— Select customization status —"
-        )
-        self._populate_master_key_combo(self.build_status_combo, _MASTER_KEY_STATUS1, "— Select build status —")
-        self._populate_master_key_combo(
-            self.functional_unit_testing_status_combo, _MASTER_KEY_STATUS1, "— Select functional unit testing status —"
-        )
-        self._populate_master_key_combo(
-            self.business_unit_testing_status_combo, _MASTER_KEY_STATUS1, "— Select business unit testing status —"
-        )
+        self._populate_tracker_master_field_combos()
 
         self.module_combo.blockSignals(False)
         self.object_combo.blockSignals(False)
@@ -547,30 +541,46 @@ class ViewDmtObjectTrackerPage(QWidget):
         self._set_combo_by_data(self.module_combo, self._record.get("moduleId"), fallback_text=str(self._record.get("moduleName") or ""))
         self._on_module_selection_changed()
         self._set_combo_by_data(self.object_combo, self._record.get("objectId"), fallback_text=str(self._record.get("objectName") or ""))
-        self._set_combo_by_data(self.business_object_type_combo, self._record.get("businessObjectTypeSeq"), fallback_text=str(self._record.get("businessObjectTypeName") or ""))
-        self._set_combo_by_data(self.scope_combo, self._record.get("scopeSeq"), fallback_text=str(self._record.get("scopeName") or ""))
-        self._set_combo_by_data(self.load_approach_combo, self._record.get("loadApproachSeq"), fallback_text=str(self._record.get("loadApproachName") or ""))
-        self._set_combo_by_data(self.upload_tool_combo, self._record.get("uploadToolSeq"), fallback_text=str(self._record.get("uploadToolName") or ""))
-        self._set_combo_by_data(
-            self.customization_status_combo,
-            self._record.get("customizationStatusSeq"),
-            fallback_text=str(self._record.get("customizationStatusName") or ""),
-        )
-        self._set_combo_by_data(
-            self.build_status_combo,
-            self._record.get("buildStatusSeq"),
-            fallback_text=str(self._record.get("buildStatusName") or ""),
-        )
-        self._set_combo_by_data(
-            self.functional_unit_testing_status_combo,
-            self._record.get("functionalUnitTestingStatusSeq"),
-            fallback_text=str(self._record.get("functionalUnitTestingStatusName") or ""),
-        )
-        self._set_combo_by_data(
-            self.business_unit_testing_status_combo,
-            self._record.get("businessUnitTestingStatusSeq"),
-            fallback_text=str(self._record.get("businessUnitTestingStatusName") or ""),
-        )
+        for combo, keys in (
+            (self.status_combo, ("status", "statusSeq", "status_seq", "dmt_object_list_tracker_status")),
+            (
+                self.business_object_type_combo,
+                (
+                    "businessObjectType",
+                    "businessObjectTypeSeq",
+                    "dmt_business_object_type",
+                ),
+            ),
+            (self.scope_combo, ("scope", "scopeSeq", "dmt_scope")),
+            (self.load_approach_combo, ("loadApproach", "loadApproachSeq", "dmt_load_approach")),
+            (self.upload_tool_combo, ("uploadTool", "uploadToolSeq", "dmt_upload_tool")),
+            (
+                self.customization_status_combo,
+                ("customizationStatus", "customizationStatusSeq", "dmt_customization_status"),
+            ),
+            (self.build_status_combo, ("buildStatus", "buildStatusSeq", "dmt_buildStatus")),
+            (
+                self.functional_unit_testing_status_combo,
+                (
+                    "functionalUnitTestingStatus",
+                    "functionalUnitTestingStatusSeq",
+                    "dmt_functionalUnitTestingStatus",
+                ),
+            ),
+            (
+                self.business_unit_testing_status_combo,
+                (
+                    "businessUnitTestingStatus",
+                    "businessUnitTestingStatusSeq",
+                    "dmt_businessUnitTestingStatus",
+                ),
+            ),
+        ):
+            seq = _seq_from_record(self._record, *keys)
+            if seq is not None:
+                set_searchable_combo_by_user_data(combo, seq)
+            else:
+                reset_searchable_combo(combo)
         self._set_combo_by_data(self.uploaded_to_sharepoint_combo, bool(self._record.get("uploadedToSharePoint")), fallback_text="")
         self.tcode_edit.setText(str(self._record.get("tcode") or ""))
         self.estimated_prod_count_edit.setText(str(self._record.get("estimatedProdCount") or ""))
@@ -590,11 +600,17 @@ class ViewDmtObjectTrackerPage(QWidget):
         self._record = dict(record) if record else {}
         self._load_reference_data()
         self._apply_record_to_fields()
-        self._notify_comment_context_changed()
         if edit_mode and self._record:
             self._handle_edit()
         else:
             self._switch_to_view_mode()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if not self._record:
+            return
+        self._load_reference_data()
+        self._apply_record_to_fields()
 
     def _show_error(self, message: str) -> None:
         show_auto_hiding_message(self, self._error_label, message, error=True)
@@ -611,14 +627,19 @@ class ViewDmtObjectTrackerPage(QWidget):
         payload: dict[str, Any] = {
             "moduleId": self.module_combo.currentData(),
             "objectId": self.object_combo.currentData(),
-            "businessObjectTypeSeq": _seq_payload_value(self.business_object_type_combo.currentData()),
-            "scopeSeq": _seq_payload_value(self.scope_combo.currentData()),
-            "loadApproachSeq": _seq_payload_value(self.load_approach_combo.currentData()),
-            "uploadToolSeq": _seq_payload_value(self.upload_tool_combo.currentData()),
-            "customizationStatusSeq": _seq_payload_value(self.customization_status_combo.currentData()),
-            "buildStatusSeq": _seq_payload_value(self.build_status_combo.currentData()),
-            "functionalUnitTestingStatusSeq": _seq_payload_value(self.functional_unit_testing_status_combo.currentData()),
-            "businessUnitTestingStatusSeq": _seq_payload_value(self.business_unit_testing_status_combo.currentData()),
+            "status": master_key_seq_for_payload(self.status_combo),
+            "businessObjectType": master_key_seq_for_payload(self.business_object_type_combo),
+            "scope": master_key_seq_for_payload(self.scope_combo),
+            "loadApproach": master_key_seq_for_payload(self.load_approach_combo),
+            "uploadTool": master_key_seq_for_payload(self.upload_tool_combo),
+            "customizationStatus": master_key_seq_for_payload(self.customization_status_combo),
+            "buildStatus": master_key_seq_for_payload(self.build_status_combo),
+            "functionalUnitTestingStatus": master_key_seq_for_payload(
+                self.functional_unit_testing_status_combo
+            ),
+            "businessUnitTestingStatus": master_key_seq_for_payload(
+                self.business_unit_testing_status_combo
+            ),
             "uploadedToSharePoint": bool(self.uploaded_to_sharepoint_combo.currentData()),
         }
         for key, edit in (
@@ -644,14 +665,36 @@ class ViewDmtObjectTrackerPage(QWidget):
         return {
             "moduleId": self._record.get("moduleId"),
             "objectId": self._record.get("objectId"),
-            "businessObjectTypeSeq": self._record.get("businessObjectTypeSeq"),
-            "scopeSeq": self._record.get("scopeSeq"),
-            "loadApproachSeq": self._record.get("loadApproachSeq"),
-            "uploadToolSeq": self._record.get("uploadToolSeq"),
-            "customizationStatusSeq": self._record.get("customizationStatusSeq"),
-            "buildStatusSeq": self._record.get("buildStatusSeq"),
-            "functionalUnitTestingStatusSeq": self._record.get("functionalUnitTestingStatusSeq"),
-            "businessUnitTestingStatusSeq": self._record.get("businessUnitTestingStatusSeq"),
+            "status": _seq_from_record(
+                self._record, "status", "statusSeq", "status_seq", "dmt_object_list_tracker_status"
+            ),
+            "businessObjectType": _seq_from_record(
+                self._record,
+                "businessObjectType",
+                "businessObjectTypeSeq",
+                "dmt_business_object_type",
+            ),
+            "scope": _seq_from_record(self._record, "scope", "scopeSeq", "dmt_scope"),
+            "loadApproach": _seq_from_record(
+                self._record, "loadApproach", "loadApproachSeq", "dmt_load_approach"
+            ),
+            "uploadTool": _seq_from_record(self._record, "uploadTool", "uploadToolSeq", "dmt_upload_tool"),
+            "customizationStatus": _seq_from_record(
+                self._record, "customizationStatus", "customizationStatusSeq", "dmt_customization_status"
+            ),
+            "buildStatus": _seq_from_record(self._record, "buildStatus", "buildStatusSeq", "dmt_buildStatus"),
+            "functionalUnitTestingStatus": _seq_from_record(
+                self._record,
+                "functionalUnitTestingStatus",
+                "functionalUnitTestingStatusSeq",
+                "dmt_functionalUnitTestingStatus",
+            ),
+            "businessUnitTestingStatus": _seq_from_record(
+                self._record,
+                "businessUnitTestingStatus",
+                "businessUnitTestingStatusSeq",
+                "dmt_businessUnitTestingStatus",
+            ),
             "uploadedToSharePoint": bool(self._record.get("uploadedToSharePoint")),
             "tcode": str(self._record.get("tcode") or ""),
             "buildCompletionDate": self._normalize_iso(self._record.get("buildCompletionDate")),
@@ -666,21 +709,29 @@ class ViewDmtObjectTrackerPage(QWidget):
         return self._current_payload() != self._original_payload()
 
     def _validate_required(self) -> bool:
-        required = (
-            ("module", self.module_combo.currentData()),
-            ("object", self.object_combo.currentData()),
-            ("business object type", self.business_object_type_combo.currentData()),
-            ("scope", self.scope_combo.currentData()),
-            ("load approach", self.load_approach_combo.currentData()),
-            ("upload tool", self.upload_tool_combo.currentData()),
-            ("customization status", self.customization_status_combo.currentData()),
-            ("build status", self.build_status_combo.currentData()),
-            ("functional unit testing status", self.functional_unit_testing_status_combo.currentData()),
-            ("business unit testing status", self.business_unit_testing_status_combo.currentData()),
-        )
-        for label, value in required:
-            if value is None:
-                self._show_error(f"Please select {label}.")
+        if self.module_combo.currentData() is None:
+            self._show_error("Please select module.")
+            return False
+        if self.object_combo.currentData() is None:
+            self._show_error("Please select object.")
+            return False
+        for combo, caption, phrase in (
+            (self.status_combo, "Status", "a status"),
+            (self.business_object_type_combo, "Business object type", "a business object type"),
+            (self.scope_combo, "Scope", "a scope"),
+            (self.load_approach_combo, "Load approach", "a load approach"),
+            (self.upload_tool_combo, "Upload tool", "an upload tool"),
+            (self.customization_status_combo, "Customization status", "a customization status"),
+            (self.build_status_combo, "Build status", "a build status"),
+            (self.functional_unit_testing_status_combo, "Functional unit testing status", "a functional unit testing status"),
+            (self.business_unit_testing_status_combo, "Business unit testing status", "a business unit testing status"),
+        ):
+            _, err = require_master_key_seq_for_payload(
+                combo, field_caption=caption, strict_phrase=phrase
+            )
+            if err:
+                self._show_error(err)
+                combo.setFocus()
                 return False
         return True
 
@@ -688,6 +739,7 @@ class ViewDmtObjectTrackerPage(QWidget):
         for c in (
             self.module_combo,
             self.object_combo,
+            self.status_combo,
             self.business_object_type_combo,
             self.scope_combo,
             self.load_approach_combo,

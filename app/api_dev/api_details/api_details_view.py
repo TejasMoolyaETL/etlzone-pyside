@@ -6,7 +6,7 @@ import json
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -29,9 +29,7 @@ from PySide6.QtWidgets import (
 from app.api_dev.api_details.api_method_combo import configure_api_method_combo
 from core.api import (
     api_get_all_projects,
-    api_get_master_key_by_app_id_field_name,
     api_update_api_detail_by_id,
-    master_key_row_display_label,
     master_key_row_seq_value,
 )
 from core.nav_access import (
@@ -58,6 +56,17 @@ from ui.form_page_styles import (
     FORM_SECONDARY_BUTTON_STYLESHEET,
 )
 from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
+from ui.searchable_form_combo import (
+    combo_resolved_master_key_seq,
+    master_key_invalid_typed_text,
+    master_key_seq_for_payload,
+    require_master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    reset_searchable_combo,
+    set_searchable_combo_by_user_data,
+    wire_searchable_master_key_combo,
+)
+from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
 _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "jwt"})
@@ -194,11 +203,20 @@ class ViewAPIDetailPage(QWidget):
     def set_record(self, record: dict[str, Any], edit_mode: bool = False) -> None:
         self._record = dict(record)
         self._refresh_edit_action_access()
+        self._load_api_status_options()
         self._refresh_values()
         if edit_mode and self._record and self._can_edit_action:
             self._handle_edit()
         else:
             self._switch_to_view_mode()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._refresh_edit_action_access()
+        if not self._record:
+            return
+        self._load_api_status_options()
+        self._refresh_values()
 
     def _refresh_edit_action_access(self) -> None:
         steps = get_nav_access_steps()
@@ -319,10 +337,10 @@ class ViewAPIDetailPage(QWidget):
                 self._field_edits["apiMethod"] = value_widget
             elif chosen in ("apiStatus", "api_status", "apistatus"):
                 value_widget = QComboBox()
-                value_widget.addItems(["ACTIVE", "INACTIVE"])
                 apply_form_combobox_field(
                     value_widget, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX, min_width=240
                 )
+                wire_searchable_master_key_combo(value_widget, search_field_label="API status")
                 value_widget.setEnabled(chosen in _EDITABLE_KEYS)
                 self._field_edits["apiStatus"] = value_widget
             elif chosen in ("comments", "Comments"):
@@ -517,48 +535,50 @@ class ViewAPIDetailPage(QWidget):
             or profile.get("jwt")
         )
         token = str(token) if token else None
-        result = api_get_master_key_by_app_id_field_name(
-            field_name=_API_STATUS_FIELD_NAME,
+        populate_master_key_by_field_name(
+            combo,
+            _API_STATUS_FIELD_NAME,
             token=token,
+            include_placeholder=False,
         )
-        rows = result.get("data") if result.get("success") else []
-        options: list[tuple[str, Any, str]] = []
-        if isinstance(rows, list):
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                label = (master_key_row_display_label(row) or "").strip()
-                seq = master_key_row_seq_value(row)
-                key_value = str(row.get("keyValue") or row.get("key_value") or "").strip().upper()
-                if label and seq is not None:
-                    options.append((label, seq, key_value))
-        if not options:
-            options = [("ACTIVE", "ACTIVE", "ACTIVE"), ("INACTIVE", "INACTIVE", "INACTIVE")]
-        combo.blockSignals(True)
-        combo.clear()
-        for label, seq, _ in options:
-            combo.addItem(label, seq)
-        combo.blockSignals(False)
+        if combo.count() == 0:
+            combo.blockSignals(True)
+            combo.addItem("ACTIVE", "ACTIVE")
+            combo.addItem("INACTIVE", "INACTIVE")
+            combo.setCurrentIndex(-1)
+            le = combo.lineEdit()
+            if le is not None:
+                le.clear()
+            combo.blockSignals(False)
 
     def _select_api_status_from_record(self, raw_value: Any, text_value: str) -> None:
         combo = self._field_edits.get("apiStatus")
         if not isinstance(combo, QComboBox):
             return
+        if isinstance(raw_value, dict):
+            seq = master_key_row_seq_value(raw_value)
+            if seq is not None:
+                set_searchable_combo_by_user_data(combo, seq)
+                return
+            kv = str(raw_value.get("keyValue") or raw_value.get("key_value") or "").strip()
+            if kv:
+                for i in range(combo.count()):
+                    if (combo.itemText(i) or "").strip().upper() == kv.upper():
+                        set_searchable_combo_by_user_data(combo, combo.itemData(i))
+                        return
         seq_text = str(raw_value).strip() if raw_value is not None else ""
         if seq_text:
-            idx = combo.findData(int(seq_text) if seq_text.isdigit() else seq_text)
-            if idx >= 0:
-                combo.setCurrentIndex(idx)
-                return
+            parsed: Any = int(seq_text) if seq_text.isdigit() else seq_text
+            set_searchable_combo_by_user_data(combo, parsed)
+            return
         t = (text_value or "").strip().upper()
         if t:
             for i in range(combo.count()):
-                item_t = combo.itemText(i).strip().upper()
+                item_t = (combo.itemText(i) or "").strip().upper()
                 if item_t == t or item_t.endswith(f"| {t}") or item_t.endswith(f"|{t}"):
-                    combo.setCurrentIndex(i)
+                    set_searchable_combo_by_user_data(combo, combo.itemData(i))
                     return
-        if combo.count() > 0:
-            combo.setCurrentIndex(0)
+        reset_searchable_combo(combo)
 
     def _show_success(self, message: str) -> None:
         show_auto_hiding_message(self, self._error_label, message, error=False)
@@ -617,6 +637,18 @@ class ViewAPIDetailPage(QWidget):
             self._show_error("API Method is required.")
             return
 
+        api_status_widget = self._field_edits.get("apiStatus")
+        api_status_val: str | int = ""
+        if isinstance(api_status_widget, QComboBox):
+            resolved_status, api_status_err = require_master_key_seq_for_payload(
+                api_status_widget, field_caption="API Status", strict_phrase="an API status"
+            )
+            if api_status_err:
+                self._show_error(api_status_err)
+                api_status_widget.setFocus()
+                return
+            api_status_val = resolved_status
+
         api_name = self._get_edit_value("apiName") or self._get_edit_value("api_name")
         if not api_name:
             self._show_error("API name is required.")
@@ -641,7 +673,11 @@ class ViewAPIDetailPage(QWidget):
             localhost_path=self._get_edit_value("localhostPath") or self._get_edit_value("localhost_path"),
             server_path=self._get_edit_value("serverPath") or self._get_edit_value("server_path"),
             requirement=self._get_edit_value("requirement"),
-            api_status=self._get_edit_value("apiStatus") or self._get_edit_value("api_status"),
+            api_status=(
+                api_status_val
+                if api_status_val != ""
+                else (self._get_edit_value("apiStatus") or self._get_edit_value("api_status"))
+            ),
             comments=self._get_edit_value("comments"),
             request_body=self._get_edit_value("request"),
             response_body=self._get_edit_value("response"),
@@ -664,12 +700,12 @@ class ViewAPIDetailPage(QWidget):
             return ""
         if isinstance(widget, QComboBox):
             if key in ("apiStatus", "api_status"):
-                data = widget.currentData()
-                if data is None:
+                raw = combo_resolved_master_key_seq(widget)
+                if raw is None or str(raw).strip() == "":
                     return ""
-                if isinstance(data, int):
-                    return data
-                return str(data).strip()
+                if isinstance(raw, int):
+                    return raw
+                return str(raw).strip()
             return widget.currentText().strip()
         if isinstance(widget, QPlainTextEdit):
             return widget.toPlainText().strip()

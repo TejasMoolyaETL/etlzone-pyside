@@ -23,12 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.api import (
-    api_get_master_key_by_app_id_field_name,
-    api_update_position,
-    master_key_row_display_label,
-    master_key_row_seq_value,
-)
+from core.api import api_update_position, master_key_row_seq_value
 from core.app_preferences import format_datetime_display, is_datetime_field
 from ui.blank_display import is_blank_display_value
 from core.user_context import get_user_profile
@@ -49,6 +44,18 @@ from ui.form_page_styles import (
     placeholder_example,
 )
 from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
+from ui.searchable_form_combo import (
+    combo_resolved_master_key_seq,
+    master_key_invalid_typed_text,
+    master_key_seq_for_payload,
+    require_master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    reset_searchable_combo,
+    set_searchable_combo_by_user_data,
+    wire_searchable_labeled_rows_combo,
+    wire_searchable_master_key_combo,
+)
+from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
 _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "jwt"})
@@ -89,9 +96,9 @@ def _position_status_seq(pos: dict[str, Any]) -> Any | None:
 
 
 def _combo_status_key_value(combo: QComboBox) -> str:
-    if combo.currentIndex() <= 0 or combo.itemData(combo.currentIndex()) is None:
+    t = (combo.currentText() or "").strip()
+    if not t:
         return ""
-    t = combo.currentText().strip()
     if " | " in t:
         return t.split(" | ", 1)[-1].strip().upper()
     return t.upper()
@@ -256,10 +263,14 @@ class ViewPositionPage(QWidget):
                 # Use hierarchyLevel as single canonical widget key
                 wkey = "hierarchyLevel"
                 value_edit = QComboBox()
-                value_edit.addItems(self._hierarchy_values)
-                value_edit.setCurrentText("1")
                 apply_form_combobox_field(
                     value_edit, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX, min_width=240
+                )
+                wire_searchable_labeled_rows_combo(
+                    value_edit,
+                    rows=[(s, s) for s in self._hierarchy_values],
+                    search_field_label="Hierarchy level",
+                    default_display_text="1",
                 )
                 ro = canonical in _READONLY_KEYS
                 value_edit.setEnabled(not ro)
@@ -270,6 +281,7 @@ class ViewPositionPage(QWidget):
                 apply_form_combobox_field(
                     value_edit, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX, min_width=240
                 )
+                wire_searchable_master_key_combo(value_edit, search_field_label="Status")
                 value_edit.setEnabled(canonical not in _READONLY_KEYS)
                 self._field_edits[canonical] = value_edit
             else:
@@ -368,7 +380,12 @@ class ViewPositionPage(QWidget):
             return
         combo = self._field_edits.get("status")
         if isinstance(combo, QComboBox):
-            self._populate_master_key_seq_combo(combo, _POSITION_STATUS_FIELD_NAME, "Select status…")
+            populate_master_key_by_field_name(
+                combo,
+                _POSITION_STATUS_FIELD_NAME,
+                token=self._token(),
+                include_placeholder=False,
+            )
             self._sync_status_combo_from_position()
 
     def _token(self) -> str | None:
@@ -381,71 +398,38 @@ class ViewPositionPage(QWidget):
         )
         return str(token) if token else None
 
-    def _populate_master_key_seq_combo(
-        self,
-        combo: QComboBox | None,
-        field_name: str,
-        placeholder: str,
-    ) -> None:
-        if combo is None:
-            return
-        result = api_get_master_key_by_app_id_field_name(
-            field_name=field_name,
-            token=self._token(),
-        )
-        rows = result.get("data") if result.get("success") else []
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem(placeholder, None)
-        if isinstance(rows, list):
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                seq_val = master_key_row_seq_value(row)
-                if seq_val is None:
-                    continue
-                label = master_key_row_display_label(row).strip()
-                if not label:
-                    continue
-                combo.addItem(label, seq_val)
-        combo.setCurrentIndex(0)
-        combo.blockSignals(False)
-
     def _sync_status_combo_from_position(self) -> None:
         combo = self._field_edits.get("status")
         if not isinstance(combo, QComboBox) or combo.count() == 0:
             return
         seq = _position_status_seq(self._position)
         if seq is not None:
-            for i in range(combo.count()):
-                data = combo.itemData(i)
-                if data is None:
-                    continue
-                try:
-                    if int(data) == int(seq):  # type: ignore[arg-type]
-                        combo.setCurrentIndex(i)
-                        return
-                except (TypeError, ValueError):
-                    if str(data).strip() == str(seq).strip():
-                        combo.setCurrentIndex(i)
-                        return
+            set_searchable_combo_by_user_data(combo, seq)
+            if combo_resolved_master_key_seq(combo) is not None:
+                return
         kv = _get_value(self._position, ("status",))
         if kv is not None and str(kv).strip():
             kv_up = str(kv).strip().upper()
             for i in range(combo.count()):
-                if combo.itemData(i) is None:
+                data = combo.itemData(i)
+                if data is None:
                     continue
                 label_up = combo.itemText(i).strip().upper()
                 if kv_up == label_up or kv_up in label_up or label_up.endswith(kv_up) or f"| {kv_up}" in label_up:
-                    combo.setCurrentIndex(i)
+                    set_searchable_combo_by_user_data(combo, data)
                     return
-        combo.setCurrentIndex(0)
+        reset_searchable_combo(combo)
 
     def set_position(self, pos: dict[str, Any] | None, *, edit_mode: bool = False) -> None:
         self._position = dict(pos) if pos else {}
         combo = self._field_edits.get("status")
         if isinstance(combo, QComboBox):
-            self._populate_master_key_seq_combo(combo, _POSITION_STATUS_FIELD_NAME, "Select status…")
+            populate_master_key_by_field_name(
+                combo,
+                _POSITION_STATUS_FIELD_NAME,
+                token=self._token(),
+                include_placeholder=False,
+            )
         self._refresh_values()
         if edit_mode and self._position:
             self._handle_edit()
@@ -573,18 +557,8 @@ class ViewPositionPage(QWidget):
                 if not isinstance(combo, QComboBox):
                     continue
                 orig_seq = _position_status_seq(self._position)
-                cur_data = combo.currentData()
-                if orig_seq is not None and cur_data is not None:
-                    try:
-                        if int(orig_seq) != int(cur_data):  # type: ignore[arg-type]
-                            return True
-                    except (TypeError, ValueError):
-                        if str(orig_seq).strip() != str(cur_data).strip():
-                            return True
-                    continue
-                orig_kv = str(_get_value(self._position, ("status",)) or "").strip().upper()
-                cur_kv = _combo_status_key_value(combo)
-                if orig_kv != cur_kv:
+                cur_seq = combo_resolved_master_key_seq(combo)
+                if str(orig_seq or "").strip() != str(cur_seq or "").strip():
                     return True
                 continue
             original = _get_value(self._position, keys)
@@ -615,14 +589,11 @@ class ViewPositionPage(QWidget):
 
         status_combo = self._field_edits.get("status")
         if isinstance(status_combo, QComboBox):
-            if status_combo.currentIndex() <= 0 or status_combo.currentData() is None:
-                self._show_error("Status is required.")
-                status_combo.setFocus()
-                return
-            try:
-                status_seq = _coerce_master_seq_to_int(status_combo.currentData())
-            except ValueError:
-                self._show_error("Status must be a valid selection.")
+            status_seq, status_err = require_master_key_seq_for_payload(
+                status_combo, field_caption="Status", strict_phrase="a status"
+            )
+            if status_err:
+                self._show_error(status_err)
                 status_combo.setFocus()
                 return
         else:

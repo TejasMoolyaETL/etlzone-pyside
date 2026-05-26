@@ -40,10 +40,10 @@ from ui.form_page_styles import (
     FORM_PRIMARY_BUTTON_STYLESHEET,
     FORM_READONLY_INPUT_STYLE as READONLY_INPUT_STYLE,
     FORM_SECONDARY_BUTTON_STYLESHEET,
-    placeholder_auto_filled,
+    placeholder_example,
     placeholder_search_select,
 )
-from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
+from ui.post_save_navigation import schedule_after_success
 from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label
 from app.user_management.users.user_list import (
@@ -55,6 +55,29 @@ from app.user_management.users.user_list import (
     _organization_name,
     _position_name,
 )
+
+# User Details does not show or edit account status (not sent on update-user API).
+_USER_DETAILS_COLUMN_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = tuple(
+    (label, keys)
+    for label, keys in _COLUMN_SPEC
+    if frozenset(keys).isdisjoint(frozenset({"userStatus", "status"}))
+    and (label or "").strip().lower() != "status"
+)
+
+# Hints when the field is empty (view mode read-only or edit mode).
+_USER_DETAIL_LINE_PLACEHOLDERS: dict[str, str] = {
+    "id": placeholder_example("12345"),
+    "username": placeholder_example("jsmith"),
+    "defaultRole": placeholder_example("USER"),
+    "firstName": placeholder_example("Jane"),
+    "lastName": placeholder_example("Doe"),
+    "email": placeholder_example("jane@company.com"),
+    "timezone": placeholder_example("Asia/Kolkata"),
+    "createdBy": placeholder_example("admin"),
+    "createdAt": placeholder_example("2025-01-15 10:30"),
+    "modifiedBy": placeholder_example("admin"),
+    "modifiedAt": placeholder_example("2025-01-16 09:00"),
+}
 from core.api import (
     api_get_all_depts,
     api_get_all_orgs,
@@ -112,7 +135,7 @@ _MANAGED_LOOKUP_KEYS = frozenset({
     "buName",
 })
 
-_LEFT_COL_COUNT = 8
+_LEFT_COL_COUNT = 7
 
 # Red * only on personal/contact fields; Org / Dept / Position rows are optional in the UI.
 _USER_DETAIL_MANDATORY_KEYS = frozenset({
@@ -154,7 +177,7 @@ def _display_for_column(user: dict[str, Any], keys: tuple[str, ...]) -> str:
 
 
 def _org_id_from_user(user: dict[str, Any]) -> str:
-    for k in ("orgId", "org_id", "organizationId"):
+    for k in ("orgID", "orgId", "org_id", "organizationId"):
         v = user.get(k)
         if v is not None and str(v).strip():
             return str(v).strip()
@@ -250,6 +273,9 @@ class ViewUserPage(QWidget):
 
     def set_user(self, user: dict[str, Any] | None, *, edit_mode: bool = False) -> None:
         self._user = dict(user) if user else {}
+        # Load org/dept/position catalogs before refresh so lookup lines match edit mode (id | name).
+        if self._user:
+            self._ensure_reference_data_loaded()
         self._refresh_values()
         if edit_mode and self._user:
             self._ensure_reference_data_loaded()
@@ -386,18 +412,22 @@ class ViewUserPage(QWidget):
                 )
                 self._update_email_style(value_edit, value_edit.text())
 
+            ph = _USER_DETAIL_LINE_PLACEHOLDERS.get(canonical)
+            if ph:
+                value_edit.setPlaceholderText(ph)
+
             if editable:
                 register_editable(canonical)
 
             self._field_edits[canonical] = value_edit
             _add_field_group(col_layout, lbl, value_edit)
 
-        left = list(_COLUMN_SPEC[:_LEFT_COL_COUNT])
+        left = list(_USER_DETAILS_COLUMN_SPEC[:_LEFT_COL_COUNT])
         for label_text, keys in left:
             add_field(0, label_text, keys)
 
-        # Left column: Org Name / Org Id (BU / Dept / Position stay on the right)
-        label_org = QLabel("Org Name:")
+        # Left column: Org (BU / Dept / Position stay on the right)
+        label_org = QLabel("Org:")
         label_org.setStyleSheet(LABEL_STYLE)
         self.org_name_edit = QLineEdit()
         self.org_name_edit.setPlaceholderText(placeholder_search_select("Org Id", "Org Name"))
@@ -405,28 +435,16 @@ class ViewUserPage(QWidget):
         self.org_name_edit.setFixedHeight(field_h)
         self.org_name_edit.setMinimumWidth(240)
         self.org_name_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.org_name_edit.textEdited.connect(lambda _t: self.org_id_edit.clear())
         self._field_edits[_ORG_WIDGET_KEY] = self.org_name_edit
         register_editable(_ORG_WIDGET_KEY)
         _add_field_group(left_col, label_org, self.org_name_edit)
-
-        label_org_id = QLabel("Org Id:")
-        label_org_id.setStyleSheet(LABEL_STYLE)
-        self.org_id_edit = QLineEdit()
-        self.org_id_edit.setReadOnly(True)
-        self.org_id_edit.setPlaceholderText(placeholder_auto_filled("Org Name"))
-        self.org_id_edit.setStyleSheet(READONLY_INPUT_STYLE)
-        self.org_id_edit.setFixedHeight(field_h)
-        self.org_id_edit.setMinimumWidth(240)
-        self.org_id_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        _add_field_group(left_col, label_org_id, self.org_id_edit)
 
         # Right column: BU / Dept / Position — same pattern as Create User
         label_bu = QLabel("BU Name:")
         label_bu.setStyleSheet(LABEL_STYLE)
         self.bu_name_edit = QLineEdit()
         self.bu_name_edit.setReadOnly(True)
-        self.bu_name_edit.setPlaceholderText("")
+        self.bu_name_edit.setPlaceholderText(placeholder_example("Engineering"))
         self.bu_name_edit.setStyleSheet(READONLY_INPUT_STYLE)
         self.bu_name_edit.setFixedHeight(field_h)
         self.bu_name_edit.setMinimumWidth(240)
@@ -434,7 +452,7 @@ class ViewUserPage(QWidget):
         self._field_edits[_BU_WIDGET_KEY] = self.bu_name_edit
         _add_field_group(right_col, label_bu, self.bu_name_edit)
 
-        label_dept = QLabel("Dept Name:")
+        label_dept = QLabel("Dept:")
         label_dept.setStyleSheet(LABEL_STYLE)
         self.dept_name_edit = QLineEdit()
         self.dept_name_edit.setPlaceholderText(placeholder_search_select("Dept Id", "Dept Name"))
@@ -447,18 +465,7 @@ class ViewUserPage(QWidget):
         register_editable(_DEPT_WIDGET_KEY)
         _add_field_group(right_col, label_dept, self.dept_name_edit)
 
-        label_dept_id = QLabel("Dept Id:")
-        label_dept_id.setStyleSheet(LABEL_STYLE)
-        self.dept_id_value_edit = QLineEdit()
-        self.dept_id_value_edit.setReadOnly(True)
-        self.dept_id_value_edit.setPlaceholderText(placeholder_auto_filled("Dept Name"))
-        self.dept_id_value_edit.setStyleSheet(READONLY_INPUT_STYLE)
-        self.dept_id_value_edit.setFixedHeight(field_h)
-        self.dept_id_value_edit.setMinimumWidth(240)
-        self.dept_id_value_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        _add_field_group(right_col, label_dept_id, self.dept_id_value_edit)
-
-        label_position = QLabel("Position Name:")
+        label_position = QLabel("Position:")
         label_position.setStyleSheet(LABEL_STYLE)
         self.position_name_edit = QLineEdit()
         self.position_name_edit.setPlaceholderText(placeholder_search_select("Position Id", "Position Name"))
@@ -466,25 +473,13 @@ class ViewUserPage(QWidget):
         self.position_name_edit.setFixedHeight(field_h)
         self.position_name_edit.setMinimumWidth(240)
         self.position_name_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.position_name_edit.textEdited.connect(lambda _t: self.position_id_value_edit.clear())
         self._field_edits[_POS_WIDGET_KEY] = self.position_name_edit
         register_editable(_POS_WIDGET_KEY)
         _add_field_group(right_col, label_position, self.position_name_edit)
 
-        label_position_id = QLabel("Position Id:")
-        label_position_id.setStyleSheet(LABEL_STYLE)
-        self.position_id_value_edit = QLineEdit()
-        self.position_id_value_edit.setReadOnly(True)
-        self.position_id_value_edit.setPlaceholderText(placeholder_auto_filled("Position Name"))
-        self.position_id_value_edit.setStyleSheet(READONLY_INPUT_STYLE)
-        self.position_id_value_edit.setFixedHeight(field_h)
-        self.position_id_value_edit.setMinimumWidth(240)
-        self.position_id_value_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        _add_field_group(right_col, label_position_id, self.position_id_value_edit)
-
         right_tail = [
             (lt, ks)
-            for lt, ks in _COLUMN_SPEC[_LEFT_COL_COUNT:]
+            for lt, ks in _USER_DETAILS_COLUMN_SPEC[_LEFT_COL_COUNT:]
             if ks[0] not in _MANAGED_LOOKUP_KEYS
         ]
         for label_text, keys in right_tail:
@@ -611,19 +606,22 @@ class ViewUserPage(QWidget):
         self.position_name_edit.setCompleter(self._pos_completer)
         self._pos_completer.activated.connect(self._on_position_selected)
 
+    @staticmethod
+    def _id_from_lookup_line(line: str) -> str:
+        t = (line or "").strip()
+        if not t:
+            return ""
+        return t.split("|", 1)[0].strip()
+
     def _on_org_selected(self, text: str) -> None:
-        selected_id = (text or "").split("|", 1)[0].strip()
-        self.org_id_edit.setText(selected_id)
         self.org_name_edit.setText(text)
 
     def _on_dept_selected(self, text: str) -> None:
         self.dept_name_edit.setText(text)
-        self.dept_id_value_edit.setText((text or "").split("|", 1)[0].strip())
-        self._refresh_bu_display_for_dept_id(self.dept_id_value_edit.text().strip())
+        self._refresh_bu_display_for_dept_id(self._id_from_lookup_line(text))
 
     def _on_dept_name_text_edited(self, _t: str) -> None:
-        self.dept_id_value_edit.clear()
-        self._refresh_bu_display_for_dept_id("")
+        self._refresh_bu_display_for_dept_id(self._id_from_lookup_line(self.dept_name_edit.text()))
 
     def _bu_display_and_id_for_dept(self, dept_id: str) -> tuple[str, str]:
         if dept_id and dept_id in self._dept_bu_by_dept_id:
@@ -641,7 +639,7 @@ class ViewUserPage(QWidget):
         self.bu_name_edit.setText(txt)
 
     def _bu_id_for_current_dept_selection(self) -> str:
-        did = self.dept_id_value_edit.text().strip()
+        did = self._id_from_lookup_line(self.dept_name_edit.text())
         if did and did in self._dept_bu_by_dept_id:
             bid, _ = self._dept_bu_by_dept_id[did]
             return bid.strip()
@@ -649,11 +647,12 @@ class ViewUserPage(QWidget):
 
     def _on_position_selected(self, text: str) -> None:
         self.position_name_edit.setText(text)
-        self.position_id_value_edit.setText((text or "").split("|", 1)[0].strip())
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        self._ensure_reference_data_loaded()
+        self._ensure_reference_data_loaded(force=True)
+        if self._user:
+            self._refresh_lookup_displays_from_user()
 
     def _ensure_reference_data_loaded(self, *, force: bool = False) -> None:
         if self._ref_loaded and not force:
@@ -668,7 +667,7 @@ class ViewUserPage(QWidget):
         token = str(token) if token else None
         self._org_items = self._extract_id_name_items(
             (api_get_all_orgs(token=token).get("data") or []),
-            id_keys=("orgId", "org_id", "organizationId", "id"),
+            id_keys=("orgID", "orgId", "org_id", "organizationId", "id"),
             name_keys=("orgName", "org_name", "organizationName", "name"),
         )
         dept_rows = api_get_all_depts(token=token).get("data") or []
@@ -809,20 +808,17 @@ class ViewUserPage(QWidget):
 
     def _refresh_lookup_displays_from_user(self) -> None:
         oid = _org_id_from_user(self._user)
-        self.org_id_edit.setText(oid)
         self._apply_lookup_line(self.org_name_edit, oid, self._org_items, _KEYS_ORG)
 
         did = _dept_id_from_user(self._user)
-        self.dept_id_value_edit.setText(did)
         self._apply_lookup_line(self.dept_name_edit, did, self._dept_items, _KEYS_DEPT)
         self._refresh_bu_display_for_dept_id(did)
 
         pid = _position_id_from_user(self._user)
-        self.position_id_value_edit.setText(pid)
         self._apply_lookup_line(self.position_name_edit, pid, self._position_items, _KEYS_POS)
 
     def _refresh_values(self) -> None:
-        for _label_text, keys in _COLUMN_SPEC:
+        for _label_text, keys in _USER_DETAILS_COLUMN_SPEC:
             if keys[0] in _MANAGED_LOOKUP_KEYS:
                 continue
             if keys == ("mobileNumber", "mobile_number"):
@@ -878,10 +874,9 @@ class ViewUserPage(QWidget):
             "deptName": self._get_edit_text(_DEPT_WIDGET_KEY),
             "positionName": self._get_edit_text(_POS_WIDGET_KEY),
             "buName": self._get_edit_text(_BU_WIDGET_KEY),
-            "orgId": self.org_id_edit.text().strip(),
-            "deptId": self.dept_id_value_edit.text().strip(),
-            "positionId": self.position_id_value_edit.text().strip(),
-            "buId": self._bu_id_for_current_dept_selection(),
+            "orgId": self._id_from_lookup_line(self.org_name_edit.text()),
+            "deptId": self._id_from_lookup_line(self.dept_name_edit.text()),
+            "positionId": self._id_from_lookup_line(self.position_name_edit.text()),
         }
 
     def _snapshot_from_user(self) -> dict[str, Any]:
@@ -901,7 +896,6 @@ class ViewUserPage(QWidget):
             "orgId": _org_id_from_user(u),
             "deptId": _dept_id_from_user(u),
             "positionId": _position_id_from_user(u),
-            "buId": _bu_id_from_user(u),
         }
 
     def _has_unsaved_changes(self) -> bool:
@@ -977,11 +971,7 @@ class ViewUserPage(QWidget):
     def _handle_save(self) -> None:
         self._clear_error()
         if not self._has_unsaved_changes():
-            navigate_after_no_changes(
-                show_non_error_message=self._show_success,
-                clear_message=self._clear_error,
-                on_back=self.on_back,
-            )
+            self._show_success("No changes have been made!")
             return
         first_name = self._get_edit_text("firstName")
         last_name = self._get_edit_text("lastName")
@@ -1059,12 +1049,6 @@ class ViewUserPage(QWidget):
         else:
             position_id = None
 
-        self.org_id_edit.setText(org_id or "")
-        self.dept_id_value_edit.setText(dept_id or "")
-        self.position_id_value_edit.setText(position_id or "")
-
-        bu_id = self._bu_id_for_current_dept_selection() or None
-
         uid = _get_user_id(self._user)
         if uid is None:
             self._show_error("User Id is missing.")
@@ -1088,7 +1072,6 @@ class ViewUserPage(QWidget):
         oid = _as_optional_int(org_id)
         did = _as_optional_int(dept_id)
         pid = _as_optional_int(position_id)
-        bu_int = _as_optional_int(bu_id)
 
         mobile_full = f"{country_code}{num}"
 
@@ -1102,7 +1085,6 @@ class ViewUserPage(QWidget):
             orgId=oid,
             deptId=did,
             positionId=pid,
-            buId=bu_int,
         )
 
         if not result.get("success"):
@@ -1122,7 +1104,7 @@ class ViewUserPage(QWidget):
             if org_id:
                 self._user["orgId"] = int(org_id) if str(org_id).isdigit() else org_id
             else:
-                for k in ("orgId", "org_id", "organizationId"):
+                for k in ("orgID", "orgId", "org_id", "organizationId"):
                     self._user.pop(k, None)
             if dept_id:
                 self._user["deptId"] = int(dept_id) if str(dept_id).isdigit() else dept_id
@@ -1133,11 +1115,6 @@ class ViewUserPage(QWidget):
                 self._user["positionId"] = int(position_id) if str(position_id).isdigit() else position_id
             else:
                 for k in ("positionId", "position_id"):
-                    self._user.pop(k, None)
-            if bu_id:
-                self._user["buId"] = int(bu_id) if str(bu_id).isdigit() else bu_id
-            else:
-                for k in ("buId", "bu_id", "businessUnitId", "business_unit_id"):
                     self._user.pop(k, None)
 
         self._show_success(result.get("message", "User updated successfully."))

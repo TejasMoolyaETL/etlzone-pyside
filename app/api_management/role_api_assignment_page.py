@@ -9,12 +9,15 @@ from typing import Any
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QBrush, QColor, QShowEvent
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QMessageBox,
+    QRadioButton,
     QScrollArea,
     QPushButton,
     QSizePolicy,
@@ -26,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.api import (
+    api_change_status_multiple_api_by_role_id,
     api_get_all_apis,
     api_get_all_roles,
     api_get_api_access_by_role_id,
@@ -77,11 +81,44 @@ _API_COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 _ROLE_API_COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("API Id", ("apiId", "api_id")),
+    ("API Assign Id", ("apiAssignId", "api_assign_id", "assignId", "assign_id")),
     ("API Name", ("apiName", "api_name", "name", "title")),
-    ("API Endpoint", ("apiEndPoint", "apiEndpoint", "api_endpoint", "endpoint", "path")),
-    ("API Assign Id", ("apiAssignId", "api_assign_id")),
+    (
+        "API Endpoint",
+        (
+            "apiEndPoint",
+            "apiEndpoint",
+            "api_endpoint",
+            "endpoint",
+            "path",
+            "urlPath",
+            "url_path",
+            "url",
+            "uri",
+        ),
+    ),
     ("Status", ("status",)),
 )
+
+
+def _normalize_role_api_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Copy nested API id onto top level when missing so the API Id column can resolve."""
+    out = dict(row)
+    for k in ("apiId", "api_id"):
+        v = out.get(k)
+        if v is not None and str(v).strip() != "":
+            return out
+    for nest_key in ("api", "apiDetail", "apiDetails", "detail", "apiInfo"):
+        sub = out.get(nest_key)
+        if not isinstance(sub, dict):
+            continue
+        for k in ("apiId", "api_id", "id"):
+            v = sub.get(k)
+            if v is not None and str(v).strip() != "":
+                out.setdefault("apiId", v)
+                return out
+    return out
 
 
 def _flatten_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -128,6 +165,57 @@ class _LoadWorker(QObject):
         roles = [r for r in (roles_result.get("data") or []) if isinstance(r, dict)]
         apis = [a for a in (apis_result.get("data") or []) if isinstance(a, dict)]
         self.finished.emit(True, roles, apis, "")
+
+
+class _RoleApiAccessStatusDialog(QDialog):
+    """Modal: choose ACTIVE or INACTIVE for change-status-multiple-api-by-role-id."""
+
+    def __init__(self, parent: QWidget | None, *, count: int) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("ACTIVE / INACTIVE")
+        self.setModal(True)
+        self.setMinimumWidth(360)
+        self.setStyleSheet("QDialog { background: #ffffff; }")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        intro = QLabel(f"Choose status for {count} selected API(s) for this role:")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self._radio_active = QRadioButton("ACTIVE")
+        self._radio_inactive = QRadioButton("INACTIVE")
+        self._radio_active.setChecked(True)
+        grp = QButtonGroup(self)
+        grp.addButton(self._radio_active)
+        grp.addButton(self._radio_inactive)
+        layout.addWidget(self._radio_active)
+        layout.addWidget(self._radio_inactive)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        submit = QPushButton("Submit")
+        submit.setFixedWidth(100)
+        submit.setStyleSheet(FORM_PRIMARY_BUTTON_STYLESHEET)
+        submit.setCursor(Qt.CursorShape.PointingHandCursor)
+        submit.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.setFixedWidth(100)
+        cancel.setStyleSheet(FORM_SECONDARY_BUTTON_STYLESHEET)
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel.clicked.connect(self.reject)
+        btn_row.addStretch(1)
+        btn_row.addWidget(submit)
+        btn_row.addWidget(cancel)
+        layout.addLayout(btn_row)
+
+    def selected_status(self) -> str:
+        """Return API status: ACTIVE or INACTIVE."""
+        if self._radio_inactive.isChecked():
+            return "INACTIVE"
+        return "ACTIVE"
 
 
 class RoleApiAssignmentPage(QWidget):
@@ -182,6 +270,41 @@ class RoleApiAssignmentPage(QWidget):
             or ""
         ).strip().lower()
         return (name, endpoint)
+
+    def _api_id_from_role_api_row(self, row: dict[str, Any]) -> Any:
+        """Resolve API id for remove/grant; role-API payloads often omit flat apiId."""
+        for key in ("apiId", "api_id", "apiID"):
+            v = row.get(key)
+            if v is not None and str(v).strip() != "":
+                return v
+        for nest_key in ("api", "apiDetail", "apiDetails", "detail", "apiInfo"):
+            sub = row.get(nest_key)
+            if isinstance(sub, dict):
+                for key in ("apiId", "api_id", "apiID", "id"):
+                    v = sub.get(key)
+                    if v is not None and str(v).strip() != "":
+                        return v
+        v = row.get("id")
+        if v is not None and str(v).strip() != "":
+            return v
+        ident = self._rhs_api_identity(row)
+        if ident != ("", ""):
+            for api_row in self._apis:
+                if self._lhs_api_identity(api_row) == ident:
+                    return (
+                        api_row.get("apiId")
+                        or api_row.get("api_id")
+                        or api_row.get("id")
+                    )
+        return None
+
+    def _assign_id_from_role_api_row(self, row: dict[str, Any]) -> Any:
+        return (
+            row.get("apiAssignId")
+            or row.get("api_assign_id")
+            or row.get("assignId")
+            or row.get("assign_id")
+        )
 
     def _style_assigned_lhs_row(self, table_row: int) -> None:
         """Muted row styling for APIs already assigned to the selected role."""
@@ -303,6 +426,13 @@ class RoleApiAssignmentPage(QWidget):
         self._remove_assign_btn.setEnabled(False)
         self._remove_assign_btn.clicked.connect(self._remove_selected_assignments)
 
+        self._deactivate_assign_btn = QPushButton("ACTIVE/INACTIVE")
+        self._deactivate_assign_btn.setFixedWidth(130)
+        self._deactivate_assign_btn.setStyleSheet(FORM_SECONDARY_BUTTON_STYLESHEET)
+        self._deactivate_assign_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._deactivate_assign_btn.setEnabled(False)
+        self._deactivate_assign_btn.clicked.connect(self._deactivate_selected_assignments)
+
         self._role_filter_btn = QPushButton("Filters")
         self._role_filter_btn.setCheckable(True)
         self._role_filter_btn.setChecked(False)
@@ -312,17 +442,15 @@ class RoleApiAssignmentPage(QWidget):
         self._role_filter_btn.setEnabled(False)
         self._role_filter_btn.toggled.connect(self._on_role_filter_toggled)
 
-        role_action_row = QWidget()
-        role_action_row_lay = QHBoxLayout(role_action_row)
-        role_action_row_lay.setContentsMargins(0, 0, 0, 0)
-        role_action_row_lay.setSpacing(8)
-        role_action_row_lay.addWidget(self._role_combo)
-        role_action_row_lay.addWidget(self._assign_selected_btn)
-        role_action_row_lay.addWidget(self._remove_assign_btn)
-        role_action_row_lay.addWidget(self._role_filter_btn)
-        role_action_row_lay.addStretch(1)
+        role_top_row = QWidget()
+        role_top_row_lay = QHBoxLayout(role_top_row)
+        role_top_row_lay.setContentsMargins(0, 0, 0, 0)
+        role_top_row_lay.setSpacing(8)
+        role_top_row_lay.addWidget(self._role_combo)
+        role_top_row_lay.addWidget(self._role_filter_btn)
+        role_top_row_lay.addStretch(1)
         right_layout.addSpacing(8)
-        right_layout.addWidget(role_action_row)
+        right_layout.addWidget(role_top_row)
 
         self._role_apis_table = QTableWidget()
         apply_data_table_appearance(self._role_apis_table)
@@ -337,10 +465,23 @@ class RoleApiAssignmentPage(QWidget):
         self._role_apis_table.setSortingEnabled(True)
         attach_table_copy_shortcut(self._role_apis_table)
         self._role_apis_table.itemChanged.connect(self._on_right_table_item_changed)
+        self._role_apis_table.itemClicked.connect(self._on_right_table_item_clicked)
         right_layout.addWidget(self._role_apis_table, 1)
 
-        self._roles_msg = QLabel("Select a role to load assigned APIs.")
+        role_bottom_btn_row = QWidget()
+        role_bottom_btn_row.setStyleSheet("margin-bottom: 6px;")
+        role_bottom_btn_lay = QHBoxLayout(role_bottom_btn_row)
+        role_bottom_btn_lay.setContentsMargins(0, 0, 0, 0)
+        role_bottom_btn_lay.setSpacing(8)
+        role_bottom_btn_lay.addWidget(self._assign_selected_btn)
+        role_bottom_btn_lay.addWidget(self._remove_assign_btn)
+        role_bottom_btn_lay.addWidget(self._deactivate_assign_btn)
+        role_bottom_btn_lay.addStretch(1)
+        right_layout.addWidget(role_bottom_btn_row)
+
+        self._roles_msg = QLabel("")
         self._roles_msg.setWordWrap(True)
+        self._roles_msg.setVisible(False)
         self._roles_msg.setStyleSheet(MODAL_FIELD_LABEL_STYLE)
         right_layout.addWidget(self._roles_msg)
 
@@ -367,6 +508,16 @@ class RoleApiAssignmentPage(QWidget):
             or profile.get("jwt")
         )
         return str(token) if token else None
+
+    def _clear_roles_feedback(self) -> None:
+        self._roles_msg.clear()
+        self._roles_msg.setStyleSheet(MODAL_FIELD_LABEL_STYLE)
+        self._roles_msg.setVisible(False)
+
+    def _set_roles_feedback(self, text: str, *, error: bool = False) -> None:
+        self._roles_msg.setStyleSheet(FORM_ERROR_LABEL_STYLE if error else MODAL_FIELD_LABEL_STYLE)
+        self._roles_msg.setText(text)
+        self._roles_msg.setVisible(True)
 
     def _api_data_row_offset(self) -> int:
         return data_row_offset(self._filter_visible)
@@ -543,6 +694,7 @@ class RoleApiAssignmentPage(QWidget):
         )
         self._role_apis_table.setSortingEnabled(not self._role_filter_visible)
         self._role_apis_table.blockSignals(False)
+        self._update_assign_button_state()
 
     def _apply_role_api_column_filters_refresh(self) -> None:
         if not self._role_filter_visible or not self._role_api_rows:
@@ -648,8 +800,7 @@ class RoleApiAssignmentPage(QWidget):
         self._role_filter_btn.setEnabled(False)
         self._role_apis_table.setRowCount(0)
         self._reset_role_apis_table_columns_plain()
-        self._roles_msg.setStyleSheet(MODAL_FIELD_LABEL_STYLE)
-        self._roles_msg.setText("Select a role to load assigned APIs.")
+        self._clear_roles_feedback()
 
     def _reset_role_apis_table_columns_plain(self) -> None:
         """Assignments table without checkbox column (no role / empty / error)."""
@@ -676,8 +827,7 @@ class RoleApiAssignmentPage(QWidget):
             self._role_filter_btn.setEnabled(False)
             self._role_apis_table.setRowCount(0)
             self._reset_role_apis_table_columns_plain()
-            self._roles_msg.setStyleSheet(MODAL_FIELD_LABEL_STYLE)
-            self._roles_msg.setText("Select a role to load assigned APIs.")
+            self._clear_roles_feedback()
             self._filter_btn.setEnabled(True)
             self._populate_left_table(self._apis)
             self._update_assign_button_state()
@@ -715,18 +865,40 @@ class RoleApiAssignmentPage(QWidget):
         if item.column() == self._left_checkbox_col:
             self._update_assign_button_state()
 
-    def _checked_api_ids_for_role_remove(self) -> list[Any]:
+    def _checked_assignment_ids_for_role_remove(self) -> list[Any]:
         out: list[Any] = []
-        if self._role_apis_table.columnCount() != 1 + len(_ROLE_API_COLUMNS):
+        if self._current_role_id is None:
             return out
-        for row in range(self._role_apis_table.rowCount()):
+        if self._role_apis_table.columnCount() <= self._right_checkbox_col:
+            return out
+        off = self._role_api_data_row_offset()
+        for row in range(off, self._role_apis_table.rowCount()):
             item = self._role_apis_table.item(row, self._right_checkbox_col)
             if item is None or item.checkState() != Qt.CheckState.Checked:
                 continue
             data = item.data(Qt.ItemDataRole.UserRole)
             if not isinstance(data, dict):
                 continue
-            api_id = data.get("apiId") or data.get("api_id") or data.get("id")
+            aid = self._assign_id_from_role_api_row(data)
+            if aid is not None and str(aid).strip() != "":
+                out.append(aid)
+        return list(dict.fromkeys(out))
+
+    def _checked_api_ids_for_role_deactivate(self) -> list[Any]:
+        out: list[Any] = []
+        if self._current_role_id is None:
+            return out
+        if self._role_apis_table.columnCount() <= self._right_checkbox_col:
+            return out
+        off = self._role_api_data_row_offset()
+        for row in range(off, self._role_apis_table.rowCount()):
+            item = self._role_apis_table.item(row, self._right_checkbox_col)
+            if item is None or item.checkState() != Qt.CheckState.Checked:
+                continue
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(data, dict):
+                continue
+            api_id = self._api_id_from_role_api_row(data)
             if api_id is not None and str(api_id).strip() != "":
                 out.append(api_id)
         return list(dict.fromkeys(out))
@@ -735,38 +907,50 @@ class RoleApiAssignmentPage(QWidget):
         if item.column() == self._right_checkbox_col:
             self._update_assign_button_state()
 
+    def _on_right_table_item_clicked(self, _item: QTableWidgetItem) -> None:
+        self._update_assign_button_state()
+
     def _update_assign_button_state(self) -> None:
         can_assign = self._current_role_id is not None and bool(self._selected_left_api_ids())
         self._assign_selected_btn.setEnabled(can_assign)
         self._assign_selected_btn.setCursor(
             Qt.CursorShape.PointingHandCursor if can_assign else Qt.CursorShape.ArrowCursor
         )
-        can_remove = self._current_role_id is not None and bool(self._checked_api_ids_for_role_remove())
+        can_remove = self._current_role_id is not None and bool(
+            self._checked_assignment_ids_for_role_remove()
+        )
         self._remove_assign_btn.setEnabled(can_remove)
         self._remove_assign_btn.setCursor(
             Qt.CursorShape.PointingHandCursor if can_remove else Qt.CursorShape.ArrowCursor
         )
+        can_deactivate = self._current_role_id is not None and bool(
+            self._checked_api_ids_for_role_deactivate()
+        )
+        self._deactivate_assign_btn.setEnabled(can_deactivate)
+        self._deactivate_assign_btn.setCursor(
+            Qt.CursorShape.PointingHandCursor if can_deactivate else Qt.CursorShape.ArrowCursor
+        )
 
     def _remove_selected_assignments(self) -> None:
         if self._current_role_id is None:
-            self._roles_msg.setStyleSheet(FORM_ERROR_LABEL_STYLE)
-            self._roles_msg.setText("Select a role first.")
+            self._set_roles_feedback("Select a role first.", error=True)
             return
-        api_ids = self._checked_api_ids_for_role_remove()
-        if not api_ids:
-            self._roles_msg.setStyleSheet(FORM_ERROR_LABEL_STYLE)
-            self._roles_msg.setText("Check one or more APIs in the table to remove.")
+        assignment_ids = self._checked_assignment_ids_for_role_remove()
+        if not assignment_ids:
+            self._set_roles_feedback(
+                "Check one or more rows with an API Assign Id to remove.",
+                error=True,
+            )
             return
         token = self._get_token()
         if not token:
-            self._roles_msg.setStyleSheet(FORM_ERROR_LABEL_STYLE)
-            self._roles_msg.setText("Session expired. Please log in again.")
+            self._set_roles_feedback("Session expired. Please log in again.", error=True)
             return
-        n = len(api_ids)
+        n = len(assignment_ids)
         reply = QMessageBox.question(
             self,
             "Remove APIs",
-            f"Remove {n} API(s) from this role?",
+            f"Remove {n} API assignment(s) from this role?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -774,32 +958,68 @@ class RoleApiAssignmentPage(QWidget):
             return
         result = api_remove_multiple_api_by_role_id(
             role_id=self._current_role_id,
-            api_ids=api_ids,
+            assignment_ids=assignment_ids,
             token=token,
         )
         if not result.get("success"):
-            self._roles_msg.setStyleSheet(FORM_ERROR_LABEL_STYLE)
-            self._roles_msg.setText(str(result.get("message") or "Failed to remove APIs from role."))
+            self._set_roles_feedback(
+                str(result.get("message") or "Failed to remove APIs from role."),
+                error=True,
+            )
             self._load_role_apis()
             return
-        self._roles_msg.setStyleSheet(MODAL_FIELD_LABEL_STYLE)
-        self._roles_msg.setText(str(result.get("message") or "API(s) removed from role."))
+        self._set_roles_feedback(str(result.get("message") or "API(s) removed from role."), error=False)
+        self._load_role_apis()
+
+    def _deactivate_selected_assignments(self) -> None:
+        if self._current_role_id is None:
+            self._set_roles_feedback("Select a role first.", error=True)
+            return
+        api_ids = self._checked_api_ids_for_role_deactivate()
+        if not api_ids:
+            self._set_roles_feedback(
+                "Check one or more rows with a resolvable API id to change status.",
+                error=True,
+            )
+            return
+        token = self._get_token()
+        if not token:
+            self._set_roles_feedback("Session expired. Please log in again.", error=True)
+            return
+        dlg = _RoleApiAccessStatusDialog(self, count=len(api_ids))
+        if dlg.exec() != int(QDialog.DialogCode.Accepted):
+            return
+        status = dlg.selected_status()
+        result = api_change_status_multiple_api_by_role_id(
+            role_id=self._current_role_id,
+            api_ids=api_ids,
+            status=status,
+            token=token,
+        )
+        if not result.get("success"):
+            self._set_roles_feedback(
+                str(result.get("message") or "Failed to update API access status for role."),
+                error=True,
+            )
+            self._load_role_apis()
+            return
+        self._set_roles_feedback(
+            str(result.get("message") or "API access status updated."),
+            error=False,
+        )
         self._load_role_apis()
 
     def _assign_selected_apis_to_role(self) -> None:
         if self._current_role_id is None:
-            self._roles_msg.setStyleSheet(FORM_ERROR_LABEL_STYLE)
-            self._roles_msg.setText("Select a role first.")
+            self._set_roles_feedback("Select a role first.", error=True)
             return
         selected_api_ids = self._selected_left_api_ids()
         if not selected_api_ids:
-            self._roles_msg.setStyleSheet(FORM_ERROR_LABEL_STYLE)
-            self._roles_msg.setText("Select at least one API on the left table.")
+            self._set_roles_feedback("Select at least one API on the left table.", error=True)
             return
         token = self._get_token()
         if not token:
-            self._roles_msg.setStyleSheet(FORM_ERROR_LABEL_STYLE)
-            self._roles_msg.setText("Session expired. Please log in again.")
+            self._set_roles_feedback("Session expired. Please log in again.", error=True)
             return
         result = api_grant_multiple_api_access(
             role_id=self._current_role_id,
@@ -807,33 +1027,31 @@ class RoleApiAssignmentPage(QWidget):
             token=token,
         )
         if not result.get("success"):
-            self._roles_msg.setStyleSheet(FORM_ERROR_LABEL_STYLE)
-            self._roles_msg.setText(str(result.get("message") or "Failed to assign APIs."))
+            self._set_roles_feedback(str(result.get("message") or "Failed to assign APIs."), error=True)
             return
-        self._roles_msg.setStyleSheet(MODAL_FIELD_LABEL_STYLE)
-        self._roles_msg.setText(str(result.get("message") or "APIs assigned successfully."))
+        self._set_roles_feedback(str(result.get("message") or "APIs assigned successfully."), error=False)
         self._load_role_apis()
 
     def _load_role_apis(self) -> None:
         if self._current_role_id is None:
             return
-        self._roles_msg.setStyleSheet(MODAL_FIELD_LABEL_STYLE)
-        self._roles_msg.setText("Loading role APIs...")
+        self._set_roles_feedback("Loading role APIs...", error=False)
         self._role_api_rows = []
         self._reset_role_apis_table_columns_plain()
         self._role_apis_table.setSortingEnabled(False)
         self._role_apis_table.setRowCount(0)
         result = api_get_api_access_by_role_id(self._current_role_id, token=self._get_token())
         if not result.get("success"):
-            self._roles_msg.setStyleSheet(FORM_ERROR_LABEL_STYLE)
-            self._roles_msg.setText(str(result.get("message") or "Failed to load role APIs."))
+            self._set_roles_feedback(
+                str(result.get("message") or "Failed to load role APIs."),
+                error=True,
+            )
             self._update_assign_button_state()
             return
         rows = [r for r in (result.get("data") or []) if isinstance(r, dict)]
         if not rows:
             self._assigned_api_keys_for_role.clear()
-            self._roles_msg.setStyleSheet(MODAL_FIELD_LABEL_STYLE)
-            self._roles_msg.setText("No APIs assigned to selected role.")
+            self._set_roles_feedback("No APIs assigned to selected role.", error=False)
             self._role_apis_table.setSortingEnabled(True)
             self._populate_left_table(self._apis)
             self._update_assign_button_state()
@@ -841,9 +1059,9 @@ class RoleApiAssignmentPage(QWidget):
         self._assigned_api_keys_for_role = {
             self._rhs_api_identity(r) for r in rows if isinstance(r, dict)
         }
-        self._role_api_rows = [dict(r) for r in rows if isinstance(r, dict)]
+        self._role_api_rows = [_normalize_role_api_row(dict(r)) for r in rows if isinstance(r, dict)]
         self._populate_left_table(self._apis)
-        self._roles_msg.setText("")
+        self._clear_roles_feedback()
         self._write_role_api_rows(
             self._filtered_role_api_rows()
             if self._role_filter_visible

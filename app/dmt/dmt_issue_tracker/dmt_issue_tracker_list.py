@@ -1,11 +1,11 @@
-"""DMT - Users list page for DMT Tracker."""
+"""DMT - Issue Tracker list page."""
 
 from __future__ import annotations
 
 from typing import Any, Callable
 
 from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QAction, QCursor, QShowEvent
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -14,12 +14,11 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from core.api import api_delete_dmt_user, api_get_all_dmt_users
+from core.api import api_delete_issue_tracker, api_get_all_issue_trackers
 from core.app_preferences import format_datetime_display, is_datetime_field
 from core.user_context import get_user_profile
 from ui.auto_hide_message import show_auto_hiding_message
@@ -35,30 +34,36 @@ from ui.data_table import (
     sync_vertical_header_labels,
 )
 from ui.form_page_styles import (
-    DATA_TABLE_HEADER_FONT_SIZE_PX,
     LIST_PAGE_HEADER_HEIGHT_PX,
     LIST_PAGE_HEADER_LAYOUT_MARGINS,
     LIST_PAGE_HEADER_LAYOUT_SPACING,
     LIST_PAGE_HEADER_STYLESHEET,
 )
 from ui.styles import CONTEXT_MENU_STYLESHEET
-from ui.theme import Theme
 
-_USER_COLUMN_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("User Id", ("userId", "id")),
-    ("First Name", ("firstName", "first_name")),
-    ("Last Name", ("lastName", "last_name")),
-    ("Status", ("status",)),
-    ("Email", ("email",)),
-    ("Mobile", ("mobile", "mobileNumber")),
-    ("Created At", ("createdAt", "created_at")),
+_ISSUE_COLUMN_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Issue Id", ("issueTrackerId", "id")),
+    ("Module", ("moduleName",)),
+    ("Object Name", ("objectName",)),
+    ("Issue Title", ("issueTitle", "title")),
+    ("Description", ("issueDescription", "description")),
+    (
+        "Status",
+        ("statusName", "statusLabel", "status", "dmt_issue_tracker_status", "statusSeq", "status_seq"),
+    ),
+    (
+        "Priority",
+        ("priorityName", "priorityLabel", "priority", "dmt_issue_priority", "prioritySeq", "priority_seq"),
+    ),
+    ("Assigned To", ("assignedToName", "assignedTo")),
     ("Created By", ("createdBy", "created_by")),
-    ("Modified At", ("modifiedAt", "modified_at", "updatedAt", "updated_at")),
+    ("Created At", ("createdAt", "created_at")),
     ("Modified By", ("modifiedBy", "modified_by")),
+    ("Modified At", ("modifiedAt", "modified_at")),
 )
 
 
-def _user_value_for_column(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, str]:
+def _issue_value_for_column(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, str]:
     for key in keys:
         if key in row and row.get(key) is not None:
             return row.get(key), key
@@ -68,22 +73,30 @@ def _user_value_for_column(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[
 def _format_cell(value: Any, key: str = "", key_candidates: tuple[str, ...] = ()) -> str:
     if is_blank_display_value(value):
         return ""
+    if isinstance(value, dict):
+        for k in ("keyValue", "key_value", "name", "label", "displayName"):
+            t = str(value.get(k) or "").strip()
+            if t:
+                return t
+        return ""
     if is_datetime_field(key, key_candidates):
         return format_datetime_display(value)
     return str(value)
 
 
-class DmtUserListPage(QWidget):
+def _issue_id(row: dict[str, Any]) -> Any:
+    return row.get("issueTrackerId") or row.get("id")
+
+
+class DmtIssueTrackerListPage(QWidget):
     def __init__(
         self,
         on_create_clicked: Callable[[], None] | None = None,
         on_edit_clicked: Callable[[dict[str, Any], bool], None] | None = None,
-        on_copy_app_users_clicked: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self.on_create_clicked = on_create_clicked
         self.on_edit_clicked = on_edit_clicked
-        self.on_copy_app_users_clicked = on_copy_app_users_clicked
         self._source_rows: list[dict[str, Any]] = []
         self._filter_visible = False
         self._filter_apply_timer = QTimer(self)
@@ -96,13 +109,14 @@ class DmtUserListPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
         header = QWidget()
         header.setStyleSheet(LIST_PAGE_HEADER_STYLESHEET)
         header.setFixedHeight(LIST_PAGE_HEADER_HEIGHT_PX)
         hl = QHBoxLayout(header)
         hl.setContentsMargins(*LIST_PAGE_HEADER_LAYOUT_MARGINS)
         hl.setSpacing(LIST_PAGE_HEADER_LAYOUT_SPACING)
-        hl.addWidget(QLabel("DMT - Users"))
+        hl.addWidget(QLabel("DMT - Issue Tracker"))
         hl.addStretch()
         refresh_btn = QPushButton("Refresh")
         refresh_btn.setFixedWidth(100)
@@ -120,38 +134,6 @@ class DmtUserListPage(QWidget):
         create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         create_btn.clicked.connect(lambda: self.on_create_clicked() if self.on_create_clicked else None)
         hl.addWidget(create_btn)
-        self._more_btn = QToolButton()
-        self._more_btn.setText("☰")
-        self._more_btn.setFixedWidth(34)
-        self._more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._more_btn.setStyleSheet(
-            "QToolButton {"
-            f" color: {Theme.PANEL_TEXT_BRIGHT};"
-            " font-size: 16px; font-weight: 700; padding-bottom: 2px;"
-            " border: none; background: transparent; }"
-            f"QToolButton:hover {{ background: {Theme.HEADER_ACCENT_HOVER}; }}"
-            f"QToolButton:pressed {{ background: {Theme.HEADER_ACCENT_PRESSED}; }}"
-        )
-        more_menu = QMenu(self._more_btn)
-        more_menu.setStyleSheet(
-            "QMenu {"
-            " background: #f8fafc; color: #475569;"
-            " border: 1px solid #cbd5e1;"
-            " border-radius: 0px; padding: 0px; }"
-            "QMenu::item {"
-            " background: #f8fafc; color: #475569;"
-            f" font-size: {DATA_TABLE_HEADER_FONT_SIZE_PX}px; font-weight: 600;"
-            " padding: 3px 6px; margin: 0px; border: none;"
-            " border-bottom: 2px solid #e2e8f0; border-right: 1px solid #cbd5e1; }"
-            "QMenu::item:selected { background: #f8fafc; color: #475569; }"
-            "QMenu::item:pressed { background: #f8fafc; color: #475569; }"
-        )
-        copy_action = QAction("Copy app_users", self._more_btn)
-        copy_action.triggered.connect(self._on_copy_app_users_clicked)
-        more_menu.addAction(copy_action)
-        self._more_btn.setMenu(more_menu)
-        hl.addWidget(self._more_btn)
         layout.addWidget(header)
 
         content = QWidget()
@@ -182,9 +164,9 @@ class DmtUserListPage(QWidget):
         return filter_dict_rows_by_column_edits(
             self._source_rows,
             self.table,
-            list(_USER_COLUMN_SPEC),
+            list(_ISSUE_COLUMN_SPEC),
             self._filter_visible,
-            _user_value_for_column,
+            _issue_value_for_column,
             _format_cell,
         )
 
@@ -201,8 +183,8 @@ class DmtUserListPage(QWidget):
             install_filter_row(self.table, self.table.columnCount(), on_text_changed=self._schedule_filter_apply)
         for r, row in enumerate(rows):
             tr = off + r
-            for col, (_, keys) in enumerate(_USER_COLUMN_SPEC):
-                value, key_used = _user_value_for_column(row, keys)
+            for col, (_, keys) in enumerate(_ISSUE_COLUMN_SPEC):
+                value, key_used = _issue_value_for_column(row, keys)
                 item = QTableWidgetItem(_format_cell(value, key_used, keys))
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if col == 0:
@@ -211,15 +193,15 @@ class DmtUserListPage(QWidget):
         sync_vertical_header_labels(self.table, filter_visible=self._filter_visible, data_row_count=len(rows))
         resize_data_table_columns_to_content(
             self.table,
-            list(_USER_COLUMN_SPEC),
+            list(_ISSUE_COLUMN_SPEC),
             self._source_rows,
-            _user_value_for_column,
+            _issue_value_for_column,
             _format_cell,
         )
         self.table.setSortingEnabled(not self._filter_visible)
 
     def _apply_column_filters_refresh(self) -> None:
-        if not self._filter_visible or not self._source_rows:
+        if not self._filter_visible:
             return
         self._write_data_rows(self._filtered_source_rows())
 
@@ -241,69 +223,59 @@ class DmtUserListPage(QWidget):
         self.table.setRowCount(0)
         self.table.setColumnCount(0)
 
-    def _get_user_at_row(self, row: int) -> dict[str, Any] | None:
+    def _get_issue_at_row(self, row: int) -> dict[str, Any] | None:
         if row < self._data_row_offset() or row >= self.table.rowCount():
             return None
         item = self.table.item(row, 0)
         data = item.data(Qt.ItemDataRole.UserRole) if item else None
         return data if isinstance(data, dict) else None
 
-    def _user_at_pos(self, pos: QPoint) -> dict[str, Any] | None:
+    def _issue_at_pos(self, pos: QPoint) -> dict[str, Any] | None:
         idx = self.table.indexAt(pos)
         if idx.isValid():
-            return self._get_user_at_row(idx.row())
+            return self._get_issue_at_row(idx.row())
         item = self.table.itemAt(pos)
         if item:
-            return self._get_user_at_row(item.row())
+            return self._get_issue_at_row(item.row())
         return None
 
     def _on_context_menu(self, pos: QPoint) -> None:
-        user = self._user_at_pos(pos)
+        issue = self._issue_at_pos(pos)
         menu = QMenu(self)
         menu.setStyleSheet(CONTEXT_MENU_STYLESHEET)
-        add_action = menu.addAction("Add User")
-        display_action = menu.addAction("Display User")
-        edit_action = menu.addAction("Edit User")
-        delete_action = menu.addAction("Delete User")
-        display_action.setEnabled(user is not None and self.on_edit_clicked is not None)
-        edit_action.setEnabled(user is not None and self.on_edit_clicked is not None)
-        delete_action.setEnabled(user is not None)
+        add_action = menu.addAction("Add Issue")
+        display_action = menu.addAction("Display Issue")
+        edit_action = menu.addAction("Edit Issue")
+        delete_action = menu.addAction("Delete Issue")
+        display_action.setEnabled(issue is not None and self.on_edit_clicked is not None)
+        edit_action.setEnabled(issue is not None and self.on_edit_clicked is not None)
+        delete_action.setEnabled(issue is not None)
         action = menu.exec(QCursor.pos())
         if action == add_action and self.on_create_clicked:
             self.on_create_clicked()
-        elif action == display_action and user is not None and self.on_edit_clicked:
-            self.on_edit_clicked(user, False)
-        elif action == edit_action and user is not None and self.on_edit_clicked:
-            self.on_edit_clicked(user, True)
-        elif action == delete_action and user is not None:
-            self._handle_delete_user(user)
+        elif action == display_action and issue is not None and self.on_edit_clicked:
+            self.on_edit_clicked(issue, False)
+        elif action == edit_action and issue is not None and self.on_edit_clicked:
+            self.on_edit_clicked(issue, True)
+        elif action == delete_action and issue is not None:
+            self._handle_delete_issue(issue)
 
-    def _on_row_double_clicked(self, item: QTableWidgetItem) -> None:
-        if item.row() < self._data_row_offset():
+    def _handle_delete_issue(self, issue: dict[str, Any]) -> None:
+        iid = _issue_id(issue)
+        if iid is None:
+            show_auto_hiding_message(self, self._message_label, "Cannot delete: Issue ID is missing.", error=True)
             return
-        user = self._get_user_at_row(item.row())
-        if user is not None and self.on_edit_clicked:
-            self.on_edit_clicked(user, False)
-
-    def _handle_delete_user(self, user: dict[str, Any]) -> None:
-        uid = user.get("userId") or user.get("id")
-        if uid is None:
-            show_auto_hiding_message(self, self._message_label, "Cannot delete: User ID is missing.", error=True)
-            return
-        fn = str(user.get("firstName") or user.get("first_name") or "").strip()
-        ln = str(user.get("lastName") or user.get("last_name") or "").strip()
-        name = (f"{fn} {ln}".strip() or user.get("userName") or user.get("name") or "this user")
+        title = str(issue.get("issueTitle") or issue.get("title") or "this issue")
         reply = QMessageBox.question(
             self,
-            "Delete User",
-            f"Are you sure you want to delete '{name}'?",
+            "Delete Issue",
+            f"Are you sure you want to delete '{title}'?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        token = self._token()
-        result = api_delete_dmt_user(uid, token=token)
+        result = api_delete_issue_tracker(iid, token=self._token())
         show_auto_hiding_message(
             self,
             self._message_label,
@@ -323,34 +295,36 @@ class DmtUserListPage(QWidget):
         )
         return str(token) if token else None
 
-    def _load_users(self) -> None:
-        result = api_get_all_dmt_users(token=self._token())
+    def _load_issues(self) -> None:
+        result = api_get_all_issue_trackers(token=self._token())
         if not result.get("success"):
             self._show_empty_table()
             show_auto_hiding_message(
                 self,
                 self._message_label,
-                str(result.get("message") or "Failed to load DMT users."),
+                str(result.get("message") or "Failed to load issue tracker records."),
                 error=True,
             )
             return
         rows = result.get("data") or []
         self._source_rows = [r for r in rows if isinstance(r, dict)]
-        # Keep parity with other list pages: clear stale error banner once data loads.
         show_auto_hiding_message(self, self._message_label, "", error=False)
         self.table.clear()
-        self.table.setColumnCount(len(_USER_COLUMN_SPEC))
-        self.table.setHorizontalHeaderLabels([h for h, _ in _USER_COLUMN_SPEC])
+        self.table.setColumnCount(len(_ISSUE_COLUMN_SPEC))
+        self.table.setHorizontalHeaderLabels([h for h, _ in _ISSUE_COLUMN_SPEC])
         rows_to_show = self._filtered_source_rows() if self._filter_visible else list(self._source_rows)
         self._write_data_rows(rows_to_show)
 
-    def _on_copy_app_users_clicked(self) -> None:
-        if self.on_copy_app_users_clicked:
-            self.on_copy_app_users_clicked()
-
     def refresh(self) -> None:
-        self._load_users()
+        self._load_issues()
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
-        self._load_users()
+        self._load_issues()
+
+    def _on_row_double_clicked(self, item: QTableWidgetItem) -> None:
+        if item.row() < self._data_row_offset():
+            return
+        issue = self._get_issue_at_row(item.row())
+        if issue is not None and self.on_edit_clicked:
+            self.on_edit_clicked(issue, False)

@@ -32,14 +32,7 @@ from app.org_management.bu.bu_utils import (
     get_parent_bu_id_from_bu,
     get_parent_bu_name_from_bu,
 )
-from core.api import (
-    api_get_all_bu,
-    api_get_all_orgs,
-    api_get_master_key_by_app_id_field_name,
-    api_update_bu,
-    master_key_row_display_label,
-    master_key_row_seq_value,
-)
+from core.api import api_get_all_bu, api_get_all_orgs, api_update_bu, master_key_row_seq_value
 from core.app_preferences import format_datetime_display, is_datetime_field
 from ui.blank_display import is_blank_display_value
 from core.user_context import get_user_profile
@@ -62,6 +55,16 @@ from ui.form_page_styles import (
     placeholder_search_select,
 )
 from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
+from ui.searchable_form_combo import (
+    combo_resolved_master_key_seq,
+    master_key_invalid_typed_text,
+    master_key_seq_for_payload,
+    require_master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    reset_searchable_combo,
+    set_searchable_combo_by_user_data,
+    wire_searchable_master_key_combo,
+)
 from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
@@ -162,9 +165,9 @@ def _bu_status_seq(bu: dict[str, Any]) -> Any | None:
 
 
 def _combo_status_key_value(combo: QComboBox) -> str:
-    if combo.currentIndex() <= 0 or combo.itemData(combo.currentIndex()) is None:
+    t = (combo.currentText() or "").strip()
+    if not t:
         return ""
-    t = combo.currentText().strip()
     if " | " in t:
         return t.split(" | ", 1)[-1].strip().upper()
     return t.upper()
@@ -173,10 +176,8 @@ def _combo_status_key_value(combo: QComboBox) -> str:
 _BU_COL1 = (
     ("BU Id", ("buId", "bu_id", "id")),
     ("BU Name*", ("buName", "bu_name")),
-    ("Organization Id", ("organizationId", "organization_id", "orgId")),
-    ("Organization Name*", ("organizationName", "organization_name", "orgName", "org_name")),
-    ("Parent BU Id", ("parentBu", "parent_bu", "parentBuId", "parent_bu_id")),
-    ("Parent BU Name", ("parentBuName", "parent_bu_name", "parentName", "parent_name")),
+    ("Organization*", ("organizationName", "organization_name", "orgName", "org_name")),
+    ("Parent BU", ("parentBuName", "parent_bu_name", "parentName", "parent_name")),
     ("Status*", ("status",)),
 )
 _BU_COL2 = (
@@ -189,15 +190,13 @@ _BU_FIELD_GROUPS = _BU_COL1 + _BU_COL2
 
 _READONLY_KEYS = frozenset({
     "buId", "bu_id", "id",
-    "organizationId", "organization_id", "orgId",
-    "parentBu", "parent_bu", "parentBuId", "parent_bu_id",
     "createdBy", "created_by", "createdOn", "created_on", "createdAt", "created_at",
     "modifiedBy", "modified_by", "modifiedOn", "modified_on", "modifiedAt", "modified_at", "updatedAt", "updated_at",
 })
 
 
 class ViewBuPage(QWidget):
-    """Display business unit details; editable organizationId, buName, parentBu."""
+    """Display business unit details; editable organization (search), buName, parent BU (search)."""
 
     def __init__(
         self,
@@ -273,6 +272,7 @@ class ViewBuPage(QWidget):
                 apply_form_combobox_field(
                     value_edit, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX, min_width=240
                 )
+                wire_searchable_master_key_combo(value_edit, search_field_label="Status")
                 if canonical in _READONLY_KEYS:
                     value_edit.setEnabled(False)
                 else:
@@ -289,13 +289,11 @@ class ViewBuPage(QWidget):
             value_edit.setStyleSheet(READONLY_INPUT_STYLE if canonical in _READONLY_KEYS else INPUT_STYLE)
             if canonical in ("organizationName", "parentBuName"):
                 if canonical == "organizationName":
-                    value_edit.setPlaceholderText(placeholder_search_select("orgID", "orgName"))
-                    value_edit.textChanged.connect(self._on_organization_name_changed)
+                    value_edit.setPlaceholderText(placeholder_search_select("Org Id", "Org Name"))
                 else:
                     value_edit.setPlaceholderText(
                         placeholder_search_select("BU Id", "BU Name", "Org Name")
                     )
-                    value_edit.textChanged.connect(self._on_parent_name_changed)
                 completer = QCompleter(value_edit)
                 completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
                 completer.setFilterMode(Qt.MatchFlag.MatchContains)
@@ -396,12 +394,19 @@ class ViewBuPage(QWidget):
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
-        if self.is_edit_mode():
+        if not self._bu:
             return
+        self._load_organization_options()
+        self._load_parent_bu_options()
         combo = self._field_edits.get("status")
         if isinstance(combo, QComboBox):
-            self._populate_master_key_seq_combo(combo, _BU_STATUS_FIELD_NAME, "Select status…")
-            self._sync_status_combo_from_bu()
+            populate_master_key_by_field_name(
+                combo,
+                _BU_STATUS_FIELD_NAME,
+                token=self._token(),
+                include_placeholder=False,
+            )
+        self._refresh_values()
 
     def _token(self) -> str | None:
         profile = get_user_profile()
@@ -413,65 +418,27 @@ class ViewBuPage(QWidget):
         )
         return str(token) if token else None
 
-    def _populate_master_key_seq_combo(
-        self,
-        combo: QComboBox | None,
-        field_name: str,
-        placeholder: str,
-    ) -> None:
-        if combo is None:
-            return
-        result = api_get_master_key_by_app_id_field_name(
-            field_name=field_name,
-            token=self._token(),
-        )
-        rows = result.get("data") if result.get("success") else []
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem(placeholder, None)
-        if isinstance(rows, list):
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                seq_val = master_key_row_seq_value(row)
-                if seq_val is None:
-                    continue
-                label = master_key_row_display_label(row).strip()
-                if not label:
-                    continue
-                combo.addItem(label, seq_val)
-        combo.setCurrentIndex(0)
-        combo.blockSignals(False)
-
     def _sync_status_combo_from_bu(self) -> None:
         combo = self._field_edits.get("status")
         if not isinstance(combo, QComboBox) or combo.count() == 0:
             return
         seq = _bu_status_seq(self._bu)
         if seq is not None:
-            for i in range(combo.count()):
-                data = combo.itemData(i)
-                if data is None:
-                    continue
-                try:
-                    if int(data) == int(seq):  # type: ignore[arg-type]
-                        combo.setCurrentIndex(i)
-                        return
-                except (TypeError, ValueError):
-                    if str(data).strip() == str(seq).strip():
-                        combo.setCurrentIndex(i)
-                        return
+            set_searchable_combo_by_user_data(combo, seq)
+            if combo_resolved_master_key_seq(combo) is not None:
+                return
         kv = _get_value(self._bu, ("status",))
         if kv is not None and str(kv).strip():
             kv_up = str(kv).strip().upper()
             for i in range(combo.count()):
-                if combo.itemData(i) is None:
+                data = combo.itemData(i)
+                if data is None:
                     continue
                 label_up = combo.itemText(i).strip().upper()
                 if kv_up == label_up or kv_up in label_up or label_up.endswith(kv_up) or f"| {kv_up}" in label_up:
-                    combo.setCurrentIndex(i)
+                    set_searchable_combo_by_user_data(combo, data)
                     return
-        combo.setCurrentIndex(0)
+        reset_searchable_combo(combo)
 
     def set_bu(self, bu: dict[str, Any] | None, *, edit_mode: bool = False) -> None:
         self._bu = dict(bu) if bu else {}
@@ -479,7 +446,12 @@ class ViewBuPage(QWidget):
         self._load_parent_bu_options()
         combo = self._field_edits.get("status")
         if isinstance(combo, QComboBox):
-            self._populate_master_key_seq_combo(combo, _BU_STATUS_FIELD_NAME, "Select status…")
+            populate_master_key_by_field_name(
+                combo,
+                _BU_STATUS_FIELD_NAME,
+                token=self._token(),
+                include_placeholder=False,
+            )
         self._refresh_values()
         if edit_mode and self._bu:
             self._handle_edit()
@@ -547,16 +519,13 @@ class ViewBuPage(QWidget):
                 org_combo.setText(name)
             else:
                 org_combo.clear()
-            self._set_id_field("organizationId", None)
             return
         target_str = str(target).strip()
         for disp, oid in self._org_completions:
             if str(oid).strip() == target_str:
                 org_combo.setText(disp)
-                self._set_id_field("organizationId", oid)
                 return
         org_combo.setText(target_str)
-        self._set_id_field("organizationId", target)
 
     def _load_parent_bu_options(self) -> None:
         parent_combo = self._field_edits.get("parentBuName")
@@ -605,52 +574,13 @@ class ViewBuPage(QWidget):
                 parent_combo.setText(target_name)
             else:
                 parent_combo.clear()
-            self._set_id_field("parentBu", None)
             return
         target_str = str(target).strip()
         for disp, bid in self._parent_bu_completions:
             if str(bid).strip() == target_str:
                 parent_combo.setText(disp)
-                self._set_id_field("parentBu", bid)
                 return
         parent_combo.setText(target_str)
-        self._set_id_field("parentBu", target)
-
-    def _set_id_field(self, key: str, value: Any) -> None:
-        edit = self._field_edits.get(key)
-        if isinstance(edit, QLineEdit):
-            if value is None and key in ("organizationId", "parentBu"):
-                edit.clear()
-            else:
-                edit.setText("" if value is None else str(value))
-
-    def _on_organization_name_changed(self, _text: str) -> None:
-        edit = self._field_edits.get("organizationName")
-        if not isinstance(edit, QLineEdit):
-            return
-        text = edit.text().strip()
-        if not text:
-            self._set_id_field("organizationId", None)
-            return
-        for disp, oid in self._org_completions:
-            if disp == text:
-                self._set_id_field("organizationId", oid)
-                return
-        self._set_id_field("organizationId", None)
-
-    def _on_parent_name_changed(self, _text: str) -> None:
-        edit = self._field_edits.get("parentBuName")
-        if not isinstance(edit, QLineEdit):
-            return
-        text = edit.text().strip()
-        if not text:
-            self._set_id_field("parentBu", None)
-            return
-        for disp, bid in self._parent_bu_completions:
-            if disp == text:
-                self._set_id_field("parentBu", bid)
-                return
-        self._set_id_field("parentBu", None)
 
     def _is_valid_org_selection(self) -> bool:
         edit = self._field_edits.get("organizationName")
@@ -785,18 +715,8 @@ class ViewBuPage(QWidget):
                 if not isinstance(combo, QComboBox):
                     continue
                 orig_seq = _bu_status_seq(self._bu)
-                cur_data = combo.currentData()
-                if orig_seq is not None and cur_data is not None:
-                    try:
-                        if int(orig_seq) != int(cur_data):  # type: ignore[arg-type]
-                            return True
-                    except (TypeError, ValueError):
-                        if str(orig_seq).strip() != str(cur_data).strip():
-                            return True
-                    continue
-                orig_kv = str(_get_value(self._bu, ("status",)) or "").strip().upper()
-                cur_kv = _combo_status_key_value(combo)
-                if orig_kv != cur_kv:
+                cur_seq = combo_resolved_master_key_seq(combo)
+                if str(orig_seq or "").strip() != str(cur_seq or "").strip():
                     return True
                 continue
             orig_str = self._original_display_for_editable(canonical, keys)
@@ -829,10 +749,7 @@ class ViewBuPage(QWidget):
             return
         organization_id = self._resolve_organization_id_from_ui()
         if organization_id is None:
-            self._show_error("Please select an organization from Organization field.")
-            return
-        if organization_id is None or str(organization_id).strip() == "":
-            self._show_error("Organization Id is invalid.")
+            self._show_error("Please select a valid organization from the list.")
             return
 
         parent_text = self._get_edit_value("parentBuName", "parent_bu_name", "parentName", "parent_name")
@@ -843,14 +760,11 @@ class ViewBuPage(QWidget):
 
         status_combo = self._field_edits.get("status")
         if isinstance(status_combo, QComboBox):
-            if status_combo.currentIndex() <= 0 or status_combo.currentData() is None:
-                self._show_error("Status is required.")
-                status_combo.setFocus()
-                return
-            try:
-                status_val = _coerce_master_seq_to_int(status_combo.currentData())
-            except ValueError:
-                self._show_error("Status must be a valid selection.")
+            status_val, status_err = require_master_key_seq_for_payload(
+                status_combo, field_caption="Status", strict_phrase="a status"
+            )
+            if status_err:
+                self._show_error(status_err)
                 status_combo.setFocus()
                 return
         else:

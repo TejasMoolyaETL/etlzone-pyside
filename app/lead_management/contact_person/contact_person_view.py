@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QStackedWidget,
@@ -20,11 +21,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.api import (
-    api_get_master_key_by_app_id_field_name,
-    api_update_contact_person,
-    master_key_row_display_label,
-    master_key_row_seq_value,
+from core.api import api_update_contact_person, master_key_row_seq_value
+from core.world_locations_catalog import (
+    geo_triple_from_company_record,
+    load_world_locations_index,
+    world_locations_available,
 )
 from core.nav_access import collect_allowed_action_names, nav_action_visible
 from core.user_context import get_nav_access_steps, get_user_profile
@@ -46,10 +47,42 @@ from ui.form_page_styles import (
     LIST_PAGE_HEADER_LAYOUT_SPACING,
     placeholder_example,
 )
-from ui.post_save_navigation import schedule_after_success
+from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
+from ui.searchable_form_combo import (
+    combo_resolved_item_data,
+    combo_resolved_master_key_seq,
+    master_key_invalid_typed_text,
+    master_key_seq_for_payload,
+    reference_id_for_payload,
+    require_master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    reset_searchable_combo,
+    set_searchable_combo_by_user_data,
+    wire_searchable_labeled_rows_combo,
+    wire_searchable_master_key_combo,
+)
+from ui.world_location_cascade import (
+    apply_world_location_selection,
+    clear_world_location_inline_error,
+    ensure_world_locations_cascade,
+)
+from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
 _EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+
+
+def _coerce_master_seq_to_int(seq_val: Any) -> int:
+    if isinstance(seq_val, bool):
+        return int(seq_val)
+    if isinstance(seq_val, int):
+        return seq_val
+    if isinstance(seq_val, float) and seq_val == int(seq_val):
+        return int(seq_val)
+    s = str(seq_val).strip()
+    if s.isdigit():
+        return int(s)
+    raise ValueError(f"Not a whole number: {seq_val!r}")
 
 # Master-key ``fieldName`` for ``api/master-setup/master-config/get-by-field-name``.
 _MK_FIELD_NAME_BY_UI_KEY: dict[str, str] = {
@@ -58,6 +91,14 @@ _MK_FIELD_NAME_BY_UI_KEY: dict[str, str] = {
     "state": "state",
     "city": "city",
     "status": "lead_contact_person_status",
+}
+
+_MK_SEARCH_LABEL_BY_UI_KEY: dict[str, str] = {
+    "position": "Position",
+    "country": "Country",
+    "state": "State",
+    "city": "City",
+    "status": "Status",
 }
 
 _MK_COMBO_KEYS: frozenset[str] = frozenset(_MK_FIELD_NAME_BY_UI_KEY.keys())
@@ -160,6 +201,8 @@ class ViewContactPersonPage(QWidget):
         self._mobile_country: QComboBox | None = None
         self._mobile_number: QLineEdit | None = None
         self._hierarchy_combo: QComboBox | None = None
+        self._world_locations_mode = False
+        self._world_geo_baseline: tuple[str | None, str | None, str | None] = (None, None, None)
         self._build_ui()
 
     @staticmethod
@@ -249,9 +292,12 @@ class ViewContactPersonPage(QWidget):
             elif k == "hierarchy":
                 combo = QComboBox()
                 apply_form_combobox_field(combo, height_px=fh, min_width=120)
-                for n in range(1, 21):
-                    combo.addItem(str(n), n)
-                combo.setCurrentIndex(0)
+                wire_searchable_labeled_rows_combo(
+                    combo,
+                    rows=[(str(n), n) for n in range(1, 21)],
+                    search_field_label="Hierarchy",
+                    default_display_text="1",
+                )
                 self._hierarchy_combo = combo
                 grid.addWidget(labeled_field_block(field_caption_label(label, LABEL_STYLE), combo), r, c)
             elif k in _MK_COMBO_KEYS:
@@ -259,6 +305,9 @@ class ViewContactPersonPage(QWidget):
                 combo.setMinimumWidth(240)
                 combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
                 apply_form_combobox_field(combo, height_px=fh)
+                wire_searchable_master_key_combo(
+                    combo, search_field_label=_MK_SEARCH_LABEL_BY_UI_KEY.get(k, k.title())
+                )
                 self._mk_combo_by_key[k] = combo
                 grid.addWidget(labeled_field_block(field_caption_label(label, LABEL_STYLE), combo), r, c)
             else:
@@ -290,6 +339,15 @@ class ViewContactPersonPage(QWidget):
         cl.addLayout(basic_grid)
         cl.addSpacing(4)
         cl.addLayout(contact_grid)
+        self._location_hint_label = QLabel()
+        self._location_hint_label.setStyleSheet(FORM_ERROR_LABEL_STYLE)
+        self._location_hint_label.setWordWrap(True)
+        self._location_hint_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        self._location_hint_label.setVisible(False)
+        cl.addWidget(self._location_hint_label)
         cl.addSpacing(4)
         cl.addLayout(additional_grid)
         self._error = QLabel()
@@ -349,44 +407,60 @@ class ViewContactPersonPage(QWidget):
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         self._refresh_edit_action_access()
+        self._repopulate_master_and_world()
         for ui_key in _MK_COMBO_KEYS:
-            self._populate_mk_combo(ui_key)
-        for ui_key in _MK_COMBO_KEYS:
+            if self._world_locations_mode and ui_key in ("country", "state", "city"):
+                continue
             self._apply_mk_combo_from_record(ui_key)
+
+    def _repopulate_master_and_world(self) -> None:
+        self._world_locations_mode = world_locations_available()
+        idx = load_world_locations_index() if self._world_locations_mode else None
+        if self._world_locations_mode and idx is None:
+            self._world_locations_mode = False
+            idx = None
+        for ui_key in _MK_COMBO_KEYS:
+            if self._world_locations_mode and ui_key in ("country", "state", "city"):
+                continue
+            self._populate_mk_combo(ui_key)
+        if self._world_locations_mode and idx is not None:
+            cc = self._mk_combo_by_key.get("country")
+            st = self._mk_combo_by_key.get("state")
+            ci = self._mk_combo_by_key.get("city")
+            if cc is not None and st is not None and ci is not None:
+                ensure_world_locations_cascade(
+                    cc,
+                    st,
+                    ci,
+                    inline_error_label=self._location_hint_label,
+                )
+                gc, gs, gci = geo_triple_from_company_record(self._record, index=idx)
+                self._world_geo_baseline = (gc, gs, gci)
+                apply_world_location_selection(
+                    cc,
+                    st,
+                    ci,
+                    country_iso=gc,
+                    state_code=gs,
+                    city_geoname_id=gci,
+                    index=idx,
+                )
+            else:
+                self._world_geo_baseline = (None, None, None)
+        else:
+            self._world_geo_baseline = (None, None, None)
 
     def _populate_mk_combo(self, ui_key: str) -> None:
         combo = self._mk_combo_by_key.get(ui_key)
         if combo is None:
             return
         field_name = _MK_FIELD_NAME_BY_UI_KEY[ui_key]
-        result = api_get_master_key_by_app_id_field_name(
-            field_name=field_name,
+        populate_master_key_by_field_name(
+            combo,
+            field_name,
             token=self._token(),
+            include_placeholder=False,
         )
-        rows = result.get("data") if result.get("success") else []
-        prev_seq = combo.currentData() if combo.currentIndex() > 0 else None
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem(f"Select {ui_key}…", None)
-        if isinstance(rows, list):
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                seq_val = master_key_row_seq_value(row)
-                if seq_val is None:
-                    continue
-                label = master_key_row_display_label(row).strip()
-                if not label:
-                    continue
-                combo.addItem(label, seq_val)
-        if prev_seq is not None:
-            idx = combo.findData(prev_seq)
-            if idx < 0 and isinstance(prev_seq, int):
-                idx = combo.findData(str(prev_seq))
-            combo.setCurrentIndex(idx if idx >= 0 else 0)
-        else:
-            combo.setCurrentIndex(0)
-        combo.blockSignals(False)
 
     def _apply_mk_combo_from_record(self, ui_key: str) -> None:
         combo = self._mk_combo_by_key.get(ui_key)
@@ -395,12 +469,9 @@ class ViewContactPersonPage(QWidget):
         keys = _DISPLAY_KEYS.get(ui_key, (ui_key,))
         seq = _master_seq_from_record(self._record, keys)
         if seq is None:
-            combo.setCurrentIndex(0)
+            reset_searchable_combo(combo)
             return
-        idx = combo.findData(seq)
-        if idx < 0 and isinstance(seq, int):
-            idx = combo.findData(str(seq))
-        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        set_searchable_combo_by_user_data(combo, seq)
 
     def _update_email_style(self, widget: QLineEdit, text: str) -> None:
         base = (
@@ -454,6 +525,8 @@ class ViewContactPersonPage(QWidget):
                     else:
                         self._hierarchy_combo.setCurrentIndex(0)
             elif k in _MK_COMBO_KEYS:
+                if self._world_locations_mode and k in ("country", "state", "city"):
+                    continue
                 self._apply_mk_combo_from_record(k)
             else:
                 keys = _DISPLAY_KEYS.get(k, (k,))
@@ -462,8 +535,7 @@ class ViewContactPersonPage(QWidget):
     def set_contact_person(self, rec: dict[str, Any] | None, *, edit_mode: bool = False) -> None:
         self._record = dict(rec) if rec else {}
         self._refresh_edit_action_access()
-        for ui_key in _MK_COMBO_KEYS:
-            self._populate_mk_combo(ui_key)
+        self._repopulate_master_and_world()
         self._apply_record_to_edits()
         if edit_mode and self._record and self._can_edit_action:
             self._handle_edit()
@@ -500,13 +572,16 @@ class ViewContactPersonPage(QWidget):
             else:
                 self._line_edits[k].setReadOnly(True)
                 self._line_edits[k].setStyleSheet(READONLY_INPUT_STYLE)
+        cmb = self._mk_combo_by_key.get("country")
+        if cmb is not None:
+            clear_world_location_inline_error(cmb)
         self._btn_stack.setCurrentIndex(0)
 
     def is_edit_mode(self) -> bool:
         return self._btn_stack.currentIndex() == 1
 
     def _show_error(self, m: str) -> None:
-        show_auto_hiding_message(self, self._error, m, error=True)
+        show_auto_hiding_message(self, self._error, m, error=True, clear_on_user_activity=False)
 
     def _show_success(self, m: str) -> None:
         show_auto_hiding_message(self, self._error, m, error=False)
@@ -515,6 +590,9 @@ class ViewContactPersonPage(QWidget):
         cancel_auto_hide_message(self, self._error)
         self._error.setText("")
         self._error.setVisible(False)
+        cmb = self._mk_combo_by_key.get("country")
+        if cmb is not None:
+            clear_world_location_inline_error(cmb)
 
     def _handle_back(self) -> None:
         if self.on_back:
@@ -549,8 +627,87 @@ class ViewContactPersonPage(QWidget):
         self._btn_stack.setCurrentIndex(1)
 
     def _handle_cancel(self) -> None:
-        self._apply_record_to_edits()
-        self._switch_view()
+        if not self._has_unsaved_changes():
+            self._clear_error()
+            self._repopulate_master_and_world()
+            self._apply_record_to_edits()
+            self._switch_view()
+            return
+        reply = QMessageBox.question(
+            self,
+            "Unsaved Changes",
+            "You have unsaved changes. Discard and leave?",
+            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply == QMessageBox.StandardButton.Discard:
+            self._clear_error()
+            self._repopulate_master_and_world()
+            self._apply_record_to_edits()
+            self._switch_view()
+
+    @staticmethod
+    def _norm_geo_part(x: Any) -> str:
+        if x is None:
+            return ""
+        return str(x).strip()
+
+    def _current_world_geo_triple(self) -> tuple[str, str, str]:
+        c = self._mk_combo_by_key.get("country")
+        s = self._mk_combo_by_key.get("state")
+        t = self._mk_combo_by_key.get("city")
+        return (
+            self._norm_geo_part(combo_resolved_item_data(c)),
+            self._norm_geo_part(combo_resolved_item_data(s)),
+            self._norm_geo_part(combo_resolved_item_data(t)),
+        )
+
+    def _baseline_world_geo_triple(self) -> tuple[str, str, str]:
+        a, b, c = self._world_geo_baseline
+        return (self._norm_geo_part(a), self._norm_geo_part(b), self._norm_geo_part(c))
+
+    def _has_unsaved_changes(self) -> bool:
+        if self._world_locations_mode:
+            if self._current_world_geo_triple() != self._baseline_world_geo_triple():
+                return True
+        for k, _, ro in _FIELDS:
+            if ro or k == "contactId":
+                continue
+            if k == "mobile":
+                if self._mobile_number is not None and self._mobile_country is not None:
+                    raw = self._mobile_number.text().strip()
+                    new_m = ""
+                    if raw:
+                        cc = str(self._mobile_country.currentData() or "+91").strip()
+                        new_m = self._full_contact_number(cc, raw)
+                    old_m = _pick_display(self._record, _DISPLAY_KEYS["mobile"])
+                    if new_m != old_m:
+                        return True
+                continue
+            if k == "hierarchy":
+                if self._hierarchy_combo is not None:
+                    cur_h = combo_resolved_master_key_seq(self._hierarchy_combo)
+                    if isinstance(cur_h, int):
+                        rec_hi = self._hierarchy_int_from_record()
+                        effective_rec = 1 if rec_hi is None else rec_hi
+                        if cur_h != effective_rec:
+                            return True
+                continue
+            if k in _MK_COMBO_KEYS:
+                if self._world_locations_mode and k in ("country", "state", "city"):
+                    continue
+                combo = self._mk_combo_by_key.get(k)
+                cur = combo_resolved_master_key_seq(combo) if combo is not None else None
+                prev = _master_seq_from_record(self._record, _DISPLAY_KEYS.get(k, (k,)))
+                if cur != prev:
+                    return True
+                continue
+            keys = _DISPLAY_KEYS.get(k, (k,))
+            current = self._line_edits[k].text().strip()
+            original = _pick_display(self._record, keys)
+            if current != original:
+                return True
+        return False
 
     def _record_person_id(self) -> Any:
         return self._record.get("contactId") or self._record.get("contactPersonId") or self._record.get("id")
@@ -561,21 +718,6 @@ class ViewContactPersonPage(QWidget):
             return None
         s = str(h).strip()
         return int(s) if s.isdigit() else None
-
-    def _require_master_combo_seq(self, combo: QComboBox | None, field_label: str) -> Any | None:
-        """Same rule as :meth:`CreateContactPersonPage._require_master_combo_seq`."""
-        if combo is None or combo.currentIndex() <= 0:
-            self._show_error(f"{field_label} is required.")
-            if combo is not None:
-                combo.setFocus()
-            return None
-        data = combo.currentData()
-        if data is None:
-            self._show_error(f"{field_label} is required.")
-            if combo is not None:
-                combo.setFocus()
-            return None
-        return data
 
     def _handle_save(self) -> None:
         pid = self._record_person_id()
@@ -602,66 +744,155 @@ class ViewContactPersonPage(QWidget):
                     self._mobile_number.setFocus()
                     return
 
-        pos_seq = self._require_master_combo_seq(self._mk_combo_by_key.get("position"), "Position")
-        if pos_seq is None:
+        pos_combo = self._mk_combo_by_key.get("position")
+        pos_id, pos_err = require_master_key_seq_for_payload(
+            pos_combo, field_caption="Position", strict_phrase="a position"
+        )
+        if pos_err:
+            self._show_error(pos_err)
+            if pos_combo is not None:
+                pos_combo.setFocus()
             return
-        country_seq = self._require_master_combo_seq(self._mk_combo_by_key.get("country"), "Country")
-        if country_seq is None:
+        country_combo = self._mk_combo_by_key.get("country")
+        if country_combo is None:
+            self._show_error("Country is required.")
             return
-        state_seq = self._require_master_combo_seq(self._mk_combo_by_key.get("state"), "State")
-        if state_seq is None:
+        state_combo = self._mk_combo_by_key.get("state")
+        city_combo = self._mk_combo_by_key.get("city")
+        if self._world_locations_mode:
+            country_raw = combo_resolved_item_data(country_combo)
+            state_raw = combo_resolved_item_data(state_combo) if state_combo else None
+            city_raw = combo_resolved_item_data(city_combo) if city_combo else None
+        else:
+            country_raw = combo_resolved_master_key_seq(country_combo)
+            state_raw = combo_resolved_master_key_seq(state_combo) if state_combo else None
+            city_raw = combo_resolved_master_key_seq(city_combo) if city_combo else None
+        if country_raw is None or not str(country_raw).strip():
+            typed = (country_combo.currentText() or "").strip()
+            if typed:
+                self._show_error(strict_list_selection_message("a country"))
+            else:
+                self._show_error("Country is required.")
+            country_combo.setFocus()
             return
-        city_seq = self._require_master_combo_seq(self._mk_combo_by_key.get("city"), "City")
-        if city_seq is None:
+        if state_combo is None:
+            self._show_error("State is required.")
             return
-        status_seq = self._require_master_combo_seq(self._mk_combo_by_key.get("status"), "Status")
-        if status_seq is None:
+        if state_raw is None or not str(state_raw).strip():
+            typed = (state_combo.currentText() or "").strip() if state_combo else ""
+            if typed:
+                self._show_error(strict_list_selection_message("a state"))
+            else:
+                self._show_error("State is required.")
+            state_combo.setFocus()
+            return
+        if city_combo is None:
+            self._show_error("City is required.")
+            return
+        if city_raw is None or not str(city_raw).strip():
+            typed = (city_combo.currentText() or "").strip() if city_combo else ""
+            if typed:
+                self._show_error(strict_list_selection_message("a city"))
+            else:
+                self._show_error("City is required.")
+            city_combo.setFocus()
+            return
+        status_combo = self._mk_combo_by_key.get("status")
+        status_id, status_err = require_master_key_seq_for_payload(
+            status_combo, field_caption="Status", strict_phrase="a status"
+        )
+        if status_err:
+            self._show_error(status_err)
+            if status_combo is not None:
+                status_combo.setFocus()
+            return
+        if self._world_locations_mode:
+            s_city = str(city_raw).strip()
+            if not s_city.isdigit():
+                self._show_error("City must be a valid selection from the list.")
+                return
+            idx = load_world_locations_index()
+            if idx is None:
+                self._show_error(
+                    "Location data is unavailable. Run: python scripts/build_world_cities_json.py"
+                )
+                return
+
+        if not self._has_unsaved_changes():
+            navigate_after_no_changes(
+                show_non_error_message=self._show_success,
+                clear_message=self._clear_error,
+                on_back=self.on_back,
+                delay_ms=2000,
+                message="No changes to update.",
+            )
             return
 
-        payload: dict[str, str | int] = {}
-        for k, _, ro in _FIELDS:
-            if ro or k == "contactPersonId" or k in ("mobile", "hierarchy") or k in _MK_COMBO_KEYS:
-                continue
-            v = self._line_edits[k].text().strip()
-            prev = _pick_display(self._record, _DISPLAY_KEYS.get(k, (k,)))
-            if v != prev:
-                payload[k] = v
+        if self._world_locations_mode:
+            idx = load_world_locations_index()
+            if idx is None:
+                self._show_error(
+                    "Location data is unavailable. Run: python scripts/build_world_cities_json.py"
+                )
+                return
+            c_raw, s_raw, ci_raw = self._current_world_geo_triple()
+            s_city = str(ci_raw).strip()
+            api_c, api_s, api_ci = idx.display_names_for_api(
+                str(c_raw).strip().upper(),
+                str(s_raw).strip(),
+                s_city,
+            )
+            payload: dict[str, str | int] = {
+                "name": name,
+                "position": pos_id,
+                "country": api_c,
+                "state": api_s,
+                "city": api_ci,
+                "status": status_id,
+            }
+        else:
+            try:
+                country_id = _coerce_master_seq_to_int(country_raw)
+                state_id = _coerce_master_seq_to_int(state_raw)
+                city_id = _coerce_master_seq_to_int(city_raw)
+            except ValueError:
+                self._show_error("Country, city, state, position, and status must be valid selections.")
+                return
+            payload = {
+                "name": name,
+                "position": pos_id,
+                "country": country_id,
+                "state": state_id,
+                "city": city_id,
+                "status": status_id,
+            }
 
-        for mk_key in _MK_COMBO_KEYS:
-            combo = self._mk_combo_by_key.get(mk_key)
-            if combo is None or combo.currentIndex() <= 0:
-                continue
-            cur = combo.currentData()
-            prev = _master_seq_from_record(self._record, _DISPLAY_KEYS.get(mk_key, (mk_key,)))
-            if cur != prev:
-                payload[mk_key] = cur
+        if em:
+            payload["email"] = em
+        url_val = self._line_edits["url"].text().strip()
+        if url_val:
+            payload["url"] = url_val
 
         if self._mobile_number is not None and self._mobile_country is not None:
             raw = self._mobile_number.text().strip()
-            new_m = ""
             if raw:
                 cc = str(self._mobile_country.currentData() or "+91").strip()
-                new_m = self._full_contact_number(cc, raw)
-            old_m = _pick_display(self._record, _DISPLAY_KEYS["mobile"])
-            if new_m and new_m != old_m:
-                payload["mobile"] = new_m
+                payload["mobile"] = self._full_contact_number(cc, raw)
 
         if self._hierarchy_combo is not None:
-            cur_h = self._hierarchy_combo.currentData()
-            if isinstance(cur_h, int):
-                rec_hi = self._hierarchy_int_from_record()
-                effective_rec = 1 if rec_hi is None else rec_hi
-                if cur_h != effective_rec:
-                    payload["hierarchy"] = cur_h
+            hier = reference_id_for_payload(self._hierarchy_combo)
+            if hier is not None:
+                payload["hierarchy"] = hier
 
-        if not payload:
-            self._show_error("No changes to update.")
-            return
         res = api_update_contact_person(pid, payload, token=self._token())
         if not res.get("success"):
             self._show_error(str(res.get("message") or "Failed to update contact person."))
             return
         self._record.update(payload)
+        if self._world_locations_mode:
+            widx = load_world_locations_index()
+            if widx is not None:
+                self._world_geo_baseline = geo_triple_from_company_record(self._record, index=widx)
         self._apply_record_to_edits()
         self._switch_view()
         self._show_success(str(res.get("message") or "Contact person updated successfully."))

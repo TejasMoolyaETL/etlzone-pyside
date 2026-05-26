@@ -29,14 +29,7 @@ from app.org_management.bu.bu_utils import (
     get_bu_name,
     get_organization_name_from_bu,
 )
-from core.api import (
-    api_get_all_bu,
-    api_get_all_depts,
-    api_get_master_key_by_app_id_field_name,
-    api_update_dept,
-    master_key_row_display_label,
-    master_key_row_seq_value,
-)
+from core.api import api_get_all_bu, api_get_all_depts, api_update_dept, master_key_row_seq_value
 from core.app_preferences import format_datetime_display, is_datetime_field
 from ui.blank_display import is_blank_display_value
 from core.user_context import get_user_profile
@@ -58,6 +51,16 @@ from ui.form_page_styles import (
     placeholder_search_select,
 )
 from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
+from ui.searchable_form_combo import (
+    combo_resolved_master_key_seq,
+    master_key_invalid_typed_text,
+    master_key_seq_for_payload,
+    require_master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    reset_searchable_combo,
+    set_searchable_combo_by_user_data,
+    wire_searchable_master_key_combo,
+)
 from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
@@ -100,9 +103,9 @@ def _dept_status_seq(dept: dict[str, Any]) -> Any | None:
 
 def _combo_status_key_value(combo: QComboBox) -> str:
     """Key value portion of master-key label (e.g. ``1 | ACTIVE`` → ``ACTIVE``)."""
-    if combo.currentIndex() <= 0 or combo.itemData(combo.currentIndex()) is None:
+    t = (combo.currentText() or "").strip()
+    if not t:
         return ""
-    t = combo.currentText().strip()
     if " | " in t:
         return t.split(" | ", 1)[-1].strip().upper()
     return t.upper()
@@ -253,10 +256,8 @@ def _get_dept_id(dept: dict[str, Any]) -> int | str | None:
 _DEPT_COL1 = (
     ("Department Id", ("deptId", "dept_id", "departmentId", "id")),
     ("Department Name*", ("deptName", "dept_name", "departmentName", "department_name", "name")),
-    ("BU Id", ("buId", "bu_id", "businessUnitId", "business_unit_id")),
     ("BU*", ("buSearch",)),
-    ("Parent Dept Id", ("parentDeptId", "parent_dept_id", "parentDepartmentId", "parent_department_id")),
-    ("Parent Dept Name", ("parentDeptSearch",)),
+    ("Parent Dept", ("parentDeptSearch",)),
     ("Status", ("status",)),
 )
 _DEPT_COL2 = (
@@ -269,8 +270,6 @@ _DEPT_FIELD_GROUPS = _DEPT_COL1 + _DEPT_COL2
 
 _READONLY_KEYS = frozenset({
     "deptId", "dept_id", "departmentId", "id",
-    "buId", "bu_id", "businessUnitId", "business_unit_id",
-    "parentDeptId", "parent_dept_id", "parentDepartmentId", "parent_department_id",
     "createdBy", "created_by", "createdOn", "created_on", "createdAt", "created_at",
     "modifiedBy", "modified_by", "modifiedOn", "modified_on", "modifiedAt", "modified_at", "updatedAt", "updated_at",
 })
@@ -353,6 +352,7 @@ class ViewDeptPage(QWidget):
                 apply_form_combobox_field(
                     value_edit, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX, min_width=240
                 )
+                wire_searchable_master_key_combo(value_edit, search_field_label="Status")
                 if canonical in _READONLY_KEYS:
                     value_edit.setEnabled(False)
                 else:
@@ -366,7 +366,6 @@ class ViewDeptPage(QWidget):
                 value_edit.setStyleSheet(READONLY_INPUT_STYLE if canonical in _READONLY_KEYS else INPUT_STYLE)
             if canonical == "buSearch":
                 value_edit.setPlaceholderText(placeholder_search_select("BU Id", "BU Name", "Org Name"))
-                value_edit.textChanged.connect(self._on_bu_search_changed)
                 completer = QCompleter(value_edit)
                 completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
                 completer.setFilterMode(Qt.MatchFlag.MatchContains)
@@ -376,7 +375,6 @@ class ViewDeptPage(QWidget):
                 value_edit.setPlaceholderText(
                     placeholder_search_select("Dept Id", "Dept Name", "BU: BU Name")
                 )
-                value_edit.textChanged.connect(self._on_parent_dept_search_changed)
                 completer = QCompleter(value_edit)
                 completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
                 completer.setFilterMode(Qt.MatchFlag.MatchContains)
@@ -420,6 +418,7 @@ class ViewDeptPage(QWidget):
         self._save_btn.clicked.connect(self._handle_save)
 
         display_btns = QWidget()
+        display_btns.setStyleSheet("background: transparent; border: none;")
         display_btns.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         display_btns_layout = QHBoxLayout(display_btns)
         display_btns_layout.setContentsMargins(0, 0, 0, 0)
@@ -429,6 +428,7 @@ class ViewDeptPage(QWidget):
         display_btns_layout.addWidget(self._back_btn)
 
         edit_btns = QWidget()
+        edit_btns.setStyleSheet("background: transparent; border: none;")
         edit_btns.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         edit_btns_layout = QHBoxLayout(edit_btns)
         edit_btns_layout.setContentsMargins(0, 0, 0, 0)
@@ -437,6 +437,10 @@ class ViewDeptPage(QWidget):
         edit_btns_layout.addWidget(self._cancel_btn)
 
         self._btn_stack = QStackedWidget()
+        self._btn_stack.setFrameShape(QFrame.Shape.NoFrame)
+        self._btn_stack.setStyleSheet(
+            "QStackedWidget { border: none; background: transparent; }"
+        )
         self._btn_stack.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self._btn_stack.addWidget(display_btns)
         self._btn_stack.addWidget(edit_btns)
@@ -472,12 +476,19 @@ class ViewDeptPage(QWidget):
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
-        if self.is_edit_mode():
+        if not self._dept:
             return
+        self._load_bu_options()
+        self._load_parent_dept_options()
         combo = self._field_edits.get("status")
         if isinstance(combo, QComboBox):
-            self._populate_master_key_seq_combo(combo, _DEPT_STATUS_FIELD_NAME, "Select status…")
-            self._sync_status_combo_from_dept()
+            populate_master_key_by_field_name(
+                combo,
+                _DEPT_STATUS_FIELD_NAME,
+                token=self._token(),
+                include_placeholder=False,
+            )
+        self._refresh_values()
 
     def _token(self) -> str | None:
         profile = get_user_profile()
@@ -489,65 +500,27 @@ class ViewDeptPage(QWidget):
         )
         return str(token) if token else None
 
-    def _populate_master_key_seq_combo(
-        self,
-        combo: QComboBox | None,
-        field_name: str,
-        placeholder: str,
-    ) -> None:
-        if combo is None:
-            return
-        result = api_get_master_key_by_app_id_field_name(
-            field_name=field_name,
-            token=self._token(),
-        )
-        rows = result.get("data") if result.get("success") else []
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem(placeholder, None)
-        if isinstance(rows, list):
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                seq_val = master_key_row_seq_value(row)
-                if seq_val is None:
-                    continue
-                label = master_key_row_display_label(row).strip()
-                if not label:
-                    continue
-                combo.addItem(label, seq_val)
-        combo.setCurrentIndex(0)
-        combo.blockSignals(False)
-
     def _sync_status_combo_from_dept(self) -> None:
         combo = self._field_edits.get("status")
         if not isinstance(combo, QComboBox) or combo.count() == 0:
             return
         seq = _dept_status_seq(self._dept)
         if seq is not None:
-            for i in range(combo.count()):
-                data = combo.itemData(i)
-                if data is None:
-                    continue
-                try:
-                    if int(data) == int(seq):  # type: ignore[arg-type]
-                        combo.setCurrentIndex(i)
-                        return
-                except (TypeError, ValueError):
-                    if str(data).strip() == str(seq).strip():
-                        combo.setCurrentIndex(i)
-                        return
+            set_searchable_combo_by_user_data(combo, seq)
+            if combo_resolved_master_key_seq(combo) is not None:
+                return
         kv = _get_value(self._dept, ("status",))
         if kv is not None and str(kv).strip():
             kv_up = str(kv).strip().upper()
             for i in range(combo.count()):
-                if combo.itemData(i) is None:
+                data = combo.itemData(i)
+                if data is None:
                     continue
                 label_up = combo.itemText(i).strip().upper()
                 if kv_up == label_up or kv_up in label_up or label_up.endswith(kv_up) or f"| {kv_up}" in label_up:
-                    combo.setCurrentIndex(i)
+                    set_searchable_combo_by_user_data(combo, data)
                     return
-        combo.setCurrentIndex(0)
+        reset_searchable_combo(combo)
 
     def set_dept(self, dept: dict[str, Any] | None, *, edit_mode: bool = False) -> None:
         self._dept = dict(dept) if dept else {}
@@ -555,7 +528,12 @@ class ViewDeptPage(QWidget):
         self._load_parent_dept_options()
         combo = self._field_edits.get("status")
         if isinstance(combo, QComboBox):
-            self._populate_master_key_seq_combo(combo, _DEPT_STATUS_FIELD_NAME, "Select status…")
+            populate_master_key_by_field_name(
+                combo,
+                _DEPT_STATUS_FIELD_NAME,
+                token=self._token(),
+                include_placeholder=False,
+            )
         self._refresh_values()
         if edit_mode and self._dept:
             self._handle_edit()
@@ -620,20 +598,17 @@ class ViewDeptPage(QWidget):
         target = _get_bu_id_from_dept(self._dept)
         if target is None:
             bu_edit.clear()
-            self._set_id_field("buId", None)
             return
         target_str = str(target).strip()
         for disp, bid in self._bu_completions:
             if str(bid).strip() == target_str:
                 bu_edit.setText(disp)
-                self._set_id_field("buId", bid)
                 return
         disp = _bu_search_display_from_dept(self._dept)
         if disp:
             bu_edit.setText(disp)
         else:
             bu_edit.setText(target_str)
-        self._set_id_field("buId", target)
 
     def _load_parent_dept_options(self) -> None:
         p_edit = self._field_edits.get("parentDeptSearch")
@@ -681,56 +656,17 @@ class ViewDeptPage(QWidget):
         target = _get_parent_dept_id_from_dept(self._dept)
         if target is None:
             p_edit.clear()
-            self._set_id_field("parentDeptId", None)
             return
         target_str = str(target).strip()
         for disp, pid in self._parent_dept_completions:
             if str(pid).strip() == target_str:
                 p_edit.setText(disp)
-                self._set_id_field("parentDeptId", pid)
                 return
         disp = _parent_dept_search_display_from_dept(self._dept)
         if disp:
             p_edit.setText(disp)
         else:
             p_edit.setText(target_str)
-        self._set_id_field("parentDeptId", target)
-
-    def _set_id_field(self, key: str, value: Any) -> None:
-        edit = self._field_edits.get(key)
-        if isinstance(edit, QLineEdit):
-            if value is None and key in ("buId", "parentDeptId"):
-                edit.clear()
-            else:
-                edit.setText("" if value is None else str(value))
-
-    def _on_bu_search_changed(self, _text: str) -> None:
-        edit = self._field_edits.get("buSearch")
-        if not isinstance(edit, QLineEdit):
-            return
-        text = edit.text().strip()
-        if not text:
-            self._set_id_field("buId", None)
-            return
-        for disp, bid in self._bu_completions:
-            if disp == text:
-                self._set_id_field("buId", bid)
-                return
-        self._set_id_field("buId", None)
-
-    def _on_parent_dept_search_changed(self, _text: str) -> None:
-        edit = self._field_edits.get("parentDeptSearch")
-        if not isinstance(edit, QLineEdit):
-            return
-        text = edit.text().strip()
-        if not text:
-            self._set_id_field("parentDeptId", None)
-            return
-        for disp, pid in self._parent_dept_completions:
-            if disp == text:
-                self._set_id_field("parentDeptId", pid)
-                return
-        self._set_id_field("parentDeptId", None)
 
     def _is_valid_bu_selection(self) -> bool:
         edit = self._field_edits.get("buSearch")
@@ -861,18 +797,8 @@ class ViewDeptPage(QWidget):
                 if not isinstance(combo, QComboBox):
                     continue
                 orig_seq = _dept_status_seq(self._dept)
-                cur_data = combo.currentData()
-                if orig_seq is not None and cur_data is not None:
-                    try:
-                        if int(orig_seq) != int(cur_data):  # type: ignore[arg-type]
-                            return True
-                    except (TypeError, ValueError):
-                        if str(orig_seq).strip() != str(cur_data).strip():
-                            return True
-                    continue
-                orig_kv = str(_get_value(self._dept, ("status",)) or "").strip().upper()
-                cur_kv = _combo_status_key_value(combo)
-                if orig_kv != cur_kv:
+                cur_seq = combo_resolved_master_key_seq(combo)
+                if str(orig_seq or "").strip() != str(cur_seq or "").strip():
                     return True
                 continue
             orig_str = self._original_display_for_editable(canonical, keys)
@@ -904,7 +830,7 @@ class ViewDeptPage(QWidget):
             return
         bu_id = self._resolve_bu_id_from_ui()
         if bu_id is None:
-            self._show_error("BU Id is invalid. Please select a BU from the list.")
+            self._show_error("Please select a valid BU from the list.")
             return
 
         parent_text = self._get_edit_value("parentDeptSearch")
@@ -915,14 +841,11 @@ class ViewDeptPage(QWidget):
 
         status_combo = self._field_edits.get("status")
         if isinstance(status_combo, QComboBox):
-            if status_combo.currentIndex() <= 0 or status_combo.currentData() is None:
-                self._show_error("Status is required.")
-                status_combo.setFocus()
-                return
-            try:
-                status = _coerce_master_seq_to_int(status_combo.currentData())
-            except ValueError:
-                self._show_error("Status must be a valid selection.")
+            status, status_err = require_master_key_seq_for_payload(
+                status_combo, field_caption="Status", strict_phrase="a status"
+            )
+            if status_err:
+                self._show_error(status_err)
                 status_combo.setFocus()
                 return
         else:

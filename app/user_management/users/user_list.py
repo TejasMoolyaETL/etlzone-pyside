@@ -57,7 +57,6 @@ _COLUMN_SPEC = (
     ("Lastname", ("lastName", "last_name", "name")),
     ("Email", ("email",)),
     ("Mobile", ("mobileNumber", "mobile_number")),
-    ("Status", ("userStatus", "status")),
     ("Timezone", ("timezone", "timeZone", "tz", "userTimezone", "user_time_zone")),
     ("Org", ("organizationName", "organization_name", "orgName", "org_name", "organization")),
     ("BU", ("buName", "bu_name", "businessUnitName", "business_unit_name", "businessUnit", "bu")),
@@ -184,9 +183,7 @@ def _resolve_user_column_value(
             if value is not None:
                 key = alt
                 break
-    if keys == ("userStatus", "status"):
-        value = _status_name(value)
-    elif keys == ("roleStatusDisplay", "role_status_display"):
+    if keys == ("roleStatusDisplay", "role_status_display"):
         value = _status_name(value)
     elif keys == (
         "defaultRole",

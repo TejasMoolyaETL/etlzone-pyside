@@ -6,6 +6,7 @@ import json
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -43,6 +44,7 @@ from ui.form_page_styles import (
     FORM_SECONDARY_BUTTON_STYLESHEET,
 )
 from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
+from ui.searchable_form_combo import wire_searchable_labeled_rows_combo
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
 _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "jwt"})
@@ -156,6 +158,13 @@ class ViewAPIValidationPage(QWidget):
             self._handle_edit()
         else:
             self._switch_to_view_mode()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._refresh_edit_action_access()
+        if not self._record:
+            return
+        self._refresh_values()
 
     def _refresh_edit_action_access(self) -> None:
         steps = get_nav_access_steps()
@@ -308,9 +317,14 @@ class ViewAPIValidationPage(QWidget):
 
             if chosen in ("apiValidationStatus", "api_validation_status"):
                 value_widget = QComboBox()
-                value_widget.addItems(["ACTIVE", "INACTIVE"])
                 apply_form_combobox_field(
                     value_widget, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX, min_width=240
+                )
+                wire_searchable_labeled_rows_combo(
+                    value_widget,
+                    rows=[("ACTIVE", "ACTIVE"), ("INACTIVE", "INACTIVE")],
+                    search_field_label="API validation status",
+                    default_display_text="ACTIVE",
                 )
                 value_widget.setEnabled(chosen in _EDITABLE_KEYS)
                 self._field_edits["apiValidationStatus"] = value_widget

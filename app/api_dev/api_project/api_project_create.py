@@ -35,6 +35,7 @@ from ui.form_page_styles import (
     placeholder_example,
 )
 from ui.post_save_navigation import schedule_after_success
+from ui.searchable_form_combo import wire_searchable_labeled_rows_combo
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
 _PROJECT_STATUS = ("ACTIVE", "INACTIVE", "DISABLE", "COMPLETE")
@@ -112,9 +113,13 @@ class CreateProjectPage(QWidget):
         label_status = QLabel("Project Status:")
         label_status.setStyleSheet(LABEL_STYLE)
         self.project_status_combo = QComboBox()
-        self.project_status_combo.addItems(_PROJECT_STATUS)
-        self.project_status_combo.setCurrentText("ACTIVE")
         apply_form_combobox_field(self.project_status_combo, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX)
+        wire_searchable_labeled_rows_combo(
+            self.project_status_combo,
+            rows=[(s, s) for s in _PROJECT_STATUS],
+            search_field_label="Project status",
+            default_display_text="ACTIVE",
+        )
         card_layout.addWidget(labeled_field_block(label_status, self.project_status_combo))
 
         label_server = QLabel("Project Server:")

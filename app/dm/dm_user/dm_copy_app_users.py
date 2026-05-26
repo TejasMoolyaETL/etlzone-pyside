@@ -15,12 +15,15 @@ from PySide6.QtWidgets import (
     QLabel,
     QMenu,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+
+from app.api_dev.api_details.api_details_copy_to_api_mgmt import _make_replicate_section_header
 
 from app.user_management.users.user_list import (
     _COLUMN_SPEC as _APP_USER_COLUMN_SPEC,
@@ -50,6 +53,7 @@ from ui.form_page_styles import (
     LIST_PAGE_HEADER_STYLESHEET,
     MODAL_FIELD_LABEL_STYLE,
 )
+from ui.post_save_navigation import schedule_after_success
 from ui.styles import CONTEXT_MENU_STYLESHEET
 
 _MIME_APP_USER_ROW = "application/x-etlzone-app-user-row"
@@ -182,8 +186,8 @@ class _StagingDropTable(QTableWidget):
         event.acceptProposedAction()
 
 
-class DmtCopyAppUsersPage(QWidget):
-    """Copy app_users: left = api/get-all-user catalog; right = staging; Replicate → POST api/users/copy-from-app-user."""
+class DmCopyAppUsersPage(QWidget):
+    """Copy app_users: left = api/get-all-user catalog; right = staging; Replicate → POST api/dm-project/user/copy-from-app-user."""
 
     def __init__(self, on_back: Callable[[], None] | None = None) -> None:
         super().__init__()
@@ -198,14 +202,28 @@ class DmtCopyAppUsersPage(QWidget):
         self._column_spec: list[tuple[str, tuple[str, ...]]] = []
         self._staging_rows: list[dict[str, Any]] = []
         self._filter_visible = False
+        self._queue_filter_visible = False
         self._filter_apply_timer = QTimer(self)
         self._filter_apply_timer.setSingleShot(True)
         self._filter_apply_timer.setInterval(200)
         self._filter_apply_timer.timeout.connect(self._apply_column_filters_refresh)
+        self._queue_filter_timer = QTimer(self)
+        self._queue_filter_timer.setSingleShot(True)
+        self._queue_filter_timer.setInterval(200)
+        self._queue_filter_timer.timeout.connect(self._apply_queue_filter_refresh)
         self._build_ui()
 
     def _data_row_offset(self) -> int:
         return data_row_offset(self._filter_visible)
+
+    def _queue_data_row_offset(self) -> int:
+        return data_row_offset(self._queue_filter_visible)
+
+    def _update_section_titles(self) -> None:
+        app_n = len(self._source_rows)
+        queue_n = len(self._staging_rows)
+        self._left_title_label.setText(f"App users ({app_n})")
+        self._queue_title_label.setText(f"Queue for copy ({queue_n})")
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -224,30 +242,14 @@ class DmtCopyAppUsersPage(QWidget):
         self._back_btn.setStyleSheet(FORM_SECONDARY_BUTTON_STYLESHEET)
         self._back_btn.clicked.connect(self._handle_back)
         hl.addWidget(self._back_btn)
-        hl.addWidget(QLabel("Copy app_users"))
+        hl.addWidget(QLabel("DM: Copy App users"))
         hl.addStretch()
         refresh_btn = QPushButton("Refresh")
         refresh_btn.setFixedWidth(100)
         refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         refresh_btn.clicked.connect(self.refresh)
         hl.addWidget(refresh_btn)
-        self._filter_toggle = QPushButton("Filters")
-        self._filter_toggle.setCheckable(True)
-        self._filter_toggle.setFixedWidth(100)
-        self._filter_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._filter_toggle.toggled.connect(self._on_filter_toggle)
-        hl.addWidget(self._filter_toggle)
         layout.addWidget(header)
-
-        hint = QLabel(
-            "Left: users from api/get-all-user. Drag rows into the right panel to queue them for replication."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet(MODAL_FIELD_LABEL_STYLE)
-        hint_layout = QHBoxLayout()
-        hint_layout.setContentsMargins(12, 8, 12, 0)
-        hint_layout.addWidget(hint)
-        layout.addLayout(hint_layout)
 
         self._message_label = QLabel()
         self._message_label.setWordWrap(True)
@@ -264,21 +266,56 @@ class DmtCopyAppUsersPage(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         left_wrap = QWidget()
         left_l = QVBoxLayout(left_wrap)
-        left_l.setContentsMargins(8, 8, 4, 8)
-        left_l.setSpacing(6)
-        left_l.addWidget(QLabel("App users (GET api/get-all-user — same columns as Users list)"))
+        left_l.setContentsMargins(8, 0, 4, 8)
+        left_l.setSpacing(4)
+        left_bar, self._left_title_label, self._left_filter_btn = _make_replicate_section_header(
+            "App users (0)",
+            "dmCopyAppUsersSectionTitleApp",
+            bar_tool_tip="Application users (same list as User Management)",
+        )
+        self._left_filter_btn.toggled.connect(self._on_filter_toggle)
+        left_l.addWidget(left_bar)
         self._left_table = _UserDragTable(data_row_offset_fn=self._data_row_offset)
+        self._left_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._left_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         apply_data_table_appearance(self._left_table)
         self._left_table.setSortingEnabled(False)
         attach_table_copy_shortcut(self._left_table)
         left_l.addWidget(self._left_table, 1)
 
+        mid = QWidget()
+        mid.setFixedWidth(40)
+        mid_l = QVBoxLayout(mid)
+        mid_l.setContentsMargins(4, 0, 4, 0)
+        mid_l.addStretch(1)
+        self._btn_to_staging = QPushButton("\u003e")
+        self._btn_to_staging.setFixedSize(30, 26)
+        self._btn_to_staging.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_to_staging.setToolTip("Move selected app users to the queue")
+        self._btn_to_staging.clicked.connect(self._move_selected_to_staging)
+        mid_l.addWidget(self._btn_to_staging, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self._btn_from_staging = QPushButton("\u003c")
+        self._btn_from_staging.setFixedSize(30, 26)
+        self._btn_from_staging.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_from_staging.setToolTip("Remove selected rows from the queue")
+        self._btn_from_staging.clicked.connect(self._remove_selected_from_staging)
+        mid_l.addWidget(self._btn_from_staging, alignment=Qt.AlignmentFlag.AlignHCenter)
+        mid_l.addStretch(1)
+
         right_wrap = QWidget()
         right_l = QVBoxLayout(right_wrap)
-        right_l.setContentsMargins(4, 8, 8, 8)
-        right_l.setSpacing(6)
-        right_l.addWidget(QLabel("Selected for replication (drop here)"))
+        right_l.setContentsMargins(4, 0, 8, 8)
+        right_l.setSpacing(4)
+        queue_bar, self._queue_title_label, self._queue_filter_btn = _make_replicate_section_header(
+            "Queue for copy (0)",
+            "dmCopyAppUsersSectionTitleQueue",
+            bar_tool_tip="Users to copy into DM (drag rows here or use \u003e)",
+        )
+        self._queue_filter_btn.toggled.connect(self._on_queue_filter_toggle)
+        right_l.addWidget(queue_bar)
         self._right_table = _StagingDropTable()
+        self._right_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._right_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         apply_data_table_appearance(self._right_table)
         self._right_table.setSortingEnabled(False)
         self._right_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -288,15 +325,22 @@ class DmtCopyAppUsersPage(QWidget):
         right_l.addWidget(self._right_table, 1)
 
         splitter.addWidget(left_wrap)
+        splitter.addWidget(mid)
         splitter.addWidget(right_wrap)
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setStretchFactor(2, 1)
         layout.addWidget(splitter, 1)
 
         bottom = QWidget()
         bottom_l = QHBoxLayout(bottom)
         bottom_l.setContentsMargins(12, 8, 12, 12)
-        bottom_l.addStretch()
+        bottom_l.setSpacing(12)
+        hint = QLabel("Select app users on the left, move them to the queue, then replicate into DM.")
+        hint.setStyleSheet(MODAL_FIELD_LABEL_STYLE)
+        hint.setWordWrap(True)
+        hint.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        bottom_l.addWidget(hint, 1)
         self._replicate_btn = QPushButton("Replicate")
         self._replicate_btn.setFixedWidth(120)
         self._replicate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -312,6 +356,11 @@ class DmtCopyAppUsersPage(QWidget):
 
     def _show_message(self, text: str, *, error: bool) -> None:
         show_auto_hiding_message(self, self._message_label, text, error=error)
+
+    def _clear_message(self) -> None:
+        cancel_auto_hide_message(self, self._message_label)
+        self._message_label.setText("")
+        self._message_label.setVisible(False)
 
     def _schedule_filter_apply(self) -> None:
         if self._filter_visible:
@@ -373,6 +422,38 @@ class DmtCopyAppUsersPage(QWidget):
         except Exception:
             traceback.print_exc()
 
+    def _filtered_staging_rows(self) -> list[dict[str, Any]]:
+        return filter_dict_rows_by_column_edits(
+            self._staging_rows,
+            self._right_table,
+            self._column_spec,
+            self._queue_filter_visible,
+            _app_user_value_for_column,
+            _format_app_user_cell,
+        )
+
+    def _apply_queue_filter_refresh(self) -> None:
+        if not self._queue_filter_visible or not self._column_spec:
+            return
+        try:
+            self._write_staging_table(self._filtered_staging_rows())
+        except Exception:
+            traceback.print_exc()
+
+    def _on_queue_filter_toggle(self, checked: bool) -> None:
+        self._queue_filter_visible = checked
+        if not checked:
+            self._queue_filter_timer.stop()
+            clear_filter_row_widgets(self._right_table)
+        if self._staging_rows:
+            try:
+                rows = self._filtered_staging_rows() if checked else list(self._staging_rows)
+                self._write_staging_table(rows)
+            except Exception:
+                traceback.print_exc()
+        else:
+            self._write_staging_table()
+
     def _on_filter_toggle(self, checked: bool) -> None:
         self._filter_visible = checked
         if not checked:
@@ -394,6 +475,7 @@ class DmtCopyAppUsersPage(QWidget):
         clear_filter_row_widgets(self._left_table)
         self._left_table.setRowCount(0)
         self._left_table.setColumnCount(0)
+        self._update_section_titles()
 
     def _populate_left(self, rows: list[dict[str, Any]]) -> None:
         if not rows:
@@ -412,16 +494,35 @@ class DmtCopyAppUsersPage(QWidget):
             hh.setMinimumSectionSize(MIN_DATA_COL_WIDTH_PX)
             filtered = self._filtered_source_rows() if self._filter_visible else list(self._source_rows)
             self._write_left_data_rows(filtered)
+            self._update_section_titles()
         except Exception:
             traceback.print_exc()
             self._show_empty_left_table()
 
-    def _write_staging_table(self) -> None:
+    def _write_staging_table(self, display_rows: list[dict[str, Any]] | None = None) -> None:
+        rows = display_rows if display_rows is not None else self._staging_rows
+        off = self._queue_data_row_offset()
         self._right_table.setSortingEnabled(False)
-        self._right_table.setRowCount(len(self._staging_rows))
-        if not self._staging_rows:
-            self._right_table.setColumnCount(0)
+        total = off + len(rows)
+        if self._queue_filter_visible and total < 1:
+            total = 1
+        self._right_table.setRowCount(total)
+        if not rows:
+            if self._queue_filter_visible:
+                spec_empty = self._column_spec or list(_APP_USER_COLUMN_SPEC)
+                self._right_table.setColumnCount(len(spec_empty))
+                self._right_table.setHorizontalHeaderLabels([s[0] for s in spec_empty])
+                for c in range(self._right_table.columnCount()):
+                    self._right_table.takeItem(0, c)
+                install_filter_row(
+                    self._right_table,
+                    len(spec_empty),
+                    on_text_changed=lambda: self._queue_filter_timer.start(),
+                )
+            else:
+                self._right_table.setColumnCount(0)
             self._replicate_btn.setEnabled(False)
+            self._update_section_titles()
             return
         spec = self._column_spec or list(_APP_USER_COLUMN_SPEC)
         self._right_table.setColumnCount(len(spec))
@@ -430,13 +531,27 @@ class DmtCopyAppUsersPage(QWidget):
         for col in range(self._right_table.columnCount()):
             hh.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
         hh.setMinimumSectionSize(MIN_DATA_COL_WIDTH_PX)
-        for r, row in enumerate(self._staging_rows):
+        if self._queue_filter_visible:
+            for c in range(self._right_table.columnCount()):
+                self._right_table.takeItem(0, c)
+            install_filter_row(
+                self._right_table,
+                len(spec),
+                on_text_changed=lambda: self._queue_filter_timer.start(),
+            )
+        for r, row in enumerate(rows):
+            tr = off + r
             for col, (_, keys) in enumerate(spec):
                 value, key_used = _app_user_value_for_column(row, keys)
                 item = QTableWidgetItem(_format_app_user_cell(value, key_used, keys))
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 item.setData(Qt.ItemDataRole.UserRole, row)
-                self._right_table.setItem(r, col, item)
+                self._right_table.setItem(tr, col, item)
+        sync_vertical_header_labels(
+            self._right_table,
+            filter_visible=self._queue_filter_visible,
+            data_row_count=len(rows),
+        )
         resize_data_table_columns_to_content(
             self._right_table,
             spec,
@@ -445,18 +560,85 @@ class DmtCopyAppUsersPage(QWidget):
             _format_app_user_cell,
         )
         self._replicate_btn.setEnabled(len(self._staging_rows) > 0)
+        self._update_section_titles()
 
-    def _on_row_dropped(self, row: dict[str, Any]) -> None:
+    def _append_to_staging(self, row: dict[str, Any], *, refresh: bool = True) -> bool:
         uid = _app_user_row_id(row)
         if uid is None:
-            self._show_message("Dropped row has no user id; skipped.", error=True)
-            return
+            self._show_message("Row has no user id; skipped.", error=True)
+            return False
         for existing in self._staging_rows:
             if _app_user_row_id(existing) == uid:
-                self._show_message("That user is already in the replication list.", error=False)
-                return
+                return False
         self._staging_rows.append(dict(row))
-        self._write_staging_table()
+        if refresh:
+            rows = self._filtered_staging_rows() if self._queue_filter_visible else list(self._staging_rows)
+            self._write_staging_table(rows)
+        return True
+
+    def _on_row_dropped(self, row: dict[str, Any]) -> None:
+        if self._append_to_staging(row):
+            return
+        if _app_user_row_id(row) is not None:
+            self._show_message("That user is already in the queue.", error=False)
+
+    def _move_selected_to_staging(self) -> None:
+        off = self._data_row_offset()
+        selected = self._left_table.selectionModel().selectedRows()
+        if not selected:
+            self._show_message("Select one or more app users on the left, then click \u003e.", error=False)
+            return
+        moved = 0
+        for idx in selected:
+            tr = idx.row()
+            if tr < off:
+                continue
+            item = self._left_table.item(tr, 0)
+            raw = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+            if isinstance(raw, dict) and self._append_to_staging(dict(raw), refresh=False):
+                moved += 1
+        if moved:
+            rows = self._filtered_staging_rows() if self._queue_filter_visible else list(self._staging_rows)
+            self._write_staging_table(rows)
+        elif selected:
+            self._show_message("No new rows moved (already queued or missing user id).", error=False)
+
+    def _user_ids_from_queue_table_rows(self, table_rows: list[int]) -> set[Any]:
+        off = self._queue_data_row_offset()
+        uids: set[Any] = set()
+        for tr in table_rows:
+            if tr < off:
+                continue
+            item = self._right_table.item(tr, 0)
+            raw = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+            if isinstance(raw, dict):
+                uid = _app_user_row_id(raw)
+                if uid is not None:
+                    uids.add(uid)
+        return uids
+
+    def _remove_staging_by_user_ids(self, uids: set[Any]) -> int:
+        if not uids:
+            return 0
+        before = len(self._staging_rows)
+        self._staging_rows = [r for r in self._staging_rows if _app_user_row_id(r) not in uids]
+        return before - len(self._staging_rows)
+
+    def _remove_selected_from_staging(self) -> None:
+        if not self._staging_rows:
+            return
+        off = self._queue_data_row_offset()
+        table_rows = sorted(
+            {idx.row() for idx in self._right_table.selectionModel().selectedRows() if idx.row() >= off},
+            reverse=True,
+        )
+        if not table_rows:
+            self._show_message("Select one or more rows in the queue, then click \u003c.", error=False)
+            return
+        removed = self._remove_staging_by_user_ids(self._user_ids_from_queue_table_rows(table_rows))
+        if removed:
+            rows = self._filtered_staging_rows() if self._queue_filter_visible else list(self._staging_rows)
+            self._write_staging_table(rows)
 
     def _on_staging_context_menu(self, pos: QPoint) -> None:
         item = self._right_table.itemAt(pos)
@@ -471,9 +653,13 @@ class DmtCopyAppUsersPage(QWidget):
         chosen = menu.exec(self._right_table.mapToGlobal(pos))
         if chosen == remove_action:
             r = self._right_table.currentRow()
-            if 0 <= r < len(self._staging_rows):
-                self._staging_rows.pop(r)
-                self._write_staging_table()
+            if self._remove_staging_by_user_ids(self._user_ids_from_queue_table_rows([r])):
+                rows = (
+                    self._filtered_staging_rows()
+                    if self._queue_filter_visible
+                    else list(self._staging_rows)
+                )
+                self._write_staging_table(rows)
         elif chosen == clear_action:
             self._staging_rows.clear()
             self._write_staging_table()
@@ -586,12 +772,37 @@ class DmtCopyAppUsersPage(QWidget):
         if success:
             self._staging_rows.clear()
             self._write_staging_table()
-            self._show_message(message or "Replication completed.", error=False)
-            self.refresh()
+            self._replicate_btn.setEnabled(False)
+            self._show_message(message or "Users replicated successfully.", error=False)
+            schedule_after_success(
+                delay_ms=800,
+                clear_error=self._clear_message,
+                on_back=self.on_back,
+            )
         else:
             self._show_message(message or "Replication failed.", error=True)
             self._replicate_btn.setEnabled(len(self._staging_rows) > 0)
 
+    def _reset_copy_page_for_reload(self) -> None:
+        """Clear queue and filters when the page is opened (same as API Replicate)."""
+        self._pending_refresh = False
+        self._filter_apply_timer.stop()
+        self._queue_filter_timer.stop()
+        cancel_auto_hide_message(self, self._message_label)
+        self._message_label.clear()
+        self._message_label.setVisible(False)
+        self._left_filter_btn.blockSignals(True)
+        self._left_filter_btn.setChecked(False)
+        self._left_filter_btn.blockSignals(False)
+        self._on_filter_toggle(False)
+        self._queue_filter_btn.blockSignals(True)
+        self._queue_filter_btn.setChecked(False)
+        self._queue_filter_btn.blockSignals(False)
+        self._on_queue_filter_toggle(False)
+        self._staging_rows.clear()
+        self._write_staging_table()
+
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
+        self._reset_copy_page_for_reload()
         self.refresh()

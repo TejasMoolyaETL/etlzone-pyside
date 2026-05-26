@@ -18,12 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.api import (
-    api_create_org,
-    api_get_master_key_by_app_id_field_name,
-    master_key_row_display_label,
-    master_key_row_seq_value,
-)
+from core.api import api_create_org
 from core.user_context import get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
 from ui.form_combobox_style import apply_form_combobox_field
@@ -41,6 +36,16 @@ from ui.form_page_styles import (
     placeholder_example,
 )
 from ui.post_save_navigation import schedule_after_success
+from ui.searchable_form_combo import (
+    combo_resolved_master_key_seq,
+    master_key_invalid_typed_text,
+    master_key_seq_for_payload,
+    require_master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    reset_searchable_combo,
+    wire_searchable_master_key_combo,
+)
+from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
 _ORG_STATUS_FIELD_NAME = "org_status"
@@ -136,6 +141,7 @@ class CreateOrgPage(QWidget):
         label_status = field_caption_label("Status*", LABEL_STYLE)
         self.status_combo = QComboBox()
         apply_form_combobox_field(self.status_combo, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX)
+        wire_searchable_master_key_combo(self.status_combo, search_field_label="Status")
         card_layout.addWidget(labeled_field_block(label_status, self.status_combo))
 
         card_layout.addSpacing(16)
@@ -172,10 +178,11 @@ class CreateOrgPage(QWidget):
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
-        self._populate_master_key_seq_combo(
+        populate_master_key_by_field_name(
             self.status_combo,
             _ORG_STATUS_FIELD_NAME,
-            "Select status…",
+            token=self._token(),
+            include_placeholder=False,
         )
 
     def _show_error(self, message: str) -> None:
@@ -199,36 +206,6 @@ class CreateOrgPage(QWidget):
         )
         return str(token) if token else None
 
-    def _populate_master_key_seq_combo(
-        self,
-        combo: QComboBox | None,
-        field_name: str,
-        placeholder: str,
-    ) -> None:
-        if combo is None:
-            return
-        result = api_get_master_key_by_app_id_field_name(
-            field_name=field_name,
-            token=self._token(),
-        )
-        rows = result.get("data") if result.get("success") else []
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem(placeholder, None)
-        if isinstance(rows, list):
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                seq_val = master_key_row_seq_value(row)
-                if seq_val is None:
-                    continue
-                label = master_key_row_display_label(row).strip()
-                if not label:
-                    continue
-                combo.addItem(label, seq_val)
-        combo.setCurrentIndex(0)
-        combo.blockSignals(False)
-
     def _get_default_values(self) -> dict[str, str]:
         return {
             "org_name": "",
@@ -243,14 +220,14 @@ class CreateOrgPage(QWidget):
             self.org_name_edit.text().strip() != d["org_name"]
             or self.org_code_edit.text().strip() != d["org_code"]
             or self.industry_edit.text().strip() != d["industry"]
-            or self.status_combo.currentIndex() > 0
+            or combo_resolved_master_key_seq(self.status_combo) is not None
         )
 
     def reset_to_default(self) -> None:
         self.org_name_edit.clear()
         self.org_code_edit.clear()
         self.industry_edit.clear()
-        self.status_combo.setCurrentIndex(0)
+        reset_searchable_combo(self.status_combo)
 
     def _handle_back(self) -> None:
         if not self.is_dirty():
@@ -283,19 +260,11 @@ class CreateOrgPage(QWidget):
         if not industry:
             self._show_error("Industry is required.")
             return
-        if self.status_combo.currentIndex() <= 0:
-            self._show_error("Status is required.")
-            self.status_combo.setFocus()
-            return
-        status_raw = self.status_combo.currentData()
-        if status_raw is None:
-            self._show_error("Status is required.")
-            self.status_combo.setFocus()
-            return
-        try:
-            status = _coerce_master_seq_to_int(status_raw)
-        except ValueError:
-            self._show_error("Status must be a valid selection.")
+        status, status_err = require_master_key_seq_for_payload(
+            self.status_combo, field_caption="Status", strict_phrase="a status"
+        )
+        if status_err:
+            self._show_error(status_err)
             self.status_combo.setFocus()
             return
 

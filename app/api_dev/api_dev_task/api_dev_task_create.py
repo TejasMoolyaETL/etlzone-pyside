@@ -43,6 +43,7 @@ from ui.form_page_styles import (
     placeholder_search_select,
 )
 from ui.post_save_navigation import schedule_after_success
+from ui.searchable_form_combo import wire_searchable_labeled_rows_combo
 from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 from ui.data_table import (
@@ -52,6 +53,7 @@ from ui.data_table import (
     filter_dict_rows_by_column_edits,
     install_filter_row,
     MIN_DATA_COL_WIDTH_PX,
+    resize_data_table_columns_to_content,
     sync_vertical_header_labels,
 )
 
@@ -156,8 +158,14 @@ class CreateAPIDevTaskPage(QWidget):
         card_layout.addWidget(labeled_field_block(field_caption_label("Description*", LABEL_STYLE), self.desc_edit))
 
         self.status_combo = QComboBox()
-        self.status_combo.addItems(["ACTIVE", "INACTIVE", "OPEN", "IN_PROGRESS", "DONE", "BLOCKED"])
         apply_form_combobox_field(self.status_combo, height_px=field_h, min_width=360)
+        _task_statuses = ("ACTIVE", "INACTIVE", "OPEN", "IN_PROGRESS", "DONE", "BLOCKED")
+        wire_searchable_labeled_rows_combo(
+            self.status_combo,
+            rows=[(s, s) for s in _task_statuses],
+            search_field_label="Status",
+            default_display_text="ACTIVE",
+        )
         card_layout.addWidget(labeled_field_block(field_caption_label("Status", LABEL_STYLE), self.status_combo))
 
         self.error_label = QLabel()
@@ -373,7 +381,9 @@ class CreateAPIDevTaskPage(QWidget):
                 filter_visible=filter_visible,
                 data_row_count=len(rows),
             )
-            table.resizeColumnsToContents()
+            resize_data_table_columns_to_content(
+                table, column_spec, rows, _value_for_column, _format_cell
+            )
             table.setSortingEnabled(not filter_visible)
 
         def _filtered_rows() -> list[dict[str, str]]:

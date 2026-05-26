@@ -49,14 +49,37 @@ LEAD_MANAGEMENT_SUB_OPTIONS = [
     "Leads",
 ]
 
+# Data Migration Onboarding sub-options
+DATA_MIGRATION_ONBOARDING_SUB_OPTIONS = [
+    "DM: Company",
+    "DM: Contact Person",
+    "DM: Company Contact Assignment",
+    "DM: Project",
+]
+
+# Data Migration - Admin sub-options
+DATA_MIGRATION_ADMIN_SUB_OPTIONS = [
+    "DM: User",
+    "DM: User Project Mapping",
+]
+
 # DMT Tracker sub-options
 OBJECT_TRACKER_SUB_OPTIONS = [
     "DMT - Category",
     "DMT - Module",
+    "DMT: User Module Assignment",
     "DMT - Object",
-    "DMT - Users",
     "DMT - Object List Tracker",
     "DMT - Issue Tracker",
+]
+
+# ETL sub-options
+ETL_SUB_OPTIONS = [
+    "Connections",
+    "Scan",
+    "Import Metadata",
+    "Extraction",
+    "Job Logs",
 ]
 
 MASTER_SETUP_ITEM = "Master Setup Value"

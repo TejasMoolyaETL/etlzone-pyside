@@ -28,11 +28,6 @@ from PySide6.QtWidgets import (
 from app.user_management.users.user_create import _DatePickerDialog
 from core.app_preferences import get_timezone, to_utc_iso
 from core.api import api_create_lead, api_get_all_contact_persons, api_get_all_lead_companies
-from core.api import (
-    api_get_master_key_by_app_id_field_name,
-    master_key_row_display_label,
-    master_key_row_seq_value,
-)
 from core.nav_access import collect_allowed_action_names, nav_action_visible
 from core.user_context import get_nav_access_steps, get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_api_result_message, show_auto_hiding_message
@@ -55,6 +50,15 @@ from ui.form_page_styles import (
     placeholder_example,
 )
 from ui.post_save_navigation import schedule_after_success
+from ui.searchable_form_combo import (
+    combo_resolved_item_data,
+    combo_resolved_master_key_seq,
+    master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    reset_searchable_combo,
+    wire_searchable_master_key_combo,
+)
+from ui.strict_completer import strict_list_selection_message
 from ui.theme import Theme
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
@@ -128,6 +132,17 @@ _REQUIRED_MASTER_KEYS: tuple[str, ...] = (
     "nextAction",
     "status",
 )
+
+_STRICT_SELECT_PHRASE_BY_LEAD_KEY: dict[str, str] = {
+    "contractType": "a contract type",
+    "role": "a role",
+    "source": "a source",
+    "leadCommunicationChannel": "a lead communication channel",
+    "leadStatus": "a lead status",
+    "leadStage": "a lead stage",
+    "nextAction": "a next action",
+    "status": "a status",
+}
 
 _GLOBAL_CURRENCY_CODES: tuple[str, ...] = (
     "USD",
@@ -562,6 +577,7 @@ class CreateLeadPage(QWidget):
                 combo.setMinimumWidth(field_min_w)
                 combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
                 apply_form_combobox_field(combo, height_px=field_h)
+                wire_searchable_master_key_combo(combo, search_field_label="Currency")
                 self._currency_combo = combo
                 grid.addWidget(
                     labeled_field_block(field_caption_label(field_by_key[key], LABEL_STYLE), combo),
@@ -577,8 +593,10 @@ class CreateLeadPage(QWidget):
                 combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
                 apply_form_combobox_field(combo, height_px=field_h)
                 if key == "companyId":
+                    wire_searchable_master_key_combo(combo, search_field_label="Company")
                     self._company_combo = combo
                 else:
+                    wire_searchable_master_key_combo(combo, search_field_label="Contact Person")
                     self._contact_person_combo = combo
                 grid.addWidget(
                     labeled_field_block(field_caption_label(field_by_key[key], LABEL_STYLE), combo),
@@ -593,6 +611,8 @@ class CreateLeadPage(QWidget):
                 combo.setMinimumWidth(field_min_w)
                 combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
                 apply_form_combobox_field(combo, height_px=field_h)
+                cap = field_by_key.get(key, key).replace("*", "").strip()
+                wire_searchable_master_key_combo(combo, search_field_label=cap)
                 self._master_combo_by_key[key] = combo
                 grid.addWidget(
                     labeled_field_block(field_caption_label(field_by_key[key], LABEL_STYLE), combo),
@@ -808,7 +828,6 @@ class CreateLeadPage(QWidget):
         self._populate_contact_person_combo()
         for lead_key, field_name in _MASTER_FIELD_BY_LEAD_KEY.items():
             self._populate_master_combo(lead_key, field_name)
-        QTimer.singleShot(0, self._scroll_to_top_and_focus_first_field)
 
     def _token(self) -> str | None:
         profile = get_user_profile()
@@ -831,7 +850,6 @@ class CreateLeadPage(QWidget):
         rows = result.get("data") if result.get("success") else []
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("Select company…", None)
         if isinstance(rows, list):
             for row in rows:
                 if not isinstance(row, dict):
@@ -842,7 +860,10 @@ class CreateLeadPage(QWidget):
                 name = str(row.get("companyName") or row.get("name") or "").strip()
                 label = f"{cid} | {name}" if name else str(cid)
                 combo.addItem(label, cid)
-        combo.setCurrentIndex(0)
+        combo.setCurrentIndex(-1)
+        le = combo.lineEdit()
+        if le is not None:
+            le.clear()
         combo.blockSignals(False)
 
     def _populate_contact_person_combo(self) -> None:
@@ -853,7 +874,6 @@ class CreateLeadPage(QWidget):
         rows = result.get("data") if result.get("success") else []
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("Select contact person…", None)
         if isinstance(rows, list):
             for row in rows:
                 if not isinstance(row, dict):
@@ -864,34 +884,20 @@ class CreateLeadPage(QWidget):
                 name = str(row.get("name") or row.get("contactPersonName") or "").strip()
                 label = f"{contact_id} | {name}" if name else str(contact_id)
                 combo.addItem(label, contact_id)
-        combo.setCurrentIndex(0)
+        combo.setCurrentIndex(-1)
+        le = combo.lineEdit()
+        if le is not None:
+            le.clear()
         combo.blockSignals(False)
 
     def _populate_master_combo(self, lead_key: str, field_name: str) -> None:
         combo = self._master_combo_by_key.get(lead_key)
-        if combo is None:
-            return
-        result = api_get_master_key_by_app_id_field_name(
-            field_name=field_name,
+        populate_master_key_by_field_name(
+            combo,
+            field_name,
             token=self._token(),
+            include_placeholder=False,
         )
-        rows = result.get("data") if result.get("success") else []
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem(f"Select {lead_key}…", None)
-        if isinstance(rows, list):
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                seq_val = master_key_row_seq_value(row)
-                if seq_val is None:
-                    continue
-                label = master_key_row_display_label(row).strip()
-                if not label:
-                    continue
-                combo.addItem(label, seq_val)
-        combo.setCurrentIndex(0)
-        combo.blockSignals(False)
 
     def _populate_currency_combo(self) -> None:
         combo = self._currency_combo
@@ -899,17 +905,13 @@ class CreateLeadPage(QWidget):
             return
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("Select currency…", None)
         for code in _GLOBAL_CURRENCY_CODES:
             combo.addItem(code, code)
-        combo.setCurrentIndex(0)
+        combo.setCurrentIndex(-1)
+        le = combo.lineEdit()
+        if le is not None:
+            le.clear()
         combo.blockSignals(False)
-
-    def _scroll_to_top_and_focus_first_field(self) -> None:
-        if self._scroll_area is not None:
-            self._scroll_area.verticalScrollBar().setValue(0)
-        if self._company_combo is not None:
-            self._company_combo.setFocus()
 
     def reset_to_default(self) -> None:
         for edit in self._field_edits.values():
@@ -923,55 +925,66 @@ class CreateLeadPage(QWidget):
         for picker in self._datetime_fields.values():
             picker.set_defaults_today_midnight()
         if self._company_combo is not None:
-            self._company_combo.setCurrentIndex(0)
+            reset_searchable_combo(self._company_combo)
         if self._contact_person_combo is not None:
-            self._contact_person_combo.setCurrentIndex(0)
+            reset_searchable_combo(self._contact_person_combo)
         if self._currency_combo is not None:
-            self._currency_combo.setCurrentIndex(0)
+            reset_searchable_combo(self._currency_combo)
         for combo in self._master_combo_by_key.values():
-            combo.setCurrentIndex(0)
+            reset_searchable_combo(combo)
         self._clear_error()
 
     def _payload_from_form(self) -> dict[str, Any] | None:
-        if self._company_combo is None or self._company_combo.currentIndex() <= 0:
-            self._show_error("Company is required.")
+        company_id = combo_resolved_item_data(self._company_combo)
+        if company_id is None or not str(company_id).strip():
+            typed = (self._company_combo.currentText() or "").strip() if self._company_combo else ""
+            if typed:
+                self._show_error(strict_list_selection_message("a company"))
+            else:
+                self._show_error("Company is required.")
             if self._company_combo is not None:
                 self._company_combo.setFocus()
             return None
-        company_id = self._company_combo.currentData()
-        if company_id is None:
-            self._show_error("Company is required.")
-            self._company_combo.setFocus()
-            return None
-        if self._contact_person_combo is None or self._contact_person_combo.currentIndex() <= 0:
-            self._show_error("Contact Person is required.")
+        contact_id = combo_resolved_item_data(self._contact_person_combo)
+        if contact_id is None or not str(contact_id).strip():
+            typed = (
+                (self._contact_person_combo.currentText() or "").strip()
+                if self._contact_person_combo is not None
+                else ""
+            )
+            if typed:
+                self._show_error(strict_list_selection_message("a contact person"))
+            else:
+                self._show_error("Contact Person is required.")
             if self._contact_person_combo is not None:
                 self._contact_person_combo.setFocus()
-            return None
-        contact_id = self._contact_person_combo.currentData()
-        if contact_id is None:
-            self._show_error("Contact Person is required.")
-            self._contact_person_combo.setFocus()
             return None
         payload: dict[str, Any] = {"companyId": company_id, "contactPersonId": contact_id}
         for key in _REQUIRED_MASTER_KEYS:
             combo = self._master_combo_by_key.get(key)
-            if combo is None or combo.currentIndex() <= 0 or combo.currentData() is None:
+            raw = combo_resolved_master_key_seq(combo)
+            if raw is None or not str(raw).strip():
                 caption = dict(_FORM_FIELDS).get(key, key).replace("*", "")
-                self._show_error(f"{caption} is required.")
+                phrase = _STRICT_SELECT_PHRASE_BY_LEAD_KEY.get(key, f"a {caption.lower()}")
+                typed = (combo.currentText() or "").strip() if combo is not None else ""
+                if typed:
+                    self._show_error(strict_list_selection_message(phrase))
+                else:
+                    self._show_error(f"{caption} is required.")
                 if combo is not None:
                     combo.setFocus()
                 return None
         for key, combo in self._master_combo_by_key.items():
-            if combo.currentIndex() > 0 and combo.currentData() is not None:
-                payload[key] = combo.currentData()
+            if key in _REQUIRED_MASTER_KEYS:
+                payload[key] = combo_resolved_master_key_seq(combo)
+            else:
+                payload[key] = master_key_seq_for_payload(combo)
         for key, picker in self._datetime_fields.items():
             iso_local = picker.iso_timestamp()
             payload[key] = to_utc_iso(iso_local) or iso_local
-        if self._currency_combo is not None and self._currency_combo.currentIndex() > 0:
-            currency = self._currency_combo.currentData()
-            if currency is not None:
-                payload["currency"] = currency
+        currency = combo_resolved_item_data(self._currency_combo)
+        if currency is not None and str(currency).strip() != "":
+            payload["currency"] = currency
         if self._job_desc_edit is not None:
             jd = self._job_desc_edit.toPlainText().strip()
             if jd:

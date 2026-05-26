@@ -1,11 +1,11 @@
-"""Create DMT User page."""
+"""Create DM User page."""
 
 from __future__ import annotations
 
-import re
 from typing import Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -18,6 +18,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.dm.dm_user.dm_user_form_helpers import (
+    DM_USER_STATUS_FIELD_NAME,
+    create_mobile_field_row,
+    update_email_style,
+    update_mobile_style,
+    full_mobile_number,
+    validate_email_input,
+    validate_mobile_input,
+    wire_mobile_live_validation,
+)
 from core.api import api_create_dmt_user
 from core.user_context import get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
@@ -26,7 +36,6 @@ from ui.form_page_styles import (
     FORM_ERROR_LABEL_STYLE,
     FORM_INPUT_STYLE as INPUT_STYLE,
     FORM_LABEL_STYLE as LABEL_STYLE,
-    FORM_PAGE_FONT_SIZE_PX,
     FORM_PAGE_HEADER_STYLESHEET,
     FORM_PRIMARY_BUTTON_STYLESHEET,
     FORM_SECONDARY_BUTTON_STYLESHEET,
@@ -37,12 +46,17 @@ from ui.form_page_styles import (
     placeholder_example,
 )
 from ui.post_save_navigation import schedule_after_success
+from ui.searchable_form_combo import (
+    combo_resolved_master_key_seq,
+    require_master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    reset_searchable_combo,
+    wire_searchable_master_key_combo,
+)
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
-_EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
-
-class CreateDmtUserPage(QWidget):
+class CreateDmUserPage(QWidget):
     def __init__(
         self,
         on_back: Callable[[], None] | None = None,
@@ -51,6 +65,9 @@ class CreateDmtUserPage(QWidget):
         super().__init__()
         self.on_back = on_back
         self.on_create_success = on_create_success
+        self._status_combo: QComboBox | None = None
+        self._mobile_country: QComboBox | None = None
+        self._mobile_number: QLineEdit | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -64,7 +81,7 @@ class CreateDmtUserPage(QWidget):
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(*LIST_PAGE_HEADER_LAYOUT_MARGINS)
         header_layout.setSpacing(LIST_PAGE_HEADER_LAYOUT_SPACING)
-        title = QLabel("Create DMT User")
+        title = QLabel("Create User")
         header_layout.addWidget(title)
         header_layout.addStretch()
         back_btn = QPushButton("Back")
@@ -113,12 +130,12 @@ class CreateDmtUserPage(QWidget):
             labeled_field_block(field_caption_label("Last name*", LABEL_STYLE), self.last_name_edit)
         )
 
-        self.status_combo = QComboBox()
-        self.status_combo.addItem("ACTIVE", "ACTIVE")
-        self.status_combo.addItem("INACTIVE", "INACTIVE")
-        apply_form_combobox_field(self.status_combo, height_px=field_h, min_width=360)
+        status_combo = QComboBox()
+        apply_form_combobox_field(status_combo, height_px=field_h, min_width=360)
+        wire_searchable_master_key_combo(status_combo, search_field_label="Status")
+        self._status_combo = status_combo
         card_layout.addWidget(
-            labeled_field_block(field_caption_label("Status*", LABEL_STYLE), self.status_combo)
+            labeled_field_block(field_caption_label("Status*", LABEL_STYLE), status_combo)
         )
 
         self.email_edit = QLineEdit()
@@ -128,20 +145,18 @@ class CreateDmtUserPage(QWidget):
         self.email_edit.setMinimumWidth(360)
         self.email_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.email_edit.textChanged.connect(
-            lambda text: self._update_email_style(self.email_edit, text)
+            lambda text: update_email_style(self.email_edit, text)
         )
         card_layout.addWidget(
             labeled_field_block(field_caption_label("Email*", LABEL_STYLE), self.email_edit)
         )
 
-        self.mobile_edit = QLineEdit()
-        self.mobile_edit.setPlaceholderText(placeholder_example("80808080"))
-        self.mobile_edit.setStyleSheet(INPUT_STYLE)
-        self.mobile_edit.setFixedHeight(field_h)
-        self.mobile_edit.setMinimumWidth(360)
-        self.mobile_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        mobile_container, self._mobile_country, self._mobile_number = create_mobile_field_row(
+            field_h=field_h
+        )
+        wire_mobile_live_validation(self._mobile_country, self._mobile_number)
         card_layout.addWidget(
-            labeled_field_block(field_caption_label("Mobile*", LABEL_STYLE), self.mobile_edit)
+            labeled_field_block(field_caption_label("Mobile*", LABEL_STYLE), mobile_container)
         )
 
         card_layout.addSpacing(16)
@@ -176,6 +191,16 @@ class CreateDmtUserPage(QWidget):
         content_layout.addStretch()
         layout.addWidget(content)
 
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if self._status_combo is not None:
+            populate_master_key_by_field_name(
+                self._status_combo,
+                DM_USER_STATUS_FIELD_NAME,
+                token=self._token(),
+                include_placeholder=False,
+            )
+
     def _token(self) -> str | None:
         profile = get_user_profile()
         token = (
@@ -197,32 +222,34 @@ class CreateDmtUserPage(QWidget):
         self.error_label.setText("")
         self.error_label.setVisible(False)
 
-    def _update_email_style(self, widget: QLineEdit, text: str) -> None:
-        base = f"font-size: {FORM_PAGE_FONT_SIZE_PX}px; padding: 4px 8px; border-radius: 4px;"
-        if not text.strip():
-            widget.setStyleSheet(f"{base} border: 1px solid #e2e8f0; background-color: #ffffff;")
-        elif _EMAIL_REGEX.match(text.strip()):
-            widget.setStyleSheet(f"{base} border: 1px solid #22c55e; background-color: #ffffff;")
-        else:
-            widget.setStyleSheet(f"{base} border: 1px solid #ef4444; background-color: #ffffff;")
-
     def is_dirty(self) -> bool:
-        return bool(
-            self.first_name_edit.text().strip()
-            or self.last_name_edit.text().strip()
-            or self.status_combo.currentIndex() != 0
-            or self.email_edit.text().strip()
-            or self.mobile_edit.text().strip()
-        )
+        if self.first_name_edit.text().strip() or self.last_name_edit.text().strip():
+            return True
+        if self.email_edit.text().strip():
+            return True
+        if self._mobile_number and self._mobile_number.text().strip():
+            return True
+        if self._status_combo is not None:
+            seq = combo_resolved_master_key_seq(self._status_combo)
+            if seq is not None and str(seq).strip() != "":
+                return True
+        return False
 
     def reset_to_default(self) -> None:
         self.first_name_edit.clear()
         self.last_name_edit.clear()
-        self.status_combo.setCurrentIndex(0)
+        if self._status_combo is not None:
+            reset_searchable_combo(self._status_combo)
         self.email_edit.clear()
-        self.mobile_edit.clear()
-        self.email_edit.setStyleSheet(INPUT_STYLE)
-        self.mobile_edit.setStyleSheet(INPUT_STYLE)
+        if self._mobile_country is not None:
+            self._mobile_country.blockSignals(True)
+            self._mobile_country.setCurrentIndex(0)
+            self._mobile_country.blockSignals(False)
+        if self._mobile_number is not None:
+            self._mobile_number.clear()
+        update_email_style(self.email_edit, "")
+        if self._mobile_country is not None and self._mobile_number is not None:
+            update_mobile_style(self._mobile_country, self._mobile_number)
         self._clear_error()
 
     def _handle_back(self) -> None:
@@ -246,9 +273,8 @@ class CreateDmtUserPage(QWidget):
         self._clear_error()
         first_name = self.first_name_edit.text().strip()
         last_name = self.last_name_edit.text().strip()
-        status = str(self.status_combo.currentData() or "ACTIVE").strip().upper()
         email = self.email_edit.text().strip()
-        mobile = self.mobile_edit.text().strip()
+
         if not first_name:
             self._show_error("First name is required.")
             self.first_name_edit.setFocus()
@@ -257,29 +283,43 @@ class CreateDmtUserPage(QWidget):
             self._show_error("Last name is required.")
             self.last_name_edit.setFocus()
             return
-        if not email:
-            self._show_error("Email is required.")
+
+        email_err = validate_email_input(email)
+        if email_err:
+            self._show_error(email_err)
             self.email_edit.setFocus()
             return
-        if not _EMAIL_REGEX.match(email):
-            self._show_error("Please enter a valid email address.")
-            self.email_edit.setFocus()
+
+        if self._mobile_country is None or self._mobile_number is None:
+            self._show_error("Mobile fields are not available.")
             return
-        if not mobile:
-            self._show_error("Mobile is required.")
-            self.mobile_edit.setFocus()
+        mobile_err, country_code, mobile = validate_mobile_input(
+            self._mobile_country, self._mobile_number
+        )
+        if mobile_err:
+            self._show_error(mobile_err)
+            self._mobile_number.setFocus()
+            return
+
+        status_id, status_err = require_master_key_seq_for_payload(
+            self._status_combo, field_caption="Status", strict_phrase="a status"
+        )
+        if status_err:
+            self._show_error(status_err)
+            if self._status_combo is not None:
+                self._status_combo.setFocus()
             return
 
         result = api_create_dmt_user(
             first_name=first_name,
             last_name=last_name,
             email=email,
-            mobile=mobile,
-            status=status,
+            mobile=full_mobile_number(country_code, mobile),
+            status=status_id,
             token=self._token(),
         )
         if result.get("success"):
-            self._show_success(str(result.get("message") or "DMT user created successfully."))
+            self._show_success(str(result.get("message") or "User created successfully."))
             schedule_after_success(
                 delay_ms=800,
                 clear_error=self._clear_error,
@@ -288,4 +328,4 @@ class CreateDmtUserPage(QWidget):
                 on_success=self.on_create_success,
             )
         else:
-            self._show_error(str(result.get("message") or "Failed to create DMT user."))
+            self._show_error(str(result.get("message") or "Failed to create user."))

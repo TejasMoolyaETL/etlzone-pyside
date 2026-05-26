@@ -40,6 +40,7 @@ from ui.form_page_styles import (
     LIST_PAGE_HEADER_LAYOUT_SPACING,
 )
 from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
+from ui.searchable_form_combo import wire_searchable_labeled_rows_combo
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
 _COL1 = (
@@ -151,8 +152,14 @@ class ViewAPIDevTaskPage(QWidget):
             label_widget = field_caption_label(label_text, LABEL_STYLE)
             if canonical == "status":
                 w = QComboBox()
-                w.addItems(["ACTIVE", "INACTIVE", "OPEN", "IN_PROGRESS", "DONE", "BLOCKED"])
                 apply_form_combobox_field(w, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX, min_width=240)
+                _task_statuses = ("ACTIVE", "INACTIVE", "OPEN", "IN_PROGRESS", "DONE", "BLOCKED")
+                wire_searchable_labeled_rows_combo(
+                    w,
+                    rows=[(s, s) for s in _task_statuses],
+                    search_field_label="Status",
+                    default_display_text="ACTIVE",
+                )
                 w.setEnabled(False)
                 self._edits[canonical] = w
             else:
@@ -244,7 +251,7 @@ class ViewAPIDevTaskPage(QWidget):
             elif isinstance(w, QComboBox):
                 txt = _display_value(val, canonical, keys)
                 if txt and w.findText(txt) < 0:
-                    w.addItem(txt)
+                    w.addItem(txt, txt)
                 w.setCurrentText(txt or "ACTIVE")
 
     def _token(self) -> str | None:

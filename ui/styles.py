@@ -15,6 +15,13 @@ from ui.form_page_styles import (
     INPUT_PLACEHOLDER_FONT_WEIGHT,
     SUBMENU_FONT_SIZE_PX,
 )
+from ui.form_combobox_style import (
+    FORM_LIST_ITEM_HOVER_BG,
+    FORM_LIST_ITEM_HOVER_FG,
+    FORM_LIST_ITEM_SELECTED_BG,
+    FORM_LIST_ITEM_SELECTED_FG,
+    install_global_completer_popup_styling,
+)
 from ui.theme import Theme, panel_frame_stylesheet
 
 # —— Backward-compatible aliases (delegate to Theme) ——
@@ -51,7 +58,8 @@ CONTEXT_MENU_STYLESHEET = (
     f"QMenu::item {{ margin: 1px; padding: {_CONTEXT_MENU_PAD_V}px {_CONTEXT_MENU_PAD_H}px; "
     f"font-size: {APP_FONT_SIZE_PX}px; color: #334155; "
     "border-radius: 0px; } "
-    "QMenu::item:selected, QMenu::item:hover { background: #e2e8f0; color: #1e293b; } "
+    f"QMenu::item:hover {{ background: {FORM_LIST_ITEM_HOVER_BG}; color: {FORM_LIST_ITEM_HOVER_FG}; }} "
+    f"QMenu::item:selected {{ background: {FORM_LIST_ITEM_SELECTED_BG}; color: {FORM_LIST_ITEM_SELECTED_FG}; }} "
     "QMenu::separator { height: 1px; background: #e2e8f0; margin: 1px 0; } "
 )
 
@@ -158,8 +166,8 @@ def global_application_stylesheet() -> str:
         color: {t.TEXT_PRIMARY};
     }}
     QMenuBar::item:selected {{
-        background-color: {t.BG_APP};
-        color: {t.TEXT_PRIMARY};
+        background-color: {FORM_LIST_ITEM_HOVER_BG};
+        color: {FORM_LIST_ITEM_HOVER_FG};
     }}
     QMenu {{
         background-color: {t.BG_WHITE};
@@ -178,10 +186,13 @@ def global_application_stylesheet() -> str:
         border-radius: 0px;
         min-width: {_SUBMENU_WIDTH_PX}px;
     }}
-    QMenu::item:selected,
     QMenu::item:hover {{
-        background-color: {t.BG_APP};
-        color: {t.TEXT_PRIMARY};
+        background-color: {FORM_LIST_ITEM_HOVER_BG};
+        color: {FORM_LIST_ITEM_HOVER_FG};
+    }}
+    QMenu::item:selected {{
+        background-color: {FORM_LIST_ITEM_SELECTED_BG};
+        color: {FORM_LIST_ITEM_SELECTED_FG};
     }}
     QCheckBox {{
         font-size: {APP_FONT_SIZE_PX}px;
@@ -226,6 +237,7 @@ def global_application_stylesheet() -> str:
 
 def apply_app_theme(app: QApplication) -> None:
     """Apply app styling and neutralize system dark-theme palette leakage."""
+    install_global_completer_popup_styling()
     fusion = QStyleFactory.create("Fusion")
     if fusion is not None:
         app.setStyle(fusion)

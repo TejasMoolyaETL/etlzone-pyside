@@ -7,11 +7,13 @@ from typing import Any, Callable
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QAction, QCursor, QGuiApplication, QShowEvent
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QHBoxLayout,
     QLabel,
     QMenu,
     QMessageBox,
     QPushButton,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
@@ -19,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.dmt.dmt_object_tracker.dmt_object_tracker_comment_panel import ObjectTrackerCommentPanel
 from core.api import api_delete_object_tracker, api_get_all_object_trackers
 from core.app_preferences import format_datetime_display, is_datetime_field
 from core.user_context import get_user_profile
@@ -49,20 +52,47 @@ _TRACKER_COLUMN_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Module", ("moduleName",)),
     ("Object Name", ("objectName",)),
     ("TCode", ("tcode",)),
-    ("Business Object Type", ("businessObjectTypeName",)),
-    ("Scope", ("scopeName",)),
-    ("Load Approach", ("loadApproachName",)),
-    ("Upload Tool", ("uploadToolName",)),
-    ("Customization Status", ("customizationStatusName",)),
-    ("Build Status", ("buildStatusName",)),
+    (
+        "Status",
+        ("statusName", "statusLabel", "status", "dmt_object_list_tracker_status", "statusSeq", "status_seq"),
+    ),
+    (
+        "Business Object Type",
+        ("businessObjectTypeName", "businessObjectType", "dmt_business_object_type", "businessObjectTypeSeq"),
+    ),
+    ("Scope", ("scopeName", "scope", "dmt_scope", "scopeSeq")),
+    ("Load Approach", ("loadApproachName", "loadApproach", "dmt_load_approach", "loadApproachSeq")),
+    ("Upload Tool", ("uploadToolName", "uploadTool", "dmt_upload_tool", "uploadToolSeq")),
+    (
+        "Customization Status",
+        ("customizationStatusName", "customizationStatus", "dmt_customization_status", "customizationStatusSeq"),
+    ),
+    ("Build Status", ("buildStatusName", "buildStatus", "dmt_buildStatus", "buildStatusSeq")),
     ("Build Completion Date", ("buildCompletionDate",)),
-    ("Functional Unit Testing Status", ("functionalUnitTestingStatusName",)),
+    (
+        "Functional Unit Testing Status",
+        (
+            "functionalUnitTestingStatusName",
+            "functionalUnitTestingStatus",
+            "dmt_functionalUnitTestingStatus",
+            "functionalUnitTestingStatusSeq",
+        ),
+    ),
     ("Functional Unit Testing Completion Date", ("functionalUnitTestingCompletionDate",)),
-    ("Business Unit Testing Status", ("businessUnitTestingStatusName",)),
+    (
+        "Business Unit Testing Status",
+        (
+            "businessUnitTestingStatusName",
+            "businessUnitTestingStatus",
+            "dmt_businessUnitTestingStatus",
+            "businessUnitTestingStatusSeq",
+        ),
+    ),
     ("Business Unit Testing Completion Date", ("businessUnitTestingCompletionDate",)),
     ("Estimated Prod Count", ("estimatedProdCount",)),
     ("Functional SPOC", ("functionalSPOC",)),
     ("DMC Program Name", ("dmcProgramName",)),
+    ("Comments", ("comments",)),
     ("SharePoint", ("uploadedToSharePoint",)),
     ("Created By", ("createdBy",)),
     ("Created At", ("createdAt",)),
@@ -81,6 +111,26 @@ def _tracker_value_for_column(row: dict[str, Any], keys: tuple[str, ...]) -> tup
 def _format_cell(value: Any, key: str = "", key_candidates: tuple[str, ...] = ()) -> str:
     if is_blank_display_value(value):
         return ""
+    if isinstance(value, dict):
+        for k in ("keyValue", "key_value", "name", "label", "displayName"):
+            t = str(value.get(k) or "").strip()
+            if t:
+                return t
+        return ""
+    if isinstance(value, (list, tuple)):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                for k in ("keyValue", "key_value", "name", "label", "displayName"):
+                    t = str(item.get(k) or "").strip()
+                    if t:
+                        parts.append(t)
+                        break
+            else:
+                t = str(item).strip()
+                if t:
+                    parts.append(t)
+        return "\n".join(parts)
     if is_datetime_field(key, key_candidates):
         return format_datetime_display(value)
     if isinstance(value, bool):
@@ -111,6 +161,7 @@ class DmtObjectTrackerListPage(QWidget):
         self._filter_apply_timer.setSingleShot(True)
         self._filter_apply_timer.setInterval(200)
         self._filter_apply_timer.timeout.connect(self._apply_column_filters_refresh)
+        self._comment_context_listeners: list[Callable[[], None]] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -179,18 +230,54 @@ class DmtObjectTrackerListPage(QWidget):
         cl = QVBoxLayout(content)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(12)
+        split = QSplitter(Qt.Orientation.Horizontal)
+        left_panel = QWidget()
+        ll = QVBoxLayout(left_panel)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(8)
         self._message_label = QLabel()
         self._message_label.setVisible(False)
-        cl.addWidget(self._message_label)
+        ll.addWidget(self._message_label)
         self.table = QTableWidget()
         apply_data_table_appearance(self.table)
         self.table.setSortingEnabled(False)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.itemDoubleClicked.connect(self._on_row_double_clicked)
+        self.table.itemSelectionChanged.connect(self._on_tracker_selection_changed)
         attach_table_copy_shortcut(self.table)
-        cl.addWidget(self.table, 1)
+        ll.addWidget(self.table, 1)
+        split.addWidget(left_panel)
+
+        self._comment_panel = ObjectTrackerCommentPanel(self)
+        split.addWidget(self._comment_panel)
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 2)
+        split.setSizes([700, 300])
+        cl.addWidget(split, 1)
         layout.addWidget(content, 1)
+
+    def get_selected_row(self) -> dict[str, Any] | None:
+        row = self.table.currentRow()
+        if row < 0:
+            return None
+        return self._get_tracker_at_row(row)
+
+    def register_comment_context_listener(self, listener: Callable[[], None]) -> None:
+        if listener not in self._comment_context_listeners:
+            self._comment_context_listeners.append(listener)
+
+    def _notify_comment_context_changed(self) -> None:
+        for listener in self._comment_context_listeners:
+            try:
+                listener()
+            except Exception:
+                continue
+
+    def _on_tracker_selection_changed(self) -> None:
+        self._notify_comment_context_changed()
 
     def _data_row_offset(self) -> int:
         return data_row_offset(self._filter_visible)
@@ -279,6 +366,10 @@ class DmtObjectTrackerListPage(QWidget):
         return None
 
     def _on_context_menu(self, pos: QPoint) -> None:
+        clicked_item = self.table.itemAt(pos)
+        if clicked_item is not None and clicked_item.row() >= self._data_row_offset():
+            self.table.setCurrentCell(clicked_item.row(), clicked_item.column())
+            self.table.selectRow(clicked_item.row())
         rec = self._tracker_at_pos(pos)
         menu = QMenu(self)
         menu.setStyleSheet(CONTEXT_MENU_STYLESHEET)

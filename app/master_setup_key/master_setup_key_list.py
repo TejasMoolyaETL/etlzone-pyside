@@ -24,7 +24,15 @@ from core.app_preferences import format_datetime_display, is_datetime_field
 from core.user_context import get_user_profile
 from ui.auto_hide_message import show_auto_hiding_message
 from ui.blank_display import is_blank_display_value
-from ui.data_table import apply_data_table_appearance, attach_table_copy_shortcut, resize_data_table_columns_to_content
+from ui.data_table import (
+    apply_data_table_appearance,
+    attach_table_copy_shortcut,
+    clear_filter_row_widgets,
+    data_row_offset,
+    filter_dict_rows_by_column_edits,
+    render_dict_rows_table,
+    saved_filter_texts,
+)
 from ui.form_page_styles import (
     LIST_PAGE_HEADER_HEIGHT_PX,
     LIST_PAGE_HEADER_LAYOUT_MARGINS,
@@ -73,6 +81,11 @@ class MasterSetupKeyListPage(QWidget):
         self.on_create_clicked = on_create_clicked
         self.on_edit_clicked = on_edit_clicked
         self._source_rows: list[dict[str, Any]] = []
+        self._filter_visible = False
+        self._filter_apply_timer = QTimer(self)
+        self._filter_apply_timer.setSingleShot(True)
+        self._filter_apply_timer.setInterval(200)
+        self._filter_apply_timer.timeout.connect(self._refresh_table_view)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -92,6 +105,12 @@ class MasterSetupKeyListPage(QWidget):
         refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         refresh_btn.clicked.connect(self._load_rows)
         hl.addWidget(refresh_btn)
+        self._filter_btn = QPushButton("Filters")
+        self._filter_btn.setCheckable(True)
+        self._filter_btn.setFixedWidth(100)
+        self._filter_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._filter_btn.toggled.connect(self._on_filter_toggle)
+        hl.addWidget(self._filter_btn)
         create_btn = QPushButton("Create")
         create_btn.setFixedWidth(100)
         create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -108,7 +127,7 @@ class MasterSetupKeyListPage(QWidget):
         cl.addWidget(self._message_label)
         self.table = QTableWidget()
         apply_data_table_appearance(self.table)
-        self.table.setSortingEnabled(True)
+        self.table.setSortingEnabled(False)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.itemDoubleClicked.connect(self._on_row_double_clicked)
@@ -121,8 +140,14 @@ class MasterSetupKeyListPage(QWidget):
         token = profile.get("token") or profile.get("accessToken") or profile.get("access_token") or profile.get("jwt")
         return str(token) if token else None
 
+    def _data_row_offset(self) -> int:
+        return data_row_offset(self._filter_visible)
+
+    def _is_data_row(self, row: int) -> bool:
+        return row >= self._data_row_offset()
+
     def _row_data(self, row: int) -> dict[str, Any] | None:
-        if row < 0 or row >= self.table.rowCount():
+        if row < 0 or row >= self.table.rowCount() or not self._is_data_row(row):
             return None
         it = self.table.item(row, 0)
         d = it.data(Qt.ItemDataRole.UserRole) if it else None
@@ -189,6 +214,42 @@ class MasterSetupKeyListPage(QWidget):
     def refresh(self) -> None:
         self._load_rows()
 
+    def _schedule_filter_apply(self) -> None:
+        if self._filter_visible:
+            self._filter_apply_timer.start()
+
+    def _on_filter_toggle(self, checked: bool) -> None:
+        self._filter_visible = checked
+        if not checked:
+            clear_filter_row_widgets(self.table)
+        self._refresh_table_view()
+
+    def _filtered_rows(self) -> list[dict[str, Any]]:
+        rows = list(self._source_rows)
+        if not self._filter_visible:
+            return rows
+        return filter_dict_rows_by_column_edits(
+            rows,
+            self.table,
+            list(_COL_SPEC),
+            True,
+            _value_for_col,
+            _fmt,
+        )
+
+    def _refresh_table_view(self) -> None:
+        saved = saved_filter_texts(self.table) if self._filter_visible else None
+        render_dict_rows_table(
+            self.table,
+            self._filtered_rows(),
+            list(_COL_SPEC),
+            filter_visible=self._filter_visible,
+            value_for_column=_value_for_col,
+            format_cell=_fmt,
+            on_filter_text_changed=self._schedule_filter_apply,
+            saved_filter_texts_list=saved,
+        )
+
     def _load_rows(self) -> None:
         result = api_get_all_master_setup_key_entries(token=self._token())
         if not result.get("success"):
@@ -200,18 +261,5 @@ class MasterSetupKeyListPage(QWidget):
             return
         rows = [dict(r) for r in (result.get("data") or []) if isinstance(r, dict)]
         self._source_rows = rows
-        self.table.setSortingEnabled(False)
-        self.table.setColumnCount(len(_COL_SPEC))
-        self.table.setHorizontalHeaderLabels([h for h, _ in _COL_SPEC])
-        self.table.setRowCount(len(rows))
-        for r, row in enumerate(rows):
-            for col, (_, keys) in enumerate(_COL_SPEC):
-                value, key_used = _value_for_col(row, keys)
-                item = QTableWidgetItem(_fmt(value, key_used, keys))
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                if col == 0:
-                    item.setData(Qt.ItemDataRole.UserRole, row)
-                self.table.setItem(r, col, item)
-        self.table.setSortingEnabled(True)
-        resize_data_table_columns_to_content(self.table, list(_COL_SPEC), self._source_rows, _value_for_col, _fmt)
+        self._refresh_table_view()
         show_auto_hiding_message(self, self._message_label, "", error=False)

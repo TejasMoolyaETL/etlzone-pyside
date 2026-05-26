@@ -39,6 +39,7 @@ from ui.data_table import (
     clear_filter_row_widgets,
     data_row_offset,
     filter_dict_rows_by_column_edits,
+    format_data_table_cell,
     install_filter_row,
     resize_data_table_columns_to_content,
     sync_vertical_header_labels,
@@ -120,8 +121,10 @@ def _value_pick_tuple(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, 
     return _pick(row, keys), keys[0]
 
 
-def _format_cell_for_filter(value: Any, _key: str = "", _key_candidates: tuple[str, ...] = ()) -> str:
-    return _format_cell_value(value)
+def _format_cell_for_filter(
+    value: Any, key: str = "", key_candidates: tuple[str, ...] = ()
+) -> str:
+    return format_data_table_cell(value, key, key_candidates)
 
 
 class ContactPersonCompanyAssignmentListPage(QWidget):
@@ -389,8 +392,8 @@ class ContactPersonCompanyAssignmentListPage(QWidget):
         for r, row in enumerate(rows):
             tr = off + r
             for c, (_, keys) in enumerate(_COMPANY_COLUMNS):
-                val, _ku = _value_pick_tuple(row, keys)
-                it = QTableWidgetItem(_format_cell_value(val))
+                val, ku = _value_pick_tuple(row, keys)
+                it = QTableWidgetItem(format_data_table_cell(val, ku, keys))
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if c == 0:
                     it.setData(Qt.ItemDataRole.UserRole, row)
@@ -440,8 +443,8 @@ class ContactPersonCompanyAssignmentListPage(QWidget):
         self._contacts_table.setRowCount(len(rows))
         for r, row in enumerate(rows):
             for c, (_, keys) in enumerate(_CONTACT_COLUMNS):
-                val, _ku = _value_pick_tuple(row, keys)
-                it = QTableWidgetItem(_format_cell_value(val))
+                val, ku = _value_pick_tuple(row, keys)
+                it = QTableWidgetItem(format_data_table_cell(val, ku, keys))
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if c == 0:
                     it.setData(Qt.ItemDataRole.UserRole, row)

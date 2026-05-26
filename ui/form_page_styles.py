@@ -38,7 +38,11 @@ INPUT_PLACEHOLDER_FONT_WEIGHT = 400
 
 
 def placeholder_search_select(*field_labels: str) -> str:
-    """Completer/search fields — same wording as Create User Dept Name."""
+    """Searchable list fields — same pattern as Create BU Organization (``Org Id | Org Name``).
+
+    Pass column titles joined into ``Search and select: …`` (pipe-separated), e.g.
+    ``placeholder_search_select("Org Id", "Org Name")``.
+    """
     return "Search and select: " + " | ".join(field_labels)
 
 
@@ -150,7 +154,7 @@ DATA_TABLE_STYLESHEET = f"""
 
 FILTER_EDIT_STYLE = (
     f"QLineEdit {{ padding: 2px 6px; font-size: {APP_FONT_SIZE_PX}px; "
-    "border: 1px solid #e2e8f0; border-radius: 3px; background: #ffffff; }}"
+    f"border: 1px solid #e2e8f0; border-radius: 3px; background: #ffffff; }}"
     + LINEEDIT_PLACEHOLDER_SUBSTYLE
 )
 

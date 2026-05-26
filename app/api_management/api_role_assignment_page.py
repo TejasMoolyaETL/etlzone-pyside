@@ -6,11 +6,12 @@ import json
 import traceback
 from typing import Any
 
-from PySide6.QtCore import QObject, QPoint, QSize, Qt, QStringListModel, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QPoint, QSize, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QCursor, QShowEvent
 from PySide6.QtWidgets import (
+    QButtonGroup,
+    QCheckBox,
     QComboBox,
-    QCompleter,
     QDialog,
     QFormLayout,
     QFrame,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QSplitter,
@@ -33,11 +35,12 @@ from PySide6.QtWidgets import (
 
 from core.api import (
     api_change_api_access_by_id,
-    api_delete_api_access_by_id,
     api_get_all_apis,
     api_get_all_roles,
     api_get_api_access_by_api_id,
     api_grant_api_access,
+    api_remove_multiple_assignments_by_ids,
+    api_deactivate_multiple_roles_by_api_id,
 )
 from core.app_preferences import format_datetime_display, is_datetime_field
 from ui.blank_display import is_blank_display_value
@@ -45,6 +48,8 @@ from core.user_context import get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
 from ui.form_page_styles import (
     FORM_ERROR_LABEL_STYLE,
+    FORM_PRIMARY_BUTTON_STYLESHEET,
+    FORM_SECONDARY_BUTTON_STYLESHEET,
     LIST_PAGE_HEADER_HEIGHT_PX,
     LIST_PAGE_HEADER_LAYOUT_MARGINS,
     LIST_PAGE_HEADER_LAYOUT_SPACING,
@@ -53,7 +58,6 @@ from ui.form_page_styles import (
     MODAL_DIALOG_SECONDARY_BUTTON_STYLESHEET,
     MODAL_FIELD_HEIGHT_PX,
     MODAL_FIELD_LABEL_STYLE,
-    placeholder_search_select,
 )
 from ui.data_table import (
     apply_data_table_appearance,
@@ -67,7 +71,6 @@ from ui.data_table import (
     sync_vertical_header_labels,
 )
 from ui.post_save_navigation import NO_CHANGES_MESSAGE
-from ui.strict_completer import strict_list_selection_message
 
 from app.user_management.users.user_create import INPUT_STYLE
 from ui.form_combobox_style import FORM_COMBOBOX_STYLE, apply_form_combobox_field
@@ -104,14 +107,28 @@ def _value_for_column(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, 
 
 
 # Fixed columns for per-API role assignments (not extended from API payload keys).
+# Column 0: checkbox only (empty keys); row dict stored on every cell including col 0.
 _ASSIGNMENT_COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Role Name", ("roleName", "role_name")),
+    ("", ()),
     ("API Assign Id", ("apiAssignId", "api_assign_id")),
+    ("Role Name", ("roleName", "role_name")),
     ("Status", ("status",)),
 )
+_ASSIGNMENT_CHECKBOX_COL = 0
 
-# Status values for PATCH .../change-access-api-by-id/{id}/{status}
-_ACCESS_STATUS_CHOICES = ("ACTIVE", "DEACTIVE")
+# PATCH .../change-api-assignment-access-by-id/{id}/{status} uses ACTIVE or INACTIVE in the path.
+
+_GRANT_ROLE_CB_STYLE = "QCheckBox { color: #0f172a; }"
+_GRANT_ROLE_CB_ASSIGNED_STYLE = """
+QCheckBox:disabled {
+    color: #94a3b8;
+}
+QCheckBox::indicator:disabled {
+    background-color: #e2e8f0;
+    border: 1px solid #cbd5e1;
+    border-radius: 3px;
+}
+"""
 
 
 def _format_cell(value: Any, key: str = "", key_candidates: tuple[str, ...] = ()) -> str:
@@ -124,6 +141,57 @@ def _format_cell(value: Any, key: str = "", key_candidates: tuple[str, ...] = ()
     if isinstance(value, (dict, list)):
         return json.dumps(value, default=str)
     return str(value)
+
+
+class _ApiRoleAccessStatusDialog(QDialog):
+    """Modal: choose ACTIVE or INACTIVE for change-status-multiple-role-by-api-id."""
+
+    def __init__(self, parent: QWidget | None, *, count: int) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("ACTIVE / INACTIVE")
+        self.setModal(True)
+        self.setMinimumWidth(360)
+        self.setStyleSheet("QDialog { background: #ffffff; }")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        intro = QLabel(f"Choose status for {count} selected role(s) for this API:")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self._radio_active = QRadioButton("ACTIVE")
+        self._radio_inactive = QRadioButton("INACTIVE")
+        self._radio_active.setChecked(True)
+        grp = QButtonGroup(self)
+        grp.addButton(self._radio_active)
+        grp.addButton(self._radio_inactive)
+        layout.addWidget(self._radio_active)
+        layout.addWidget(self._radio_inactive)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        submit = QPushButton("Submit")
+        submit.setFixedWidth(100)
+        submit.setStyleSheet(FORM_PRIMARY_BUTTON_STYLESHEET)
+        submit.setCursor(Qt.CursorShape.PointingHandCursor)
+        submit.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.setFixedWidth(100)
+        cancel.setStyleSheet(FORM_SECONDARY_BUTTON_STYLESHEET)
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel.clicked.connect(self.reject)
+        btn_row.addStretch(1)
+        btn_row.addWidget(submit)
+        btn_row.addWidget(cancel)
+        layout.addLayout(btn_row)
+
+    def selected_status(self) -> str:
+        """Return API–role access status: ACTIVE or INACTIVE."""
+        if self._radio_inactive.isChecked():
+            return "INACTIVE"
+        return "ACTIVE"
 
 
 class _LoadWorker(QObject):
@@ -154,7 +222,7 @@ def _grant_dialog_cell(row: dict[str, Any], keys: tuple[str, ...]) -> str:
 
 
 class _GrantAccessDialog(QDialog):
-    """Grant role access to an API — layout aligned with Add User Role (_AssignRoleDialog)."""
+    """Grant role access to an API — pick one or more roles (checkboxes + search)."""
 
     _API_ID_KEYS = ("apiId", "api_id", "id")
     _API_NAME_KEYS = ("apiName", "api_name", "name", "title")
@@ -168,6 +236,7 @@ class _GrantAccessDialog(QDialog):
         parent: QWidget | None = None,
         *,
         token: str | None = None,
+        assigned_role_ids: set[str] | None = None,
     ) -> None:
         super().__init__(parent)
         self._token = token
@@ -175,11 +244,12 @@ class _GrantAccessDialog(QDialog):
         self._grant_success_message = "Access granted successfully."
         self.setWindowTitle("Grant API Access")
         self.setModal(True)
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(520)
+        self.setMinimumHeight(420)
         self.setStyleSheet("QDialog { background: #ffffff; }")
 
-        self._resolved_role_id: str | None = None
-        self._role_pairs: list[tuple[str, str]] = []
+        self._role_rows: list[tuple[QWidget, QCheckBox, str, str]] = []
+        assigned: set[str] = set(assigned_role_ids) if assigned_role_ids else set()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -248,33 +318,72 @@ class _GrantAccessDialog(QDialog):
         sep.setStyleSheet("background-color: #cbd5e1; border: none; max-height: 1px;")
         layout.addWidget(sep)
 
-        bottom_form = _make_form()
-        suggestions: list[str] = []
+        roles_heading = QLabel("Roles")
+        roles_heading.setStyleSheet("font-weight: 600; color: #0f172a;")
+        layout.addWidget(roles_heading)
+
+        search_form = _make_form()
+        self._role_search = QLineEdit()
+        self._role_search.setPlaceholderText("Search by Role Id or Role Name…")
+        self._role_search.setStyleSheet(INPUT_STYLE)
+        self._role_search.setFixedHeight(fh)
+        self._role_search.setMinimumWidth(240)
+        self._role_search.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._role_search.textChanged.connect(self._on_role_search_changed)
+        _add_view_user_form_row(search_form, "Search", self._role_search)
+        layout.addLayout(search_form)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setMinimumHeight(200)
+        scroll.setMaximumHeight(420)
+        scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setContentsMargins(4, 4, 8, 4)
+        inner_layout.setSpacing(4)
+
+        built_any = False
         for role in roles:
+            if not isinstance(role, dict):
+                continue
             rid = role.get("roleId") or role.get("role_id") or role.get("id")
-            rname = str(role.get("roleName") or role.get("role_name") or role.get("name") or "").strip()
             if rid is None:
                 continue
-            disp = f"{rid} | {rname}" if rname else str(rid)
-            self._role_pairs.append((str(rid), disp))
-            suggestions.append(disp)
+            rname = str(role.get("roleName") or role.get("role_name") or role.get("name") or "").strip()
+            rid_s = str(rid).strip()
+            label = f"{rname}  (ID: {rid_s})" if rname else f"Role ID: {rid_s}"
+            row_w = QWidget()
+            row_h = QHBoxLayout(row_w)
+            row_h.setContentsMargins(0, 0, 0, 0)
+            row_h.setSpacing(8)
+            cb = QCheckBox(label)
+            already = rid_s in assigned
+            if already:
+                cb.setEnabled(False)
+                cb.setChecked(False)
+                cb.setToolTip("This role is already assigned to this API.")
+                cb.setStyleSheet(_GRANT_ROLE_CB_ASSIGNED_STYLE)
+            else:
+                cb.setStyleSheet(_GRANT_ROLE_CB_STYLE)
+            row_h.addWidget(cb, 1)
+            inner_layout.addWidget(row_w)
+            self._role_rows.append((row_w, cb, rid_s, rname))
+            built_any = True
 
-        self.role_edit = QLineEdit()
-        self.role_edit.setPlaceholderText(placeholder_search_select("Role Id", "Role Name"))
-        self.role_edit.setStyleSheet(INPUT_STYLE)
-        self.role_edit.setFixedHeight(fh)
-        self.role_edit.setMinimumWidth(240)
-        self.role_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.role_completer = QCompleter(self.role_edit)
-        self.role_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self.role_completer.setFilterMode(Qt.MatchFlag.MatchContains)
-        self.role_completer.setMaxVisibleItems(12)
-        self.role_edit.setCompleter(self.role_completer)
-        self.role_completer.setModel(QStringListModel(suggestions))
-        self.role_completer.activated.connect(self._on_role_selected)
-        _add_view_user_form_row(bottom_form, "Role", self.role_edit)
+        if not built_any:
+            empty = QLabel("No roles with a Role Id are available.")
+            empty.setWordWrap(True)
+            empty.setStyleSheet("color: #64748b;")
+            inner_layout.addWidget(empty)
 
-        layout.addLayout(bottom_form)
+        inner_layout.addStretch(1)
+        scroll.setWidget(inner)
+        layout.addWidget(scroll, 1)
 
         save_btn = QPushButton("Save")
         save_btn.setFixedWidth(100)
@@ -299,30 +408,30 @@ class _GrantAccessDialog(QDialog):
         br.addStretch(1)
         layout.addWidget(btn_row)
 
-    def _on_role_selected(self, text: str) -> None:
-        self.role_edit.setText(text)
-
-    def _role_id_from_text(self, txt: str) -> str:
-        raw = txt.strip()
-        if "|" in raw:
-            raw = raw.split("|", 1)[0].strip()
-        return raw
+    def _on_role_search_changed(self, text: str) -> None:
+        needle = text.strip().lower()
+        for row_w, _cb, rid_s, rname in self._role_rows:
+            if not needle:
+                row_w.setVisible(True)
+                continue
+            if needle in rid_s.lower() or needle in rname.lower():
+                row_w.setVisible(True)
+            else:
+                row_w.setVisible(False)
 
     def _submit(self) -> None:
         self.msg.clear()
         self.msg.setVisible(False)
-        raw = self.role_edit.text().strip()
-        allowed = {d for _, d in self._role_pairs}
-        if not raw:
-            self.msg.setText("Please enter or select a role.")
+        selected: list[str] = []
+        for _row_w, cb, rid_s, _rname in self._role_rows:
+            if not cb.isEnabled():
+                continue
+            if cb.isChecked():
+                selected.append(rid_s)
+        if not selected:
+            self.msg.setText("Select at least one role.")
             self.msg.setVisible(True)
             return
-        if raw not in allowed:
-            self.msg.setText(strict_list_selection_message("a role"))
-            self.msg.setVisible(True)
-            return
-        rid = self._role_id_from_text(raw)
-        self._resolved_role_id = rid
         if self._api_id is None:
             self.msg.setText("Selected API does not have an API Id.")
             self.msg.setVisible(True)
@@ -331,16 +440,13 @@ class _GrantAccessDialog(QDialog):
             self.msg.setText("Session expired. Please log in again.")
             self.msg.setVisible(True)
             return
-        result = api_grant_api_access(role_id=rid, api_id=self._api_id, token=self._token)
+        result = api_grant_api_access(api_id=self._api_id, role_ids=selected, token=self._token)
         if not result.get("success"):
             self.msg.setText(str(result.get("message") or "Failed to grant access."))
             self.msg.setVisible(True)
             return
         self._grant_success_message = str(result.get("message") or "Access granted successfully.")
         self.accept()
-
-    def selected_role_id(self) -> str | None:
-        return self._resolved_role_id
 
     def grant_success_message(self) -> str:
         return self._grant_success_message
@@ -351,10 +457,11 @@ def _edit_dialog_assign_id(row: dict[str, Any]) -> Any:
 
 
 def _edit_dialog_status_index(current: str) -> int:
-    cur = (current or "").strip().upper()
-    for i, s in enumerate(_ACCESS_STATUS_CHOICES):
-        if s == cur:
-            return i
+    cur = (current or "").strip().upper().replace("-", "").replace(" ", "")
+    if cur == "ACTIVE":
+        return 0
+    if cur in ("DEACTIVE", "INACTIVE"):
+        return 1
     return 0
 
 
@@ -465,8 +572,8 @@ class _EditApiAssignmentDialog(QDialog):
 
         bottom_form = _make_form()
         self.new_status = QComboBox()
-        for st in _ACCESS_STATUS_CHOICES:
-            self.new_status.addItem(st)
+        self.new_status.addItem("ACTIVE", "ACTIVE")
+        self.new_status.addItem("INACTIVE", "INACTIVE")
         self.new_status.setCurrentIndex(_edit_dialog_status_index(self._status_before_edit))
         apply_form_combobox_field(self.new_status, height_px=fh, min_width=240)
         _add_view_user_form_row(bottom_form, "New status", self.new_status)
@@ -546,13 +653,13 @@ class _EditApiAssignmentDialog(QDialog):
         self._editing = True
         self.new_status.setEnabled(True)
         self.new_status.setStyleSheet(FORM_COMBOBOX_STYLE)
-        self._snap_status = self.new_status.currentText().strip().upper()
+        self._snap_status = str(self.new_status.currentData() or "ACTIVE")
         self._btn_stack.setCurrentIndex(1)
 
     def _has_unsaved_changes(self) -> bool:
         if not self._editing:
             return False
-        return self.new_status.currentText().strip().upper() != self._snap_status
+        return str(self.new_status.currentData() or "") != self._snap_status
 
     def _handle_back(self) -> None:
         self.reject()
@@ -592,7 +699,7 @@ class _EditApiAssignmentDialog(QDialog):
             self._success_message = NO_CHANGES_MESSAGE
             self.accept()
             return
-        new_status = self.new_status.currentText().strip().upper()
+        new_status = str(self.new_status.currentData() or "").strip().upper()
         profile = get_user_profile()
         token = (
             profile.get("token")
@@ -717,13 +824,39 @@ class ApiRoleAssignmentPage(QWidget):
         assign_hh.setStretchLastSection(False)
         for col in range(len(assignment_cols)):
             assign_hh.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+        assign_hh.setSectionResizeMode(_ASSIGNMENT_CHECKBOX_COL, QHeaderView.ResizeMode.Fixed)
+        self._assignments_table.setColumnWidth(_ASSIGNMENT_CHECKBOX_COL, 40)
         assign_hh.setMinimumSectionSize(MIN_DATA_COL_WIDTH_PX)
         self._assignments_table.setSortingEnabled(True)
         self._assignments_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._assignments_table.customContextMenuRequested.connect(self._on_assignment_context_menu)
         self._assignments_table.itemDoubleClicked.connect(self._on_assignment_row_double_clicked)
+        self._assignments_table.itemChanged.connect(self._on_assignments_table_item_changed)
         attach_table_copy_shortcut(self._assignments_table)
         right_layout.addWidget(self._assignments_table, 1)
+
+        assign_btn_row = QWidget()
+        assign_btn_row.setStyleSheet("margin-bottom: 6px;")
+        abl = QHBoxLayout(assign_btn_row)
+        abl.setContentsMargins(0, 0, 0, 0)
+        abl.setSpacing(8)
+        self._assignments_remove_btn = QPushButton("Remove")
+        self._assignments_remove_btn.setEnabled(False)
+        self._assignments_remove_btn.setFixedWidth(100)
+        self._assignments_remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._assignments_remove_btn.setStyleSheet(MODAL_DIALOG_SECONDARY_BUTTON_STYLESHEET)
+        self._assignments_remove_btn.clicked.connect(self._on_assignments_remove_clicked)
+        self._assignments_deactivate_btn = QPushButton("ACTIVE/INACTIVE")
+        self._assignments_deactivate_btn.setEnabled(False)
+        self._assignments_deactivate_btn.setFixedWidth(130)
+        self._assignments_deactivate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._assignments_deactivate_btn.setStyleSheet(MODAL_DIALOG_SECONDARY_BUTTON_STYLESHEET)
+        self._assignments_deactivate_btn.clicked.connect(self._on_assignments_deactivate_clicked)
+        abl.addWidget(self._assignments_remove_btn)
+        abl.addWidget(self._assignments_deactivate_btn)
+        abl.addStretch(1)
+        right_layout.addWidget(assign_btn_row)
+
         self._roles_msg = QLabel("")
         self._roles_msg.setVisible(False)
         self._roles_msg.setWordWrap(True)
@@ -752,6 +885,10 @@ class ApiRoleAssignmentPage(QWidget):
             or profile.get("jwt")
         )
         return str(token) if token else None
+
+    def _set_assignments_bulk_buttons_enabled(self, enabled: bool) -> None:
+        self._assignments_remove_btn.setEnabled(enabled)
+        self._assignments_deactivate_btn.setEnabled(enabled)
 
     def _populate_roles(self, roles: list[dict[str, Any]]) -> None:
         self._roles = roles
@@ -881,6 +1018,7 @@ class ApiRoleAssignmentPage(QWidget):
         self._current_api_row = api_row
         self._assignments_table.setSortingEnabled(False)
         self._assignments_table.setRowCount(0)
+        self._set_assignments_bulk_buttons_enabled(False)
         self._roles_msg.setStyleSheet(MODAL_FIELD_LABEL_STYLE)
         self._roles_msg.setText("Loading assignments...")
         self._roles_msg.setVisible(True)
@@ -903,7 +1041,6 @@ class ApiRoleAssignmentPage(QWidget):
         show_auto_hiding_message(self, self.message_label, "")
 
     def _populate_assignments_table(self, rows: list[dict[str, Any]]) -> None:
-        col_spec = list(_ASSIGNMENT_COLUMNS)
         if not rows:
             self._roles_msg.setStyleSheet(MODAL_FIELD_LABEL_STYLE)
             self._roles_msg.setText("No role assignments for this API.")
@@ -911,20 +1048,34 @@ class ApiRoleAssignmentPage(QWidget):
             self._assignments_table.setSortingEnabled(False)
             self._assignments_table.setRowCount(0)
             self._assignments_table.setSortingEnabled(True)
+            self._set_assignments_bulk_buttons_enabled(False)
             return
         self._roles_msg.setVisible(False)
         try:
             data_rows = [dict(r) for r in rows if isinstance(r, dict)]
             self._assignments_table.setSortingEnabled(False)
+            self._assignments_table.blockSignals(True)
             self._assignments_table.setRowCount(len(data_rows))
+            col_spec = list(_ASSIGNMENT_COLUMNS)
             for r_idx, row in enumerate(data_rows):
                 full = dict(row)
-                for c_idx, (_, keys) in enumerate(col_spec):
-                    val, key_used = _value_for_column(full, keys)
-                    cell = QTableWidgetItem(_format_cell(val, key_used, keys))
-                    cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                    cell.setData(Qt.ItemDataRole.UserRole, full)
+                for c_idx, (_hdr, keys) in enumerate(col_spec):
+                    if not keys:
+                        cell = QTableWidgetItem()
+                        cell.setFlags(
+                            Qt.ItemFlag.ItemIsEnabled
+                            | Qt.ItemFlag.ItemIsSelectable
+                            | Qt.ItemFlag.ItemIsUserCheckable
+                        )
+                        cell.setCheckState(Qt.CheckState.Unchecked)
+                        cell.setData(Qt.ItemDataRole.UserRole, full)
+                    else:
+                        val, key_used = _value_for_column(full, keys)
+                        cell = QTableWidgetItem(_format_cell(val, key_used, keys))
+                        cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                        cell.setData(Qt.ItemDataRole.UserRole, full)
                     self._assignments_table.setItem(r_idx, c_idx, cell)
+            self._assignments_table.blockSignals(False)
             resize_data_table_columns_to_content(
                 self._assignments_table,
                 list(col_spec),
@@ -932,15 +1083,25 @@ class ApiRoleAssignmentPage(QWidget):
                 _value_for_column,
                 _format_cell,
             )
+            self._assignments_table.setColumnWidth(_ASSIGNMENT_CHECKBOX_COL, 40)
+            self._assignments_table.horizontalHeader().setSectionResizeMode(
+                _ASSIGNMENT_CHECKBOX_COL, QHeaderView.ResizeMode.Fixed
+            )
+            self._sync_assignments_bulk_buttons()
             self._assignments_table.setSortingEnabled(True)
         except Exception:
             traceback.print_exc()
+            self._assignments_table.blockSignals(False)
             self._assignments_table.setSortingEnabled(False)
             self._assignments_table.setRowCount(0)
+            self._set_assignments_bulk_buttons_enabled(False)
             self._assignments_table.setSortingEnabled(True)
 
     def _assign_id_from_row(self, row: dict[str, Any]) -> Any:
         return row.get("apiAssignId") or row.get("api_assign_id") or row.get("assignId") or row.get("assign_id")
+
+    def _role_id_from_row(self, row: dict[str, Any]) -> Any:
+        return row.get("roleId") or row.get("role_id") or row.get("id")
 
     def _reload_current_api_assignments(self) -> None:
         if self._current_api_id is None or not isinstance(self._current_api_row, dict):
@@ -976,6 +1137,7 @@ class ApiRoleAssignmentPage(QWidget):
             self._assignments_table.setSortingEnabled(False)
             self._assignments_table.setRowCount(0)
             self._assignments_table.setSortingEnabled(True)
+            self._set_assignments_bulk_buttons_enabled(False)
             self._roles_msg.setVisible(False)
             return
         first = self.table.item(row_idx, 0)
@@ -987,6 +1149,7 @@ class ApiRoleAssignmentPage(QWidget):
             self._assignments_table.setSortingEnabled(False)
             self._assignments_table.setRowCount(0)
             self._assignments_table.setSortingEnabled(True)
+            self._set_assignments_bulk_buttons_enabled(False)
             self._current_api_id = None
             self._current_api_row = None
             self._roles_msg.setStyleSheet(FORM_ERROR_LABEL_STYLE)
@@ -1117,6 +1280,35 @@ class ApiRoleAssignmentPage(QWidget):
         if action == grant_action and api_row is not None:
             self._grant_access(api_row)
 
+    def _assigned_role_ids_for_grant(self, api_row: dict[str, Any], *, token: str) -> set[str]:
+        """Role ids already linked to this API — from the right panel if it matches, else GET."""
+        api_id = self._api_id(api_row)
+        if api_id is None:
+            return set()
+        out: set[str] = set()
+        same_view = self._current_api_id is not None and str(self._current_api_id) == str(api_id)
+        if same_view and self._assignments_table.rowCount() > 0:
+            for r in range(self._assignments_table.rowCount()):
+                item = self._assignments_table.item(r, 0)
+                if item is None:
+                    continue
+                d = item.data(Qt.ItemDataRole.UserRole)
+                if not isinstance(d, dict):
+                    continue
+                rid = d.get("roleId") or d.get("role_id") or d.get("id")
+                if rid is not None and str(rid).strip():
+                    out.add(str(rid).strip())
+            return out
+        res = api_get_api_access_by_api_id(api_id, token=token)
+        if not res.get("success"):
+            return set()
+        for item in res.get("data") or []:
+            if isinstance(item, dict):
+                rid = item.get("roleId") or item.get("role_id") or item.get("id")
+                if rid is not None and str(rid).strip():
+                    out.add(str(rid).strip())
+        return out
+
     def _grant_access(self, api_row: dict[str, Any]) -> None:
         if not self._roles:
             self._show_message("Roles are not loaded yet. Please refresh and try again.", error=True)
@@ -1125,7 +1317,14 @@ class ApiRoleAssignmentPage(QWidget):
         if not token:
             self._show_message("Session expired. Please log in again.", error=True)
             return
-        dlg = _GrantAccessDialog(self._roles, api_row, self, token=token)
+        assigned = self._assigned_role_ids_for_grant(api_row, token=token)
+        dlg = _GrantAccessDialog(
+            self._roles,
+            api_row,
+            self,
+            token=token,
+            assigned_role_ids=assigned,
+        )
         if dlg.exec() != int(QDialog.DialogCode.Accepted):
             return
         api_id = self._api_id(api_row)
@@ -1141,11 +1340,113 @@ class ApiRoleAssignmentPage(QWidget):
         items = self._assignments_table.selectedItems()
         if not items:
             return None
-        item = self._assignments_table.item(items[0].row(), 0)
+        r = items[0].row()
+        item = self._assignments_table.item(r, _ASSIGNMENT_CHECKBOX_COL)
         if item is None:
             return None
         data = item.data(Qt.ItemDataRole.UserRole)
         return data if isinstance(data, dict) else None
+
+    def _on_assignments_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() != _ASSIGNMENT_CHECKBOX_COL:
+            return
+        self._sync_assignments_bulk_buttons()
+
+    def _sync_assignments_bulk_buttons(self) -> None:
+        for r in range(self._assignments_table.rowCount()):
+            it = self._assignments_table.item(r, _ASSIGNMENT_CHECKBOX_COL)
+            if it is not None and it.checkState() == Qt.CheckState.Checked:
+                self._set_assignments_bulk_buttons_enabled(True)
+                return
+        self._set_assignments_bulk_buttons_enabled(False)
+
+    def _on_assignments_remove_clicked(self) -> None:
+        rows_data: list[dict[str, Any]] = []
+        assignment_ids: list[Any] = []
+        for r in range(self._assignments_table.rowCount()):
+            it = self._assignments_table.item(r, _ASSIGNMENT_CHECKBOX_COL)
+            if it is None or it.checkState() != Qt.CheckState.Checked:
+                continue
+            d = it.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(d, dict):
+                continue
+            aid = self._assign_id_from_row(d)
+            if aid is None:
+                continue
+            rows_data.append(d)
+            assignment_ids.append(aid)
+        if not assignment_ids:
+            self._show_message(
+                "Check one or more assignments to remove (api assign id required).",
+                error=True,
+            )
+            return
+        token = self._get_token()
+        if not token:
+            self._show_message("Session expired.", error=True)
+            return
+        preview = ", ".join(
+            str(d.get("roleName") or d.get("name") or self._assign_id_from_row(d) or "?") for d in rows_data[:5]
+        )
+        if len(rows_data) > 5:
+            preview = f"{preview}, …"
+        reply = QMessageBox.question(
+            self,
+            "Remove role assignments",
+            f"Remove {len(assignment_ids)} assignment(s) for this API?\n\n{preview}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        result = api_remove_multiple_assignments_by_ids(assignment_ids=assignment_ids, token=token)
+        if result.get("success"):
+            self._show_message(result.get("message", "Assignments removed."), error=False)
+            self._reload_current_api_assignments()
+            QTimer.singleShot(350, self._reload_current_api_assignments)
+        else:
+            self._show_message(result.get("message", "Failed to remove access."), error=True)
+
+    def _on_assignments_deactivate_clicked(self) -> None:
+        api_id = self._current_api_id
+        if api_id is None:
+            self._show_message("Cannot update status: no API is selected.", error=True)
+            return
+        role_ids: list[Any] = []
+        for r in range(self._assignments_table.rowCount()):
+            it = self._assignments_table.item(r, _ASSIGNMENT_CHECKBOX_COL)
+            if it is None or it.checkState() != Qt.CheckState.Checked:
+                continue
+            d = it.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(d, dict):
+                continue
+            rid = self._role_id_from_row(d)
+            if rid is None:
+                continue
+            role_ids.append(rid)
+        if not role_ids:
+            self._show_message(
+                "Check one or more assignments to change status (role id required).",
+                error=True,
+            )
+            return
+        token = self._get_token()
+        if not token:
+            self._show_message("Session expired.", error=True)
+            return
+        dlg = _ApiRoleAccessStatusDialog(self, count=len(role_ids))
+        if dlg.exec() != int(QDialog.DialogCode.Accepted):
+            return
+        status = dlg.selected_status()
+        result = api_deactivate_multiple_roles_by_api_id(
+            api_id=api_id, role_ids=role_ids, status=status, token=token
+        )
+        if result.get("success"):
+            self._show_message(result.get("message", "Role assignment status updated."), error=False)
+            self._reload_current_api_assignments()
+            QTimer.singleShot(350, self._reload_current_api_assignments)
+        else:
+            self._show_message(result.get("message", "Failed to update role assignment status."), error=True)
 
     def _prompt_edit_assignment_status(self, row_data: dict[str, Any]) -> None:
         assign_id = self._assign_id_from_row(row_data)
@@ -1164,7 +1465,7 @@ class ApiRoleAssignmentPage(QWidget):
     def _remove_selected_assignment_impl(self, row_data: dict[str, Any]) -> None:
         assign_id = self._assign_id_from_row(row_data)
         if assign_id is None:
-            self._show_message("Cannot remove: assignment id is missing.", error=True)
+            self._show_message("Cannot remove: assignment id (apiAssignId) is missing.", error=True)
             return
         role_name = row_data.get("roleName") or row_data.get("name") or str(assign_id)
         reply = QMessageBox.question(
@@ -1180,7 +1481,9 @@ class ApiRoleAssignmentPage(QWidget):
         if not token:
             self._show_message("Session expired.", error=True)
             return
-        result = api_delete_api_access_by_id(assign_id, token=token)
+        result = api_remove_multiple_assignments_by_ids(
+            assignment_ids=[assign_id], token=token
+        )
         if result.get("success"):
             self._show_message(result.get("message", "Assignment removed."), error=False)
             self._reload_current_api_assignments()
@@ -1192,7 +1495,7 @@ class ApiRoleAssignmentPage(QWidget):
         if self._current_api_id is None:
             self._show_message("Select an API first.", error=True)
             return
-        row_item = self._assignments_table.item(item.row(), 0)
+        row_item = self._assignments_table.item(item.row(), _ASSIGNMENT_CHECKBOX_COL)
         if row_item is None:
             return
         row_data = row_item.data(Qt.ItemDataRole.UserRole)

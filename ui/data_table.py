@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+import json
+from collections.abc import Callable
+from typing import Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontMetrics, QKeySequence, QShortcut
@@ -18,6 +20,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.app_preferences import format_field_display_value
+from ui.blank_display import is_blank_display_value
 from ui.form_page_styles import DATA_TABLE_STYLESHEET, FILTER_EDIT_STYLE
 
 DEFAULT_DATA_ROW_HEIGHT_PX = 22
@@ -83,14 +87,16 @@ def resize_data_table_columns_to_content(
     min_width_px: int = MIN_DATA_COL_WIDTH_PX,
     cell_margin_px: int = 12,
     header_margin_px: int = 18,
+    column_start_index: int = 0,
 ) -> None:
     """Set each column width from max(header label, formatted values in ``source_rows``).
 
     Ignores the filter row and any widgets in row 0 so toggling filters does not reshape columns.
+    ``column_start_index`` maps spec column 0 to ``table`` column ``column_start_index`` (e.g. checkbox col).
     """
     if not column_spec or table.columnCount() < 1:
         return
-    n = min(len(column_spec), table.columnCount())
+    n = min(len(column_spec), table.columnCount() - column_start_index)
     fm_cell = QFontMetrics(table.font())
     fm_header = QFontMetrics(table.horizontalHeader().font())
     for col in range(n):
@@ -102,7 +108,7 @@ def resize_data_table_columns_to_content(
             value, key_used = value_for_column(row, keys)
             text = format_cell(value, key_used, keys)
             w = max(w, fm_cell.horizontalAdvance(text) + cell_margin_px)
-        table.setColumnWidth(col, max(min_width_px, w))
+        table.setColumnWidth(col + column_start_index, max(min_width_px, w))
 
 
 def apply_column_width_overrides(
@@ -128,12 +134,14 @@ def filter_dict_rows_by_column_edits(
     filter_visible: bool,
     value_for_column: Callable[[dict[str, Any], tuple[str, ...]], tuple[Any, str]],
     format_cell: Callable[..., str],
+    *,
+    filter_column_offset: int = 0,
 ) -> list[dict[str, Any]]:
     rows = list(source_rows)
     if not filter_visible or not column_spec:
         return rows
     for col, (_, keys) in enumerate(column_spec):
-        w = table.cellWidget(0, col)
+        w = table.cellWidget(0, col + filter_column_offset)
         if not isinstance(w, QLineEdit):
             continue
         q = w.text().strip().lower()
@@ -201,6 +209,113 @@ def attach_table_copy_shortcut(table: QTableWidget, parent: QWidget | None = Non
 
     sc.activated.connect(_on_copy)
     return sc
+
+
+def format_data_table_cell(
+    value: Any,
+    key: str = "",
+    key_candidates: tuple[str, ...] = (),
+    *,
+    format_bool: bool = True,
+) -> str:
+    """Display text for a table cell (blank, timezone-aware dates, bool, JSON, nested status dicts)."""
+    if is_blank_display_value(value):
+        return ""
+    if format_bool and isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, list):
+        try:
+            return json.dumps(value, default=str, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(value)
+    return format_field_display_value(value, key, key_candidates)
+
+
+def value_for_dict_column(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, str]:
+    """First matching key in ``row``; returns ``(value, key_used)``."""
+    for k in keys:
+        if k in row and row.get(k) is not None:
+            return row.get(k), k
+    return None, keys[0] if keys else ""
+
+
+def saved_filter_texts(table: QTableWidget) -> list[str]:
+    saved: list[str] = []
+    for col in range(table.columnCount()):
+        w = table.cellWidget(0, col)
+        saved.append(w.text() if isinstance(w, QLineEdit) else "")
+    return saved
+
+
+def restore_filter_texts(table: QTableWidget, texts: list[str]) -> None:
+    for col, text in enumerate(texts):
+        if col >= table.columnCount():
+            break
+        w = table.cellWidget(0, col)
+        if isinstance(w, QLineEdit):
+            w.blockSignals(True)
+            w.setText(text)
+            w.blockSignals(False)
+
+
+def configure_data_table_header(table: QTableWidget, *, stretch_last: bool = False) -> None:
+    hh = table.horizontalHeader()
+    hh.setStretchLastSection(stretch_last)
+    for col in range(table.columnCount()):
+        hh.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+    hh.setMinimumSectionSize(MIN_DATA_COL_WIDTH_PX)
+
+
+def render_dict_rows_table(
+    table: QTableWidget,
+    rows: list[dict[str, Any]],
+    column_spec: list[tuple[str, tuple[str, ...]]],
+    *,
+    filter_visible: bool,
+    value_for_column: Callable[[dict[str, Any], tuple[str, ...]], tuple[Any, str]] = value_for_dict_column,
+    format_cell: Callable[..., str] = format_data_table_cell,
+    on_filter_text_changed: Callable[[], None] | None = None,
+    saved_filter_texts_list: list[str] | None = None,
+    user_role_column: int = 0,
+    disable_filter_columns: frozenset[int] = frozenset(),
+) -> None:
+    """Populate read-only rows: filters, resize, sort (off when filtering), UserRole on ``user_role_column``."""
+    spec = list(column_spec)
+    offset = data_row_offset(filter_visible)
+    table.setSortingEnabled(False)
+    n_cols = len(spec)
+    table.setColumnCount(n_cols)
+    table.setHorizontalHeaderLabels([h for h, _ in spec])
+    configure_data_table_header(table, stretch_last=False)
+    table.setRowCount(offset + len(rows))
+    if offset:
+        install_filter_row(
+            table,
+            n_cols,
+            on_text_changed=on_filter_text_changed or (lambda: None),
+        )
+        if saved_filter_texts_list:
+            restore_filter_texts(table, saved_filter_texts_list)
+        for col in disable_filter_columns:
+            w = table.cellWidget(0, col)
+            if isinstance(w, QLineEdit):
+                w.setEnabled(False)
+                w.setPlaceholderText("")
+    for row_idx, row_data in enumerate(rows):
+        r_index = offset + row_idx
+        for col_idx, (_, keys) in enumerate(spec):
+            value, key_used = value_for_column(row_data, keys)
+            text = format_cell(value, key_used, keys)
+            item = QTableWidgetItem(text)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            if col_idx == user_role_column:
+                item.setData(Qt.ItemDataRole.UserRole, row_data)
+            table.setItem(r_index, col_idx, item)
+    sync_vertical_header_labels(table, filter_visible=filter_visible, data_row_count=len(rows))
+    resize_data_table_columns_to_content(
+        table, spec, rows, value_for_column, format_cell
+    )
+    table.setSortingEnabled(not filter_visible)
 
 
 def apply_data_table_appearance(

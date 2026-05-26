@@ -6,7 +6,9 @@ import json
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -21,11 +23,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.api import api_update_module
+from core.api import api_update_module, master_key_row_seq_value
 from core.app_preferences import format_datetime_display, is_datetime_field
 from ui.blank_display import is_blank_display_value
 from core.user_context import get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
+from ui.form_combobox_style import apply_form_combobox_field
 from ui.form_page_styles import (
     FORM_ERROR_LABEL_STYLE,
     FORM_INPUT_STYLE as INPUT_STYLE,
@@ -41,9 +44,55 @@ from ui.form_page_styles import (
     placeholder_example,
 )
 from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
+from ui.searchable_form_combo import (
+    combo_resolved_master_key_seq,
+    master_key_invalid_typed_text,
+    master_key_seq_for_payload,
+    require_master_key_seq_for_payload,
+    populate_master_key_by_field_name,
+    reset_searchable_combo,
+    set_searchable_combo_by_user_data,
+    wire_searchable_master_key_combo,
+)
+from ui.strict_completer import strict_list_selection_message
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
 _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "jwt"})
+
+_DMT_MODULE_STATUS_FIELD_NAME = "dmt_module_status"
+
+
+def _status_seq_from_record(rec: dict[str, Any]) -> Any | None:
+    for key in ("statusSeq", "status_seq", "status", "dmt_module_status"):
+        v = rec.get(key)
+        if v is None:
+            continue
+        if isinstance(v, dict):
+            seq = master_key_row_seq_value(v)
+            if seq is not None:
+                return seq
+            continue
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, int):
+            return v
+        if isinstance(v, float) and v == int(v):
+            return int(v)
+        s = str(v).strip()
+        if s.isdigit():
+            return int(s)
+    return None
+
+
+def _status_selection_equal(a: Any, b: Any) -> bool:
+    if a is None and b is None:
+        return True
+    if a is None or b is None:
+        return False
+    try:
+        return int(a) == int(b)
+    except (TypeError, ValueError):
+        return str(a).strip() == str(b).strip()
 
 
 def _get_value(mod: dict[str, Any], keys: tuple[str, ...]) -> Any:
@@ -107,6 +156,7 @@ class ViewModulePage(QWidget):
         self._module: dict[str, Any] = {}
         self._field_edits: dict[str, QLineEdit] = {}
         self._editable_keys: list[str] = []
+        self._status_combo: QComboBox | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -169,6 +219,23 @@ class ViewModulePage(QWidget):
             value_edit.setText("")
             if canonical == "moduleName":
                 value_edit.setPlaceholderText(placeholder_example("Data Ingestion"))
+            elif canonical in ("moduleId", "id"):
+                value_edit.setPlaceholderText(placeholder_example("12"))
+            elif canonical in ("createdBy", "created_by", "modifiedBy", "modified_by"):
+                value_edit.setPlaceholderText(placeholder_example("jdoe"))
+            elif canonical in (
+                "createdOn",
+                "created_on",
+                "createdAt",
+                "created_at",
+                "modifiedOn",
+                "modified_on",
+                "modifiedAt",
+                "modified_at",
+                "updatedAt",
+                "updated_at",
+            ):
+                value_edit.setPlaceholderText(placeholder_example("2025-01-15 10:30"))
 
             self._field_edits[canonical] = value_edit
             grid.addWidget(labeled_field_block(label_widget, value_edit), idx, col)
@@ -177,6 +244,15 @@ class ViewModulePage(QWidget):
             add_field(0, idx, label_text, keys)
         for idx, (label_text, keys) in enumerate(_MODULE_COL2):
             add_field(1, idx, label_text, keys)
+
+        status_lbl = field_caption_label("Status*", LABEL_STYLE)
+        status_combo = QComboBox()
+        status_combo.setMinimumWidth(240)
+        status_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        apply_form_combobox_field(status_combo, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX)
+        wire_searchable_master_key_combo(status_combo, search_field_label="Status")
+        self._status_combo = status_combo
+        grid.addWidget(labeled_field_block(status_lbl, status_combo), len(_MODULE_COL1), 0)
 
         self._back_btn = QPushButton("Back")
         self._back_btn.setFixedWidth(100)
@@ -233,7 +309,7 @@ class ViewModulePage(QWidget):
         )
         self._error_label.setVisible(False)
 
-        btn_row = max(len(_MODULE_COL1), len(_MODULE_COL2))
+        btn_row = max(len(_MODULE_COL1) + 1, len(_MODULE_COL2))
         grid.addWidget(self._error_label, btn_row, 0, 1, 2)
         grid.addWidget(
             self._btn_stack,
@@ -253,8 +329,44 @@ class ViewModulePage(QWidget):
 
         self._switch_to_view_mode()
 
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._populate_status_combo()
+        if not self.is_edit_mode():
+            self._apply_status_from_record()
+
+    def _token(self) -> str | None:
+        profile = get_user_profile()
+        token = (
+            profile.get("token")
+            or profile.get("accessToken")
+            or profile.get("access_token")
+            or profile.get("jwt")
+        )
+        return str(token) if token else None
+
+    def _populate_status_combo(self) -> None:
+        if self._status_combo is None:
+            return
+        populate_master_key_by_field_name(
+            self._status_combo,
+            _DMT_MODULE_STATUS_FIELD_NAME,
+            token=self._token(),
+            include_placeholder=False,
+        )
+
+    def _apply_status_from_record(self) -> None:
+        if self._status_combo is None:
+            return
+        seq = _status_seq_from_record(self._module)
+        if seq is None:
+            reset_searchable_combo(self._status_combo)
+            return
+        set_searchable_combo_by_user_data(self._status_combo, seq)
+
     def set_module(self, module: dict[str, Any] | None, *, edit_mode: bool = False) -> None:
         self._module = dict(module) if module else {}
+        self._populate_status_combo()
         self._refresh_values()
         if edit_mode and self._module:
             self._handle_edit()
@@ -269,6 +381,7 @@ class ViewModulePage(QWidget):
             edit = self._field_edits.get(canonical)
             if edit:
                 edit.setText(text)
+        self._apply_status_from_record()
 
     def _handle_back(self) -> None:
         if self.on_back:
@@ -299,6 +412,8 @@ class ViewModulePage(QWidget):
             if edit:
                 edit.setReadOnly(False)
                 edit.setStyleSheet(INPUT_STYLE)
+        if self._status_combo is not None:
+            self._status_combo.setEnabled(True)
         self._btn_stack.setCurrentIndex(1)
 
     def _handle_cancel(self) -> None:
@@ -329,6 +444,10 @@ class ViewModulePage(QWidget):
             current = self._get_edit_value(canonical)
             if orig_str.strip() != (current or "").strip():
                 return True
+        cur = combo_resolved_master_key_seq(self._status_combo) if self._status_combo else None
+        prev = _status_seq_from_record(self._module)
+        if not _status_selection_equal(cur, prev):
+            return True
         return False
 
     def _handle_save(self) -> None:
@@ -352,22 +471,24 @@ class ViewModulePage(QWidget):
             self._show_error("Module ID is missing.")
             return
 
-        profile = get_user_profile()
-        token = (
-            profile.get("token")
-            or profile.get("accessToken")
-            or profile.get("access_token")
-            or profile.get("jwt")
+        status_id, status_err = require_master_key_seq_for_payload(
+            self._status_combo, field_caption="Status", strict_phrase="a status"
         )
-        token = str(token) if token else None
+        if status_err:
+            self._show_error(status_err)
+            if self._status_combo is not None:
+                self._status_combo.setFocus()
+            return
 
-        result = api_update_module(module_id, name, token=token)
+        token = self._token()
+        result = api_update_module(module_id, name, status=status_id, token=token)
         if not result.get("success"):
             self._show_error(str(result.get("message") or "Failed to update module."))
             return
 
         self._module["moduleName"] = name
         self._module["name"] = name
+        self._module["status"] = status_id
         self._show_success(str(result.get("message") or "Module updated successfully."))
 
         schedule_after_success(
@@ -383,6 +504,8 @@ class ViewModulePage(QWidget):
             if edit:
                 edit.setReadOnly(True)
                 edit.setStyleSheet(READONLY_INPUT_STYLE)
+        if self._status_combo is not None:
+            self._status_combo.setEnabled(False)
         self._btn_stack.setCurrentIndex(0)
 
     def is_edit_mode(self) -> bool:

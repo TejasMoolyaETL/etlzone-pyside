@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
 import os
 from datetime import datetime
@@ -44,6 +45,7 @@ import zipfile
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from core.api import _log_api
 from PySide6.QtCore import QObject, QCoreApplication, QTimer, Signal, Slot
 from PySide6.QtWidgets import QApplication
 
@@ -159,6 +161,7 @@ class DownloadUpdateWorker(QObject):
         headers = {"User-Agent": "MY-ETLZONE-App/1.0"}
         req = Request(self._url, headers=headers, method="GET")
         logger.info("Starting update download: %s", self._url)
+        _log_api("GET", self._url)
         try:
             with urlopen(req, timeout=self._timeout_s) as resp:
                 total = -1
@@ -178,6 +181,11 @@ class DownloadUpdateWorker(QObject):
                                 os.remove(partial)
                             except OSError:
                                 pass
+                            _log_api(
+                                "GET",
+                                self._url,
+                                response={"cancelled": True, "bytes_before_cancel": done},
+                            )
                             self.failed.emit("Download cancelled.")
                             return
                         chunk = resp.read(_READ_CHUNK)
@@ -186,7 +194,26 @@ class DownloadUpdateWorker(QObject):
                         out.write(chunk)
                         done += len(chunk)
                         self.progress.emit(done, total)
+                _log_api(
+                    "GET",
+                    self._url,
+                    response={
+                        "streamed_bytes": done,
+                        "content_length": total if total >= 0 else None,
+                    },
+                    status=getattr(resp, "status", None) or resp.getcode(),
+                )
         except HTTPError as exc:
+            try:
+                raw = exc.read()
+                err_payload: object
+                try:
+                    err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+                except Exception:
+                    err_payload = {"bytes": len(raw)} if raw else {}
+            except Exception:
+                err_payload = {}
+            _log_api("GET", self._url, response=err_payload, status=getattr(exc, "code", None))
             logger.exception("Update download HTTP error: %s", exc)
             try:
                 os.remove(partial)
@@ -195,6 +222,7 @@ class DownloadUpdateWorker(QObject):
             self.failed.emit(f"Download failed (HTTP {getattr(exc, 'code', 'error')}).")
             return
         except (URLError, TimeoutError, OSError, ValueError) as exc:
+            _log_api("GET", self._url, response={"error": type(exc).__name__, "detail": str(exc)})
             logger.exception("Update download failed: %s", exc)
             try:
                 os.remove(partial)

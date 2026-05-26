@@ -44,6 +44,7 @@ from ui.form_page_styles import (
     FORM_SECONDARY_BUTTON_STYLESHEET,
 )
 from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
+from ui.searchable_form_combo import wire_searchable_labeled_rows_combo
 from ui.widgets.required_label import field_caption_label, labeled_field_block
 
 _HIDDEN_KEYS = frozenset({"password", "token", "accessToken", "access_token", "jwt"})
@@ -178,10 +179,14 @@ class ViewProjectPage(QWidget):
 
             if canonical in ("projectStatus", "project_status"):
                 value_edit = QComboBox()
-                value_edit.addItems(_PROJECT_STATUS)
-                value_edit.setCurrentText("ACTIVE")
                 apply_form_combobox_field(
                     value_edit, height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX, min_width=240
+                )
+                wire_searchable_labeled_rows_combo(
+                    value_edit,
+                    rows=[(s, s) for s in _PROJECT_STATUS],
+                    search_field_label="Project status",
+                    default_display_text="ACTIVE",
                 )
                 if canonical in _READONLY_KEYS:
                     value_edit.setEnabled(False)
