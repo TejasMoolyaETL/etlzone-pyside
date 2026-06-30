@@ -278,6 +278,7 @@ def render_dict_rows_table(
     saved_filter_texts_list: list[str] | None = None,
     user_role_column: int = 0,
     disable_filter_columns: frozenset[int] = frozenset(),
+    enable_sorting: bool | None = None,
 ) -> None:
     """Populate read-only rows: filters, resize, sort (off when filtering), UserRole on ``user_role_column``."""
     spec = list(column_spec)
@@ -315,7 +316,7 @@ def render_dict_rows_table(
     resize_data_table_columns_to_content(
         table, spec, rows, value_for_column, format_cell
     )
-    table.setSortingEnabled(not filter_visible)
+    table.setSortingEnabled(enable_sorting if enable_sorting is not None else not filter_visible)
 
 
 def apply_data_table_appearance(

@@ -76,6 +76,16 @@ from ui.form_page_styles import (
 
 
 
+def _parse_optional_int(text: str) -> int | None:
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    try:
+        return int(stripped)
+    except ValueError:
+        return None
+
+
 def build_connection_payload(
 
     *,
@@ -94,6 +104,10 @@ def build_connection_payload(
 
     password: str,
 
+    fetch_size_text: str = "",
+
+    chunk_size_text: str = "",
+
 ) -> dict[str, Any]:
 
     port_value: int | None
@@ -106,7 +120,7 @@ def build_connection_payload(
 
         port_value = None
 
-    return {
+    payload: dict[str, Any] = {
 
         "connectionName": connection_name.strip(),
 
@@ -123,6 +137,20 @@ def build_connection_payload(
         "password": password.strip(),
 
     }
+
+    fetch_size = _parse_optional_int(fetch_size_text)
+
+    chunk_size = _parse_optional_int(chunk_size_text)
+
+    if fetch_size is not None:
+
+        payload["fetchSize"] = fetch_size
+
+    if chunk_size is not None:
+
+        payload["chunkSize"] = chunk_size
+
+    return payload
 
 
 
@@ -306,6 +334,18 @@ class AddConnectionDialog(QDialog):
 
 
 
+        self._fetch_size = _line_field(placeholder_enter("fetch size"), default="2000")
+
+        _add_view_user_form_row(form, "Fetch Size", self._fetch_size)
+
+
+
+        self._chunk_size = _line_field(placeholder_enter("chunk size"), default="2000")
+
+        _add_view_user_form_row(form, "Chunk Size", self._chunk_size)
+
+
+
         self._form_fields: tuple[QWidget, ...] = (
 
             self._name,
@@ -321,6 +361,10 @@ class AddConnectionDialog(QDialog):
             self._username,
 
             self._password,
+
+            self._fetch_size,
+
+            self._chunk_size,
 
         )
 
@@ -451,6 +495,10 @@ class AddConnectionDialog(QDialog):
             username=self._username.text(),
 
             password=self._password.text(),
+
+            fetch_size_text=self._fetch_size.text(),
+
+            chunk_size_text=self._chunk_size.text(),
 
         )
 

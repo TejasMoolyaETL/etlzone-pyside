@@ -1,24 +1,47 @@
-"""ETL: Job Logs — summary and execution timeline with optional auto-refresh."""
+"""ETL: Job Logs — summary, execution timeline, and live monitor tab."""
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QHideEvent, QShowEvent
+from PySide6.QtGui import QBrush, QColor, QHideEvent, QShowEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
+    QSizePolicy,
+    QTabWidget,
     QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from core.api import api_get_all_etl_jobs
+from app.etl.scan_connection.scan_connection import (
+    _DETAILS_COLUMN_SPEC,
+    _SCAN_LOG_PARENT_ID_KEYS,
+    _SUMMARY_COLUMN_SPEC,
+    _TAB_STYLESHEET,
+    _apply_scan_log_id_item_sort_role,
+    _build_scan_log_tab,
+    _detail_row_cell_text,
+    _finalize_scan_log_table_sort,
+    _log_format_cell,
+    _log_row_value,
+    _parent_run_id,
+    _value_for_column,
+    _prepare_scan_header_button,
+    normalize_etl_log_detail_items,
+    prepare_scan_log_detail_table,
+    prepare_scan_log_table_data,
+)
+from core.api import api_get_all_etl_jobs, api_get_etl_log_by_id
+from core.etl_monitor_ws_client import EtlMonitorWebSocketClient, monitor_log_id
 from core.user_context import get_user_profile
 from ui.auto_hide_message import show_auto_hiding_message
 from core.app_preferences import format_datetime_display
@@ -26,20 +49,68 @@ from ui.data_table import (
     apply_data_table_appearance,
     attach_table_copy_shortcut,
     clear_filter_row_widgets,
+    data_row_offset,
     filter_dict_rows_by_column_edits,
-    format_data_table_cell,
-    render_dict_rows_table,
-    saved_filter_texts,
+    install_filter_row,
+    resize_data_table_columns_to_content,
+    sync_vertical_header_labels,
 )
 from ui.form_page_styles import (
-    FORM_PAGE_FONT_SIZE_PX,
-    FORM_PRIMARY_BUTTON_STYLESHEET,
+    LIST_PAGE_HEADER_BUTTON_FONT_PX,
     LIST_PAGE_HEADER_HEIGHT_PX,
     LIST_PAGE_HEADER_LAYOUT_MARGINS,
     LIST_PAGE_HEADER_LAYOUT_SPACING,
     LIST_PAGE_HEADER_STYLESHEET,
     LIST_PAGE_HEADER_TITLE_FONT_PX,
+    Theme,
 )
+
+_JOB_LOGS_HEADER_STYLESHEET = (
+    LIST_PAGE_HEADER_STYLESHEET
+    + f" QCheckBox {{ color: {Theme.PANEL_TEXT_BRIGHT}; font-size: {LIST_PAGE_HEADER_BUTTON_FONT_PX}px; "
+    f"font-weight: 500; spacing: 8px; }} "
+    f" QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 3px; "
+    f"border: 2px solid {Theme.PANEL_TEXT_BRIGHT}; background: transparent; }} "
+    f" QCheckBox::indicator:hover {{ background: rgba(255, 255, 255, 0.15); }} "
+    f" QCheckBox::indicator:checked {{ background: {Theme.PANEL_TEXT_BRIGHT}; "
+    f"border: 2px solid {Theme.PANEL_TEXT_BRIGHT}; }} "
+    f" QCheckBox::indicator:checked:hover {{ background: #e2e8f0; "
+    f"border-color: #e2e8f0; }} "
+)
+
+_TAB_JOB_LOGS = 0
+_TAB_JOB_DETAIL_LOG = 1
+_TAB_MONITOR = 2
+_MONITOR_MAX_ROWS = 500
+
+_JOB_LOGS_SUBTITLE = (
+    "One row per job run. Double-click a row to load its step details in Job Detail Log."
+)
+_JOB_DETAIL_LOG_SUBTITLE_EMPTY = (
+    "Double-click a job in Job Logs to load step details from the server."
+)
+
+_MONITOR_COLUMN_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Log Id", ("logId", "log_id", "LogId", "id", "ID")),
+    ("Operation", ("operation", "operationType", "operation_type", "Operation")),
+    ("Table", ("tableName", "table_name", "table", "TableName")),
+    ("Step", ("stepType", "step_type", "step", "StepType")),
+    ("Status", ("status", "state", "stepStatus", "Status")),
+    ("Message", ("message", "msg", "Message")),
+    ("Time", ("time", "timestamp", "createdAt", "createdOn", "Time")),
+)
+
+_MONITOR_SUBTITLE = (
+    "Live ETL events from the WebSocket. One row per log id — status changes update that row "
+    "instead of adding duplicates. Newest activity appears at the top."
+)
+
+_STATUS_ROW_BG: dict[str, str] = {
+    "SUCCESS": "#d4edda",
+    "FAILED": "#f8d7da",
+    "RUNNING": "#fff3cd",
+    "QUEUED": "#d1ecf1",
+}
 
 
 class _JobLogsFetchWorker(QObject):
@@ -53,340 +124,688 @@ class _JobLogsFetchWorker(QObject):
     def run(self) -> None:
         result = api_get_all_etl_jobs(self._token)
         if result.get("success"):
-            self.finished.emit(result.get("data") or {}, "")
+            self.finished.emit(result.get("data"), "")
         else:
-            self.finished.emit({}, str(result.get("message") or "Failed to load job logs."))
+            self.finished.emit([], str(result.get("message") or "Failed to load job logs."))
 
 
-def _timeline_row_value(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, str]:
+class _JobLogDetailFetchWorker(QObject):
+    finished = Signal(str, object, str, int)
+
+    def __init__(self, log_id: str, token: str | None, seq: int) -> None:
+        super().__init__()
+        self._log_id = log_id
+        self._token = token
+        self._seq = seq
+
+    @Slot()
+    def run(self) -> None:
+        result = api_get_etl_log_by_id(self._log_id, token=self._token)
+        if result.get("success"):
+            self.finished.emit(self._log_id, result.get("data") or [], "", self._seq)
+        else:
+            self.finished.emit(
+                self._log_id,
+                [],
+                str(result.get("message") or "Failed to load log details."),
+                self._seq,
+            )
+
+
+def _normalize_job_log_entries(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if isinstance(payload, dict):
+        for key in ("data", "jobs", "logs", "content"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [row for row in value if isinstance(row, dict)]
+    return []
+
+
+def _monitor_pick_field(row: dict[str, Any], *keys: str) -> Any:
     for key in keys:
-        if key in row:
-            return row.get(key), key
-    return None, keys[0] if keys else ""
+        if key in row and row.get(key) not in (None, ""):
+            return row.get(key)
+    lower_map = {str(k).lower(): k for k in row}
+    for key in keys:
+        actual = lower_map.get(key.lower())
+        if actual is not None:
+            value = row.get(actual)
+            if value not in (None, ""):
+                return value
+    return None
 
 
-def _timeline_format_cell(value: Any, key: str = "", key_candidates: tuple[str, ...] = ()) -> str:
-    if value is None or value == "":
+def _monitor_value_to_text(value: Any, *, time_field: bool = False) -> str:
+    """Monitor cells must show ``0`` and other falsy values (not blank like list tables)."""
+    if value is None:
         return "--"
-    return format_data_table_cell(value, key, key_candidates)
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value, default=str, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(value)
+    if time_field:
+        text = format_datetime_display(value)
+        if text:
+            return text
+        if value is not None:
+            return str(value).strip() or "--"
+    text = str(value).strip()
+    return text if text else "--"
+
+
+def _monitor_format_cell(value: Any, key: str = "", key_candidates: tuple[str, ...] = ()) -> str:
+    time_field = key.lower() in ("time", "timestamp", "createdat", "createdon") or (
+        bool(key_candidates)
+        and key_candidates[0].lower() in ("time", "timestamp", "createdat", "createdon")
+    )
+    return _monitor_value_to_text(value, time_field=time_field)
+
+
+def _monitor_rows_from_buffer(buffer: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Buffer is newest-first; keep the first (latest) row per log id."""
+    merged: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for payload in buffer:
+        if not isinstance(payload, dict):
+            continue
+        entry = dict(payload)
+        log_id = monitor_log_id(entry)
+        if log_id:
+            if log_id in seen_ids:
+                continue
+            seen_ids.add(log_id)
+        merged.append(entry)
+        if len(merged) >= _MONITOR_MAX_ROWS:
+            break
+    return merged
+
+
+def _upsert_monitor_row(
+    rows: list[dict[str, Any]],
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Insert or replace by log id; updated rows move to the top."""
+    entry = dict(payload)
+    log_id = monitor_log_id(entry)
+    updated = [row for row in rows if not log_id or monitor_log_id(row) != log_id]
+    updated.insert(0, entry)
+    return updated[:_MONITOR_MAX_ROWS]
+
+
+def _cells_for_monitor_payload(payload: dict[str, Any]) -> list[str]:
+    """Build display cells from raw WS JSON (same fields as the HTML monitor)."""
+    return [
+        _monitor_value_to_text(_monitor_pick_field(payload, "logId", "log_id", "LogId", "id")),
+        _monitor_value_to_text(_monitor_pick_field(payload, "operation", "operationType")),
+        _monitor_value_to_text(_monitor_pick_field(payload, "tableName", "table_name", "table")),
+        _monitor_value_to_text(_monitor_pick_field(payload, "stepType", "step_type", "step")),
+        _monitor_value_to_text(_monitor_pick_field(payload, "status", "state", "stepStatus")),
+        _monitor_value_to_text(_monitor_pick_field(payload, "message", "msg")),
+        _monitor_value_to_text(
+            _monitor_pick_field(payload, "time", "timestamp", "createdAt", "createdOn"),
+            time_field=True,
+        ),
+    ]
+
+
+def _monitor_table_item(text: str, *, status: str) -> QTableWidgetItem:
+    item = QTableWidgetItem(text)
+    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+    item.setForeground(QBrush(QColor("#0f172a")))
+    bg = _STATUS_ROW_BG.get(status.upper(), _STATUS_ROW_BG["QUEUED"])
+    item.setBackground(QBrush(QColor(bg)))
+    return item
 
 
 class JobLogsPageWidget(QWidget):
-    """Job logs summary + timeline table."""
+    """Job logs parent/child tables and live monitor tab."""
+
+    job_detail_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._timeline_rows: list[dict[str, Any]] = []
-        self._timeline_cols_spec: list[tuple[str, tuple[str, ...]]] = []
-        self._timeline_filter_visible = False
-        self._timeline_filter_timer = QTimer(self)
-        self._timeline_filter_timer.setSingleShot(True)
-        self._timeline_filter_timer.setInterval(200)
-        self._timeline_filter_timer.timeout.connect(self._refresh_timeline_table)
+        self._summary_source_rows: list[dict[str, str]] = []
+        self._summary_raw_entries: list[dict[str, Any]] = []
+        self._details_source_rows: list[dict[str, str]] = []
+        self._summary_column_spec: list[tuple[str, tuple[str, ...]]] = list(_SUMMARY_COLUMN_SPEC)
+        self._details_column_spec: list[tuple[str, tuple[str, ...]]] = list(_DETAILS_COLUMN_SPEC)
+        self._summary_filter_visible = False
+        self._details_filter_visible = False
+        self._detail_job_id_filter: str | None = None
+        self._summary_filter_timer = QTimer(self)
+        self._summary_filter_timer.setSingleShot(True)
+        self._summary_filter_timer.setInterval(200)
+        self._summary_filter_timer.timeout.connect(self._apply_summary_column_filters)
+        self._details_filter_timer = QTimer(self)
+        self._details_filter_timer.setSingleShot(True)
+        self._details_filter_timer.setInterval(200)
+        self._details_filter_timer.timeout.connect(self._apply_details_column_filters)
+        self._monitor_rows: list[dict[str, Any]] = []
+        self._monitor_filter_visible = False
+        self._monitor_connected = False
+        self._monitor_event_count = 0
+        self._monitor_last_error = ""
+        self._monitor_filter_timer = QTimer(self)
+        self._monitor_filter_timer.setSingleShot(True)
+        self._monitor_filter_timer.setInterval(200)
+        self._monitor_filter_timer.timeout.connect(self._refresh_monitor_table)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         header = QFrame()
-        header.setStyleSheet(LIST_PAGE_HEADER_STYLESHEET)
+        header.setStyleSheet(_JOB_LOGS_HEADER_STYLESHEET)
         header.setFixedHeight(LIST_PAGE_HEADER_HEIGHT_PX)
         hl = QHBoxLayout(header)
         hl.setContentsMargins(*LIST_PAGE_HEADER_LAYOUT_MARGINS)
         hl.setSpacing(LIST_PAGE_HEADER_LAYOUT_SPACING)
         title = QLabel("ETL: Job Logs")
-        title.setStyleSheet(f"font-size: {LIST_PAGE_HEADER_TITLE_FONT_PX}px; font-weight: 600; color: #ffffff;")
+        title.setStyleSheet(
+            f"font-size: {LIST_PAGE_HEADER_TITLE_FONT_PX}px; font-weight: 600; color: #ffffff;"
+        )
         hl.addWidget(title)
         hl.addStretch()
+        self.auto_refresh_checkbox = QCheckBox("Auto refresh (3s)")
+        self.auto_refresh_checkbox.setChecked(True)
+        self.auto_refresh_checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.refresh_btn = QPushButton("Refresh")
+        _prepare_scan_header_button(self.refresh_btn, width_px=100)
+        hl.addWidget(self.auto_refresh_checkbox)
+        hl.addWidget(self.refresh_btn)
         root.addWidget(header)
 
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.setStyleSheet(_TAB_STYLESHEET)
+        self.tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        job_logs_tab = QWidget()
+        content_layout = QVBoxLayout(job_logs_tab)
         content_layout.setContentsMargins(12, 12, 12, 12)
         content_layout.setSpacing(10)
 
-        controls_card = QFrame()
-        controls_card.setStyleSheet(
-            "QFrame { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; }"
+        self.job_summary_filters_btn = QPushButton("Filters")
+        job_summary_tab, self.job_summary_table, _ = _build_scan_log_tab(
+            header_title="Job Logs",
+            subtitle=_JOB_LOGS_SUBTITLE,
+            column_count=len(_SUMMARY_COLUMN_SPEC),
+            filters_btn=self.job_summary_filters_btn,
+            filters_in_header=True,
         )
-        controls_layout = QVBoxLayout(controls_card)
-        controls_layout.setContentsMargins(14, 12, 14, 12)
-        controls_layout.setSpacing(10)
-
-        controls_row = QHBoxLayout()
-        self.refresh_btn = QPushButton("Refresh")
-        self.refresh_btn.setStyleSheet(FORM_PRIMARY_BUTTON_STYLESHEET)
-        self.auto_refresh_checkbox = QCheckBox("Auto refresh (3s)")
-        self.auto_refresh_checkbox.setChecked(True)
-        self.auto_refresh_checkbox.setStyleSheet(f"font-size: {FORM_PAGE_FONT_SIZE_PX}px;")
-        controls_row.addWidget(self.refresh_btn)
-        controls_row.addWidget(self.auto_refresh_checkbox)
-        controls_row.addStretch()
-        controls_layout.addLayout(controls_row)
-
-        summary_grid = QGridLayout()
-        summary_grid.setHorizontalSpacing(24)
-        summary_grid.setVerticalSpacing(6)
-        label_style = f"font-size: {FORM_PAGE_FONT_SIZE_PX}px;"
-        self.summary_total_jobs = QLabel("Total jobs: --")
-        self.summary_running = QLabel("Running: --")
-        self.summary_completed = QLabel("Completed: --")
-        self.summary_failed = QLabel("Failed: --")
-        self.summary_total_tables = QLabel("Total tables: --")
-        self.summary_processed_tables = QLabel("Processed tables: --")
-        for lbl in (
-            self.summary_total_jobs,
-            self.summary_running,
-            self.summary_completed,
-            self.summary_failed,
-            self.summary_total_tables,
-            self.summary_processed_tables,
-        ):
-            lbl.setStyleSheet(label_style)
-        summary_grid.addWidget(self.summary_total_jobs, 0, 0)
-        summary_grid.addWidget(self.summary_running, 0, 1)
-        summary_grid.addWidget(self.summary_completed, 1, 0)
-        summary_grid.addWidget(self.summary_failed, 1, 1)
-        summary_grid.addWidget(self.summary_total_tables, 2, 0)
-        summary_grid.addWidget(self.summary_processed_tables, 2, 1)
-        controls_layout.addLayout(summary_grid)
-        content_layout.addWidget(controls_card)
-
-        timeline_card = QFrame()
-        timeline_card.setStyleSheet(
-            "QFrame { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; }"
-        )
-        timeline_layout = QVBoxLayout(timeline_card)
-        timeline_layout.setContentsMargins(14, 12, 14, 12)
-        timeline_hdr_row = QHBoxLayout()
-        timeline_hdr = QLabel("Execution timeline (sequence wise)")
-        timeline_hdr.setStyleSheet(f"font-size: {FORM_PAGE_FONT_SIZE_PX}px; font-weight: 600;")
-        timeline_hdr_row.addWidget(timeline_hdr)
-        timeline_hdr_row.addStretch()
-        self.timeline_filters_btn = QPushButton("Filters")
-        self.timeline_filters_btn.setCheckable(True)
-        self.timeline_filters_btn.setFixedWidth(80)
-        self.timeline_filters_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        timeline_hdr_row.addWidget(self.timeline_filters_btn)
-        timeline_layout.addLayout(timeline_hdr_row)
-
-        self.timeline_table = QTableWidget(0, 0)
-        apply_data_table_appearance(
-            self.timeline_table,
-            read_only=True,
-            stretch_last_section=False,
-            hide_vertical_header=True,
-        )
-        attach_table_copy_shortcut(self.timeline_table)
-        self.timeline_filters_btn.toggled.connect(self._on_timeline_filters_toggled)
-        timeline_layout.addWidget(self.timeline_table, 1)
-        content_layout.addWidget(timeline_card, 1)
+        content_layout.addWidget(job_summary_tab, 1)
 
         self.page_status_label = QLabel("")
         self.page_status_label.setWordWrap(True)
         content_layout.addWidget(self.page_status_label)
 
-        root.addWidget(content, 1)
+        self.tabs.addTab(job_logs_tab, "Job Logs")
+
+        self.job_detail_show_all_btn = QPushButton("Clear")
+        self.job_detail_show_all_btn.setVisible(False)
+        self.job_detail_filters_btn = QPushButton("Filters")
+        job_detail_tab, self.job_detail_table, self.job_detail_hint = _build_scan_log_tab(
+            header_title="Job Detail Log",
+            subtitle=_JOB_DETAIL_LOG_SUBTITLE_EMPTY,
+            column_count=len(_DETAILS_COLUMN_SPEC),
+            filters_btn=self.job_detail_filters_btn,
+            header_widgets_before_filters=(self.job_detail_show_all_btn,),
+        )
+        self.job_detail_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.tabs.addTab(job_detail_tab, "Job Detail Log")
+
+        self.monitor_clear_btn = QPushButton("Clear")
+        self.monitor_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.monitor_filters_btn = QPushButton("Filters")
+        monitor_tab, self.monitor_table, self.monitor_hint = _build_scan_log_tab(
+            header_title="Live Monitor",
+            subtitle=_MONITOR_SUBTITLE,
+            column_count=len(_MONITOR_COLUMN_SPEC),
+            filters_btn=self.monitor_filters_btn,
+            header_widgets_before_filters=(self.monitor_clear_btn,),
+        )
+        self.monitor_filters_btn.toggled.connect(self._on_monitor_filters_toggled)
+        self.monitor_table.setSortingEnabled(False)
+        self.tabs.addTab(monitor_tab, "Monitor")
+
+        root.addWidget(self.tabs, 1)
+        self._write_monitor_table([])
+        self._update_monitor_hint()
+
+        self.job_summary_filters_btn.toggled.connect(self._on_summary_filters_toggled)
+        self.job_detail_filters_btn.toggled.connect(self._on_details_filters_toggled)
+        self.job_summary_table.itemDoubleClicked.connect(self._on_summary_row_double_clicked)
+        self.job_detail_show_all_btn.clicked.connect(self._clear_detail_job_filter)
+
+    def current_tab_index(self) -> int:
+        return self.tabs.currentIndex()
+
+    def set_monitor_connection_connected(self, connected: bool) -> None:
+        self._monitor_connected = connected
+        if connected:
+            self._monitor_last_error = ""
+        self._update_monitor_hint()
+
+    def set_monitor_connection_error(self, message: str) -> None:
+        self._monitor_last_error = (message or "").strip()
+        self._monitor_connected = False
+        self._update_monitor_hint()
+
+    def load_monitor_buffer(self, buffer: list[dict[str, Any]]) -> None:
+        """Load buffered WebSocket events (one row per log id, newest state)."""
+        self._monitor_rows = _monitor_rows_from_buffer(buffer)
+        self._write_monitor_table(self._monitor_rows)
+        self._update_monitor_hint()
+
+    def clear_monitor_logs(self) -> None:
+        self._monitor_rows = []
+        self._monitor_event_count = 0
+        if self._monitor_filter_visible:
+            clear_filter_row_widgets(self.monitor_table)
+        self._write_monitor_table([])
+        self._update_monitor_hint()
+
+    def append_monitor_log(self, payload: dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            return
+        self._monitor_event_count += 1
+        self._monitor_rows = _upsert_monitor_row(self._monitor_rows, payload)
+        if self._monitor_filter_visible:
+            self._refresh_monitor_table()
+        else:
+            self._write_monitor_table(self._monitor_rows)
+        self._update_monitor_hint()
+
+    def _update_monitor_hint(self) -> None:
+        conn = "CONNECTED" if self._monitor_connected else "DISCONNECTED"
+        text = (
+            f"{_MONITOR_SUBTITLE} Connection: {conn}. "
+            f"Jobs: {len(self._monitor_rows)}. Updates received: {self._monitor_event_count}."
+        )
+        if self._monitor_last_error and not self._monitor_connected:
+            text += f" Error: {self._monitor_last_error}"
+        self.monitor_hint.setText(text)
+
+    def _on_monitor_filters_toggled(self, checked: bool) -> None:
+        self._monitor_filter_visible = checked
+        if not checked:
+            clear_filter_row_widgets(self.monitor_table)
+        self._refresh_monitor_table()
+
+    def _schedule_monitor_filter_apply(self) -> None:
+        if self._monitor_filter_visible:
+            self._monitor_filter_timer.start()
+
+    def _refresh_monitor_table(self) -> None:
+        table = self.monitor_table
+        rows = list(self._monitor_rows)
+        saved = saved_filter_texts(table) if self._monitor_filter_visible else None
+        if self._monitor_filter_visible:
+            filtered: list[dict[str, Any]] = []
+            for payload in rows:
+                if not isinstance(payload, dict):
+                    continue
+                cells = _cells_for_monitor_payload(payload)
+                match = True
+                for col, (_, keys) in enumerate(_MONITOR_COLUMN_SPEC):
+                    w = table.cellWidget(0, col)
+                    if not isinstance(w, QLineEdit):
+                        continue
+                    q = w.text().strip().lower()
+                    if q and q not in cells[col].lower():
+                        match = False
+                        break
+                if match:
+                    filtered.append(payload)
+            rows = filtered
+        self._write_monitor_table(rows, saved_filter_texts_list=saved)
+
+    def _write_monitor_table(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        saved_filter_texts_list: list[str] | None = None,
+    ) -> None:
+        table = self.monitor_table
+        spec = list(_MONITOR_COLUMN_SPEC)
+        headers = [h for h, _ in spec]
+        off = data_row_offset(self._monitor_filter_visible)
+        table.setSortingEnabled(False)
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        total = off + len(rows)
+        if self._monitor_filter_visible and total < 1:
+            total = 1
+        table.setRowCount(total)
+        if self._monitor_filter_visible:
+            for c in range(len(headers)):
+                table.takeItem(0, c)
+            install_filter_row(
+                table,
+                len(headers),
+                on_text_changed=self._schedule_monitor_filter_apply,
+            )
+            if saved_filter_texts_list:
+                restore_filter_texts(table, saved_filter_texts_list)
+        for r_index, payload in enumerate(rows):
+            if not isinstance(payload, dict):
+                continue
+            tr = off + r_index
+            cells = _cells_for_monitor_payload(payload)
+            status = str(_monitor_pick_field(payload, "status", "state", "stepStatus") or "")
+            for col, text in enumerate(cells):
+                table.setItem(tr, col, _monitor_table_item(text, status=status))
+        sync_vertical_header_labels(
+            table,
+            filter_visible=self._monitor_filter_visible,
+            data_row_count=len(rows),
+        )
+        if rows:
+            self._resize_monitor_columns(table)
+
+    def _resize_monitor_columns(self, table: QTableWidget) -> None:
+        spec = list(_MONITOR_COLUMN_SPEC)
+        fm = table.fontMetrics()
+        fm_h = table.horizontalHeader().fontMetrics()
+        for col, (header, _) in enumerate(spec):
+            width = fm_h.horizontalAdvance(header) + 18
+            for row in range(table.rowCount()):
+                item = table.item(row, col)
+                if item is not None:
+                    width = max(width, fm.horizontalAdvance(item.text()) + 12)
+            table.setColumnWidth(col, max(48, width))
 
     def render_all_reports(self, payload: Any) -> None:
-        jobs = self._extract_rows(payload, ("job", "jobs"))
-        logs = self._extract_rows(payload, ("tables", "logs", "steps"))
-        self._set_summary(jobs)
+        entries = _normalize_job_log_entries(payload)
+        self.set_job_log_data(entries, clear_detail=self._detail_job_id_filter is None)
 
-        timeline_rows = self._collect_timeline_rows(payload)
-        if not timeline_rows:
-            timeline_rows = logs if logs else jobs
-        timeline_rows = sorted(timeline_rows, key=self._timeline_sort_key)
-        self._render_timeline_table(timeline_rows)
+    def _summary_spec_list(self) -> list[tuple[str, tuple[str, ...]]]:
+        return list(self._summary_column_spec)
 
-    def _extract_rows(self, payload: Any, preferred_keys: tuple[str, ...]) -> list[dict[str, Any]]:
-        if isinstance(payload, list):
-            return [row for row in payload if isinstance(row, dict)]
-        if not isinstance(payload, dict):
-            return []
-        for key in preferred_keys:
-            value = payload.get(key)
-            if isinstance(value, list):
-                rows = [row for row in value if isinstance(row, dict)]
-                if rows:
-                    return rows
-            if isinstance(value, dict):
-                return [value]
-        return []
+    def _details_spec_list(self) -> list[tuple[str, tuple[str, ...]]]:
+        return list(self._details_column_spec)
 
-    def _collect_timeline_rows(self, payload: Any) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        if not isinstance(payload, dict):
-            return rows
-        for source, value in payload.items():
-            if isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict):
-                        row = dict(item)
-                        row["_source"] = source
-                        rows.append(row)
-            elif isinstance(value, dict):
-                row = dict(value)
-                row["_source"] = source
-                rows.append(row)
-        return rows
+    def _summary_data_row_offset(self) -> int:
+        return data_row_offset(self._summary_filter_visible)
 
-    def _set_summary(self, jobs: list[dict[str, Any]]) -> None:
-        total_jobs = len(jobs)
-        running = completed = failed = 0
-        total_tables = processed_tables = 0
-        for job in jobs:
-            status = str(job.get("status", "")).upper()
-            if status in ("RUNNING", "QUEUED"):
-                running += 1
-            elif status == "COMPLETED":
-                completed += 1
-            elif status in ("FAILED", "ERROR"):
-                failed += 1
-            total_tables += self._safe_int(job.get("totalTables"))
-            processed_tables += self._safe_int(job.get("processedTables"))
+    def _details_data_row_offset(self) -> int:
+        return data_row_offset(self._details_filter_visible)
 
-        self.summary_total_jobs.setText(f"Total jobs: {total_jobs}")
-        self.summary_running.setText(f"Running: {running}")
-        self.summary_completed.setText(f"Completed: {completed}")
-        self.summary_failed.setText(f"Failed: {failed}")
-        self.summary_total_tables.setText(f"Total tables: {total_tables}")
-        self.summary_processed_tables.setText(f"Processed tables: {processed_tables}")
+    def _schedule_summary_filter_apply(self) -> None:
+        if self._summary_filter_visible:
+            self._summary_filter_timer.start()
 
-    def _timeline_sort_key(self, row: dict[str, Any]) -> tuple[Any, ...]:
-        stage = self._infer_stage(row)
-        stage_order = {"SCAN": 1, "IMPORT": 2, "JOB": 3, "TABLE": 4, "OTHER": 5}
-        timestamp = self._pick_time(row)
-        sequence = self._pick_sequence(row)
-        seq_num = self._safe_int(sequence) if sequence not in ("", "-") else 10**9
-        return (str(timestamp), stage_order.get(stage, 99), seq_num, str(row.get("id", "")))
+    def _schedule_details_filter_apply(self) -> None:
+        if self._details_filter_visible:
+            self._details_filter_timer.start()
 
-    def _build_timeline_display_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        display: list[dict[str, Any]] = []
-        for r_index, row in enumerate(rows, start=1):
-            display.append(
-                {
-                    "order": r_index,
-                    "stage": self._infer_stage(row),
-                    "event": self._infer_event(row),
-                    "status": self._pick_status(row),
-                    "time": self._pick_time(row),
-                    "source": row.get("_source", "--"),
-                    **{k: v for k, v in row.items() if not str(k).startswith("_")},
-                }
-            )
-        return display
-
-    def _on_timeline_filters_toggled(self, checked: bool) -> None:
-        self._timeline_filter_visible = checked
-        if not checked:
-            clear_filter_row_widgets(self.timeline_table)
-        self._refresh_timeline_table()
-
-    def _derive_timeline_column_spec(self, rows: list[dict[str, Any]]) -> list[tuple[str, tuple[str, ...]]]:
-        columns = ["order", "stage", "event", "status", "time", "source"]
-        for row in rows:
-            for key in row.keys():
-                if str(key).startswith("_"):
-                    continue
-                if key not in columns:
-                    columns.append(key)
-        return [(c.upper(), (c,)) for c in columns]
-
-    def _refresh_timeline_table(self) -> None:
-        table = self.timeline_table
-        if not self._timeline_rows:
-            table.setColumnCount(0)
-            table.setRowCount(0)
-            return
-        display_rows = self._build_timeline_display_rows(self._timeline_rows)
-        filtered = list(display_rows)
-        if self._timeline_filter_visible:
-            filtered = filter_dict_rows_by_column_edits(
-                display_rows,
-                table,
-                self._timeline_cols_spec,
-                True,
-                _timeline_row_value,
-                _timeline_format_cell,
-            )
-        saved = saved_filter_texts(table) if self._timeline_filter_visible else None
-        render_dict_rows_table(
-            table,
-            filtered,
-            self._timeline_cols_spec,
-            filter_visible=self._timeline_filter_visible,
-            value_for_column=_timeline_row_value,
-            format_cell=_timeline_format_cell,
-            on_filter_text_changed=self._schedule_timeline_filter_apply,
-            saved_filter_texts_list=saved,
+    def _filtered_summary_rows(self) -> list[dict[str, str]]:
+        return filter_dict_rows_by_column_edits(
+            self._summary_source_rows,
+            self.job_summary_table,
+            self._summary_spec_list(),
+            self._summary_filter_visible,
+            _log_row_value,
+            _log_format_cell,
         )
 
-    def _schedule_timeline_filter_apply(self) -> None:
-        if self._timeline_filter_visible:
-            self._timeline_filter_timer.start()
+    def _details_rows_for_display(self) -> list[dict[str, str]]:
+        if not self._detail_job_id_filter:
+            return []
+        return filter_dict_rows_by_column_edits(
+            list(self._details_source_rows),
+            self.job_detail_table,
+            self._details_spec_list(),
+            self._details_filter_visible,
+            _log_row_value,
+            _log_format_cell,
+        )
 
-    def _render_timeline_table(self, rows: list[dict[str, Any]]) -> None:
-        self._timeline_rows = list(rows)
-        self._timeline_cols_spec = self._derive_timeline_column_spec(rows)
-        self._refresh_timeline_table()
+    def _raw_entry_for_summary_row(self, row: dict[str, str]) -> dict[str, Any] | None:
+        rid = ""
+        for _, keys in self._summary_column_spec:
+            if keys[0] in _SCAN_LOG_PARENT_ID_KEYS:
+                rid = str(row.get(keys[0], "")).strip()
+                if rid and rid != "--":
+                    break
+        if not rid:
+            rid = str(row.get("id", "")).strip()
+        if not rid or rid == "--":
+            return None
+        for raw in self._summary_raw_entries:
+            if _parent_run_id(raw) == rid:
+                return raw
+        return None
 
-    def _infer_stage(self, row: dict[str, Any]) -> str:
-        text = " ".join(str(v) for v in row.values()).lower()
-        source = str(row.get("_source", "")).lower()
-        combo = f"{source} {text}"
-        if "scan" in combo:
-            return "SCAN"
-        if "import" in combo:
-            return "IMPORT"
-        if "job" in combo:
-            return "JOB"
-        if "table" in combo:
-            return "TABLE"
-        return "OTHER"
+    def _write_summary_table(self, rows: list[dict[str, str]]) -> None:
+        spec = self._summary_spec_list()
+        headers = [h for h, _ in spec]
+        table = self.job_summary_table
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        off = self._summary_data_row_offset()
+        total = off + len(rows)
+        if self._summary_filter_visible and total < 1:
+            total = 1
+        table.setSortingEnabled(False)
+        table.setRowCount(total)
+        if self._summary_filter_visible:
+            for c in range(table.columnCount()):
+                table.takeItem(0, c)
+            install_filter_row(
+                table,
+                table.columnCount(),
+                on_text_changed=self._schedule_summary_filter_apply,
+            )
+        for r, row in enumerate(rows):
+            tr = off + r
+            raw = self._raw_entry_for_summary_row(row)
+            for col, (_header, keys) in enumerate(spec):
+                text = row.get(keys[0], "")
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if col == 0:
+                    raw_id = raw.get("id") if isinstance(raw, dict) else row.get(keys[0])
+                    _apply_scan_log_id_item_sort_role(item, raw_id)
+                    if isinstance(raw, dict):
+                        item.setData(Qt.ItemDataRole.UserRole, raw)
+                table.setItem(tr, col, item)
+        sync_vertical_header_labels(
+            table,
+            filter_visible=self._summary_filter_visible,
+            data_row_count=len(rows),
+        )
+        if self._summary_source_rows:
+            resize_data_table_columns_to_content(
+                table,
+                spec,
+                self._summary_source_rows,
+                _log_row_value,
+                _log_format_cell,
+            )
+        _finalize_scan_log_table_sort(table, filter_visible=self._summary_filter_visible)
 
-    def _infer_event(self, row: dict[str, Any]) -> str:
-        for key in ("event", "action", "stepName", "msg", "message"):
-            if row.get(key) not in (None, ""):
-                return str(row.get(key))
-        stage = self._infer_stage(row)
-        status = self._pick_status(row)
-        if stage == "SCAN":
-            return f"Scan {status}".strip()
-        if stage == "IMPORT":
-            return f"Import {status}".strip()
-        if stage == "JOB":
-            return f"Job {status}".strip()
-        if stage == "TABLE":
-            table_name = row.get("tableName") or row.get("table") or ""
-            return f"Table {table_name} {status}".strip()
-        return status if status else "--"
+    def _write_details_table(self, rows: list[dict[str, str]]) -> None:
+        spec = self._details_spec_list()
+        headers = [h for h, _ in spec]
+        table = self.job_detail_table
+        table.clearContents()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        off = self._details_data_row_offset()
+        total = off + len(rows)
+        if self._details_filter_visible and total < 1:
+            total = 1
+        table.setSortingEnabled(False)
+        table.setRowCount(total)
+        if self._details_filter_visible:
+            for c in range(table.columnCount()):
+                table.takeItem(0, c)
+            install_filter_row(
+                table,
+                table.columnCount(),
+                on_text_changed=self._schedule_details_filter_apply,
+            )
+        for r, row in enumerate(rows):
+            tr = off + r
+            for col, (_header, keys) in enumerate(spec):
+                text = _detail_row_cell_text(row, keys)
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if col == 0:
+                    value, _ = _value_for_column(row, keys)
+                    _apply_scan_log_id_item_sort_role(item, value)
+                table.setItem(tr, col, item)
+        sync_vertical_header_labels(
+            table,
+            filter_visible=self._details_filter_visible,
+            data_row_count=len(rows),
+        )
+        if self._details_source_rows:
+            resize_data_table_columns_to_content(
+                table,
+                spec,
+                self._details_source_rows,
+                _log_row_value,
+                _log_format_cell,
+            )
+        _finalize_scan_log_table_sort(table, filter_visible=self._details_filter_visible)
 
-    def _pick_status(self, row: dict[str, Any]) -> str:
-        for key in ("status", "state", "stepStatus", "jobStatus"):
-            if row.get(key) not in (None, ""):
-                return str(row.get(key))
-        return "--"
+    def _apply_summary_column_filters(self) -> None:
+        if not self._summary_filter_visible:
+            return
+        self._write_summary_table(self._filtered_summary_rows())
 
-    def _pick_time(self, row: dict[str, Any]) -> str:
-        for key in ("timestamp", "updatedAt", "createdAt", "startTime", "endTime", "scannedAt"):
-            value = row.get(key)
-            if value not in (None, ""):
-                text = format_datetime_display(value)
-                return text if text else str(value)
-        return "--"
+    def _apply_details_column_filters(self) -> None:
+        if not self._details_filter_visible:
+            return
+        self._write_details_table(self._details_rows_for_display())
 
-    def _pick_sequence(self, row: dict[str, Any]) -> str:
-        for key in ("sequence", "seq", "step", "order"):
-            if row.get(key) not in (None, ""):
-                return str(row.get(key))
-        return "-"
+    def _on_summary_filters_toggled(self, checked: bool) -> None:
+        self._summary_filter_visible = checked
+        if not checked:
+            self._summary_filter_timer.stop()
+            clear_filter_row_widgets(self.job_summary_table)
+        rows = self._filtered_summary_rows() if checked else list(self._summary_source_rows)
+        self._write_summary_table(rows)
 
-    @staticmethod
-    def _safe_int(value: Any) -> int:
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return 0
+    def _on_details_filters_toggled(self, checked: bool) -> None:
+        self._details_filter_visible = checked
+        if not checked:
+            self._details_filter_timer.stop()
+            clear_filter_row_widgets(self.job_detail_table)
+        self._write_details_table(self._details_rows_for_display())
+
+    def request_job_log_details(self, job_id: str) -> None:
+        """Called by page controller to load ``GET api/etl/logs/{id}``."""
+        self._detail_job_id_filter = job_id
+        self._details_source_rows = []
+        self._details_column_spec = list(_DETAILS_COLUMN_SPEC)
+        self._update_detail_filter_hint(loading=True)
+        self._write_details_table([])
+        self.tabs.setCurrentIndex(_TAB_JOB_DETAIL_LOG)
+
+    def apply_job_log_details(
+        self,
+        job_id: str,
+        detail_items: list[dict[str, Any]],
+        *,
+        error_message: str = "",
+    ) -> None:
+        self._detail_job_id_filter = job_id
+        if error_message:
+            self._details_source_rows = []
+            self._details_column_spec = list(_DETAILS_COLUMN_SPEC)
+            self._update_detail_filter_hint(error=error_message)
+            self._write_details_table([])
+            return
+        self._details_column_spec, self._details_source_rows = prepare_scan_log_detail_table(
+            job_id, detail_items
+        )
+        self._update_detail_filter_hint()
+        self._write_details_table(self._details_rows_for_display())
+
+    def _on_summary_row_double_clicked(self, item: QTableWidgetItem) -> None:
+        if item.row() < self._summary_data_row_offset():
+            return
+        cell = self.job_summary_table.item(item.row(), 0)
+        if cell is None:
+            return
+        entry = cell.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(entry, dict):
+            return
+        job_id = _parent_run_id(entry)
+        if not job_id:
+            return
+        self.job_detail_requested.emit(job_id)
+
+    def _clear_detail_job_filter(self) -> None:
+        self._detail_job_id_filter = None
+        self._details_source_rows = []
+        self._details_column_spec = list(_DETAILS_COLUMN_SPEC)
+        self._update_detail_filter_hint()
+        self._write_details_table([])
+
+    def _update_detail_filter_hint(
+        self,
+        *,
+        loading: bool = False,
+        error: str = "",
+    ) -> None:
+        if loading and self._detail_job_id_filter:
+            self.job_detail_hint.setText(
+                f"Loading step details for job Id {self._detail_job_id_filter}…"
+            )
+            self.job_detail_show_all_btn.setVisible(True)
+        elif error and self._detail_job_id_filter:
+            self.job_detail_hint.setText(
+                f"Job Id {self._detail_job_id_filter}: {error}"
+            )
+            self.job_detail_show_all_btn.setVisible(True)
+        elif self._detail_job_id_filter:
+            count = len(self._details_source_rows)
+            self.job_detail_hint.setText(
+                f"Step details for job Id {self._detail_job_id_filter} ({count} row(s)). "
+                "Use Clear to close."
+            )
+            self.job_detail_show_all_btn.setVisible(True)
+        else:
+            self.job_detail_hint.setText(_JOB_DETAIL_LOG_SUBTITLE_EMPTY)
+            self.job_detail_show_all_btn.setVisible(False)
+
+    def set_job_log_data(
+        self,
+        entries: list[dict[str, Any]],
+        *,
+        clear_detail: bool = True,
+    ) -> None:
+        if clear_detail:
+            self._detail_job_id_filter = None
+            self._details_source_rows = []
+            self._details_column_spec = list(_DETAILS_COLUMN_SPEC)
+            self._update_detail_filter_hint()
+        (
+            matched,
+            self._summary_column_spec,
+            _details_spec_unused,
+            self._summary_source_rows,
+            _detail_rows_unused,
+        ) = prepare_scan_log_table_data(entries)
+        self._summary_raw_entries = matched
+        if clear_detail:
+            self._write_details_table([])
+        summary_display = (
+            self._filtered_summary_rows()
+            if self._summary_filter_visible
+            else list(self._summary_source_rows)
+        )
+        self._write_summary_table(summary_display)
+        if not clear_detail and self._detail_job_id_filter:
+            self._write_details_table(self._details_rows_for_display())
 
 
 class EtlJobLogsPage(QWidget):
@@ -394,7 +813,12 @@ class EtlJobLogsPage(QWidget):
 
     _POLL_MS = 3000
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        monitor_ws: EtlMonitorWebSocketClient | None = None,
+    ) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -406,7 +830,14 @@ class EtlJobLogsPage(QWidget):
         self._last_payload: dict[str, Any] = {}
         self._fetch_thread: QThread | None = None
         self._fetch_worker: _JobLogsFetchWorker | None = None
+        self._detail_fetch_in_flight = False
+        self._detail_fetch_seq = 0
+        self._detail_fetch_pending_id: str | None = None
+        self._detail_fetch_thread: QThread | None = None
+        self._detail_fetch_worker: _JobLogDetailFetchWorker | None = None
         self._visible = False
+        self._owns_monitor_ws = monitor_ws is None
+        self._monitor_ws = monitor_ws or EtlMonitorWebSocketClient(self)
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(self._POLL_MS)
@@ -414,17 +845,111 @@ class EtlJobLogsPage(QWidget):
 
         self._ui.refresh_btn.clicked.connect(self.refresh)
         self._ui.auto_refresh_checkbox.stateChanged.connect(self._on_auto_refresh_toggled)
+        self._ui.monitor_clear_btn.clicked.connect(self._clear_monitor_logs)
+        self._ui.job_detail_requested.connect(self._load_job_log_details)
+        self._ui.tabs.currentChanged.connect(self._on_main_tab_changed)
+        self._monitor_ws.log_received.connect(self._on_monitor_log)
+        self._monitor_ws.connection_changed.connect(self._ui.set_monitor_connection_connected)
+        self._monitor_ws.connection_error.connect(self._ui.set_monitor_connection_error)
+        if self._owns_monitor_ws:
+            self._monitor_ws.start()
+
+    def _clear_monitor_logs(self) -> None:
+        self._monitor_ws.clear_buffer()
+        self._ui.clear_monitor_logs()
+
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         self._visible = True
         self.refresh()
         if self._auto_refresh:
             self._poll_timer.start()
+        self._sync_monitor_from_buffer()
 
     def hideEvent(self, event: QHideEvent) -> None:
         super().hideEvent(event)
         self._visible = False
         self._poll_timer.stop()
+        if self._owns_monitor_ws:
+            self._monitor_ws.stop()
+
+    def _sync_monitor_from_buffer(self) -> None:
+        self._ui.set_monitor_connection_connected(self._monitor_ws.is_connected())
+        self._ui.load_monitor_buffer(self._monitor_ws.buffered_logs())
+
+    def _on_main_tab_changed(self, index: int) -> None:
+        if index == _TAB_MONITOR:
+            self._sync_monitor_from_buffer()
+
+    def _schedule_job_log_details(self, job_id: str) -> None:
+        job_id = str(job_id or "").strip()
+        if not job_id:
+            return
+        self._detail_fetch_pending_id = job_id
+        if not self._detail_fetch_in_flight:
+            self._start_job_log_detail_fetch()
+
+    def _start_job_log_detail_fetch(self) -> None:
+        if self._detail_fetch_in_flight:
+            return
+        job_id = str(self._detail_fetch_pending_id or "").strip()
+        if not job_id:
+            return
+        self._detail_fetch_seq += 1
+        seq = self._detail_fetch_seq
+        self._detail_fetch_in_flight = True
+        self._ui.request_job_log_details(job_id)
+        self._detail_fetch_thread = QThread(self)
+        self._detail_fetch_worker = _JobLogDetailFetchWorker(job_id, self._token(), seq)
+        self._detail_fetch_worker.moveToThread(self._detail_fetch_thread)
+        self._detail_fetch_thread.started.connect(self._detail_fetch_worker.run)
+        self._detail_fetch_worker.finished.connect(self._on_detail_fetch_finished)
+        self._detail_fetch_worker.finished.connect(self._detail_fetch_thread.quit)
+        self._detail_fetch_thread.finished.connect(self._cleanup_detail_fetch_thread)
+        self._detail_fetch_thread.start()
+
+    def _load_job_log_details(self, job_id: str) -> None:
+        self._schedule_job_log_details(job_id)
+
+    @Slot(str, object, str, int)
+    def _on_detail_fetch_finished(
+        self,
+        job_id: str,
+        payload: object,
+        error_message: str,
+        seq: int,
+    ) -> None:
+        if seq != self._detail_fetch_seq:
+            return
+        self._detail_fetch_in_flight = False
+        current = str(self._ui._detail_job_id_filter or "").strip()
+        if str(job_id) != current:
+            if current:
+                self._detail_fetch_pending_id = current
+                self._start_job_log_detail_fetch()
+            return
+        detail_rows = normalize_etl_log_detail_items(payload)
+        self._ui.apply_job_log_details(
+            job_id,
+            detail_rows,
+            error_message=str(error_message or ""),
+        )
+        pending = str(self._detail_fetch_pending_id or "").strip()
+        if pending and pending != str(job_id):
+            self._start_job_log_detail_fetch()
+
+    @Slot()
+    def _cleanup_detail_fetch_thread(self) -> None:
+        if self._detail_fetch_worker is not None:
+            self._detail_fetch_worker.deleteLater()
+            self._detail_fetch_worker = None
+        if self._detail_fetch_thread is not None:
+            self._detail_fetch_thread.deleteLater()
+            self._detail_fetch_thread = None
+
+    @Slot(dict)
+    def _on_monitor_log(self, payload: dict[str, Any]) -> None:
+        self._ui.append_monitor_log(payload)
 
     def refresh(self) -> None:
         if self._fetch_in_flight:
@@ -465,11 +990,14 @@ class EtlJobLogsPage(QWidget):
             return
 
         try:
-            self._last_payload = payload if isinstance(payload, dict) else {}
-            self._ui.render_all_reports(self._last_payload)
+            self._last_payload = payload
+            self._ui.render_all_reports(payload)
             show_auto_hiding_message(self, self._ui.page_status_label, "", error=False)
+            active_detail_id = self._ui._detail_job_id_filter
+            if active_detail_id:
+                self._schedule_job_log_details(str(active_detail_id))
 
-            jobs = self._ui._extract_rows(self._last_payload, ("job", "jobs"))
+            jobs = _normalize_job_log_entries(payload)
             any_running = any(
                 str((job or {}).get("status", "")).upper() in ("QUEUED", "RUNNING") for job in jobs
             )

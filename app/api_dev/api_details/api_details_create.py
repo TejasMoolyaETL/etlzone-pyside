@@ -39,6 +39,7 @@ from ui.form_combobox_style import apply_form_combobox_field
 from ui.form_page_styles import (
     FORM_ERROR_LABEL_STYLE,
     FORM_INPUT_STYLE as INPUT_STYLE,
+    FORM_PLAIN_TEXT_STYLE as PLAIN_TEXT_STYLE,
     FORM_LABEL_STYLE as LABEL_STYLE,
     FORM_PAGE_HEADER_STYLESHEET,
     FORM_SINGLELINE_FIELD_HEIGHT_PX,
@@ -99,7 +100,6 @@ class CreateAPIDetailPage(QWidget):
         self._project_completions: list[tuple[str, Any, dict[str, Any]]] = []
         self._default_api_status = "ACTIVE"
         self._build_ui()
-        self._load_api_status_options()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -205,17 +205,17 @@ class CreateAPIDetailPage(QWidget):
             elif field_key == "comments":
                 w = QPlainTextEdit()
                 w.setFixedHeight(_multiline_h)
-                w.setStyleSheet(INPUT_STYLE)
+                w.setStyleSheet(PLAIN_TEXT_STYLE)
                 self.comments_edit = w
             elif field_key == "request":
                 w = QPlainTextEdit()
                 w.setFixedHeight(_multiline_h)
-                w.setStyleSheet(INPUT_STYLE)
+                w.setStyleSheet(PLAIN_TEXT_STYLE)
                 self.request_edit = w
             elif field_key == "response":
                 w = QPlainTextEdit()
                 w.setFixedHeight(_multiline_h)
-                w.setStyleSheet(INPUT_STYLE)
+                w.setStyleSheet(PLAIN_TEXT_STYLE)
                 self.response_edit = w
             else:
                 w = QLineEdit()
@@ -452,6 +452,7 @@ class CreateAPIDetailPage(QWidget):
             _API_STATUS_FIELD_NAME,
             token=token,
             include_placeholder=False,
+            rows=rows if isinstance(rows, list) else None,
         )
         if self.api_status_combo.count() == 0:
             self.api_status_combo.blockSignals(True)

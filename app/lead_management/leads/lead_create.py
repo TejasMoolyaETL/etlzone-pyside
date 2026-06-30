@@ -36,6 +36,7 @@ from ui.form_page_styles import (
     APP_FONT_SIZE_PX,
     FORM_ERROR_LABEL_STYLE,
     FORM_INPUT_STYLE as INPUT_STYLE,
+    FORM_PLAIN_TEXT_STYLE as PLAIN_TEXT_STYLE,
     FORM_LABEL_FIELD_SPACING_PX,
     FORM_LABEL_STYLE as LABEL_STYLE,
     INPUT_PLACEHOLDER_COLOR,
@@ -640,13 +641,7 @@ class CreateLeadPage(QWidget):
                 edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
                 edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
                 edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-                jd_style = (
-                    f"QPlainTextEdit {{ font-size: {APP_FONT_SIZE_PX}px; padding: 4px 8px; "
-                    "border: 1px solid #e2e8f0; border-radius: 4px; background-color: #ffffff; }}"
-                    f"QPlainTextEdit::placeholder {{ color: {INPUT_PLACEHOLDER_COLOR}; "
-                    f"font-size: {APP_FONT_SIZE_PX}px; font-weight: {INPUT_PLACEHOLDER_FONT_WEIGHT}; }}"
-                )
-                edit.setStyleSheet(jd_style)
+                edit.setStyleSheet(PLAIN_TEXT_STYLE)
                 wrap = _JobDescEditorWithGrip(edit)
                 wrap.setMinimumHeight(jd_h0)
                 wrap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)

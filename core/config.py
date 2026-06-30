@@ -70,6 +70,47 @@ def app_updates_websocket_enabled() -> bool:
         "off",
     )
 
+
+_ETL_MONITOR_WS_PATH = (
+    os.getenv("ETL_MONITOR_WS_PATH", "/ws/etl").strip() or "/ws/etl"
+)
+_ETL_MONITOR_WS_URL_OVERRIDE = os.getenv("ETL_MONITOR_WS_URL", "").strip()
+
+
+def etl_monitor_websocket_url() -> str:
+    """Full WebSocket URL for live ETL job monitor (default ``/ws/etl`` on API host)."""
+    if _ETL_MONITOR_WS_URL_OVERRIDE:
+        return _ETL_MONITOR_WS_URL_OVERRIDE.rstrip("/")
+    base = _http_base_to_ws_base(API_BASE_URL)
+    path = (
+        _ETL_MONITOR_WS_PATH
+        if _ETL_MONITOR_WS_PATH.startswith("/")
+        else f"/{_ETL_MONITOR_WS_PATH}"
+    )
+    return f"{base}{path}"
+
+
+def etl_monitor_websocket_origin() -> str:
+    """Origin header for ETL monitor WebSocket handshake (empty = omit, like browser)."""
+    return os.getenv("ETL_MONITOR_WS_ORIGIN", "").strip()
+
+
+def etl_monitor_websocket_use_auth_header() -> bool:
+    """Send Authorization: Bearer on ETL monitor handshake (default off, like browser)."""
+    raw = os.getenv("ETL_MONITOR_WS_AUTH_HEADER", "0").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def etl_monitor_websocket_enabled() -> bool:
+    """When true, connect to ``/ws/etl`` after sign-in to buffer live ETL log events."""
+    return os.getenv("ETL_MONITOR_WS_ENABLED", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 # Login auth endpoint (full path).
 LOGIN_URL = f"{API_BASE_URL}/api/auth/login"
 
@@ -538,6 +579,10 @@ ETL_METADATA_CHECK_FIELD_PATH_PREFIX = os.getenv(
     "ETL_METADATA_CHECK_FIELD_PATH_PREFIX",
     "api/etl/import-metadata/check-field",
 ).strip().lstrip("/").rstrip("/")
+ETL_SCAN_CONNECTION_CHECK_FIELD_PATH_PREFIX = os.getenv(
+    "ETL_SCAN_CONNECTION_CHECK_FIELD_PATH_PREFIX",
+    "api/etl/scan-connection/check-field",
+).strip().lstrip("/").rstrip("/")
 ETL_METADATA_SCAN_ALL_PATH = os.getenv(
     "ETL_METADATA_SCAN_ALL_PATH", "api/etl/scan-connection/scan-all"
 ).strip().lstrip("/")
@@ -548,11 +593,36 @@ ETL_METADATA_SCAN_BY_FILTER_PATH_PREFIX = os.getenv(
         "api/etl/scan-connection/scan-all-by-filter",
     ),
 ).strip().lstrip("/").rstrip("/")
+ETL_SCAN_UPDATE_TGT_TABLE_NAME_PATH_PREFIX = os.getenv(
+    "ETL_SCAN_UPDATE_TGT_TABLE_NAME_PATH_PREFIX",
+    "api/etl/import-metadata/update-tgt-table-name",
+).strip().lstrip("/").rstrip("/")
+ETL_IMPORT_METADATA_UPDATE_WHERE_CLAUSE_PATH_PREFIX = os.getenv(
+    "ETL_IMPORT_METADATA_UPDATE_WHERE_CLAUSE_PATH_PREFIX",
+    "api/etl/import-metadata/update-where-clause",
+).strip().lstrip("/").rstrip("/")
 
 # ETL — extraction (imported tables, column selection, jobs).
+ETL_EXTRACTION_PATH = os.getenv("ETL_EXTRACTION_PATH", "api/extraction").strip().lstrip("/").rstrip("/")
+ETL_EXTRACTION_BY_CONNECTION_PATH_PREFIX = os.getenv(
+    "ETL_EXTRACTION_BY_CONNECTION_PATH_PREFIX",
+    "api/extraction/connection",
+).strip().lstrip("/").rstrip("/")
+ETL_EXTRACTION_UPDATE_TARGET_TABLE_PATH_PREFIX = os.getenv(
+    "ETL_EXTRACTION_UPDATE_TARGET_TABLE_PATH_PREFIX",
+    "api/extraction/target-table",
+).strip().lstrip("/").rstrip("/")
+ETL_EXTRACTION_UPDATE_WHERE_CLAUSE_PATH_PREFIX = os.getenv(
+    "ETL_EXTRACTION_UPDATE_WHERE_CLAUSE_PATH_PREFIX",
+    "api/extraction/where-clause",
+).strip().lstrip("/").rstrip("/")
 ETL_METADATA_IMPORTED_TABLES_PATH_PREFIX = os.getenv(
     "ETL_METADATA_IMPORTED_TABLES_PATH_PREFIX",
     "api/etl/import-metadata/imported-table-by-id",
+).strip().lstrip("/").rstrip("/")
+ETL_EXTRACT_METADATA_EXTRACTED_TABLE_BY_ID_PATH_PREFIX = os.getenv(
+    "ETL_EXTRACT_METADATA_EXTRACTED_TABLE_BY_ID_PATH_PREFIX",
+    "api/etl/extract-metadata/extracted-table-by-id",
 ).strip().lstrip("/").rstrip("/")
 ETL_METADATA_IMPORTED_REMOVE_PATH_PREFIX = os.getenv(
     "ETL_METADATA_IMPORTED_REMOVE_PATH_PREFIX", "api/metadata/imported-remove"
@@ -563,12 +633,68 @@ ETL_METADATA_SCAN_EXTRACTED_FIELDS_PATH_PREFIX = os.getenv(
 ETL_METADATA_UPDATE_EXTRACTED_FIELDS_PATH_PREFIX = os.getenv(
     "ETL_METADATA_UPDATE_EXTRACTED_FIELDS_PATH_PREFIX", "api/metadata/update-extracted-feilds"
 ).strip().lstrip("/").rstrip("/")
+ETL_METADATA_GET_TABLE_NAME_FROM_ETL_DETAILS_PATH_PREFIX = os.getenv(
+    "ETL_METADATA_GET_TABLE_NAME_FROM_ETL_DETAILS_PATH_PREFIX",
+    "api/metadata/get-table-name-from-etl-details",
+).strip().lstrip("/").rstrip("/")
+ETL_EXTRACT_GROUP_PATH = os.getenv("ETL_EXTRACT_GROUP_PATH", "group").strip().lstrip("/").rstrip("/")
+ETL_EXTRACT_GROUP_UPDATE_TGT_TABLE_PATH = os.getenv(
+    "ETL_EXTRACT_GROUP_UPDATE_TGT_TABLE_PATH",
+    "group/update/tgt-table",
+).strip().lstrip("/").rstrip("/")
+ETL_GROUP_TABLE_ADD_WHERE_CLAUSE_PATH = os.getenv(
+    "ETL_GROUP_TABLE_ADD_WHERE_CLAUSE_PATH",
+    "group/table/add-where-clause",
+).strip().lstrip("/").rstrip("/")
+ETL_GROUP_VALIDATE_WHERE_CLAUSE_PATH = os.getenv(
+    "ETL_GROUP_VALIDATE_WHERE_CLAUSE_PATH",
+    os.getenv("ETL_GROUP_TABLE_VALIDATE_WHERE_CLAUSE_PATH", "group/table/validate-where-clause"),
+).strip().lstrip("/").rstrip("/")
 ETL_JOB_START_PATH = os.getenv("ETL_JOB_START_PATH", "etl/jobs/start").strip().lstrip("/")
-ETL_JOBS_ALL_PATH = os.getenv("ETL_JOBS_ALL_PATH", "etl/jobs/all").strip().lstrip("/")
+ETL_GROUP_JOB_START_PATH = os.getenv(
+    "ETL_GROUP_JOB_START_PATH",
+    "etl/jobs/group/start",
+).strip().lstrip("/").rstrip("/")
+ETL_JOBS_ALL_PATH = os.getenv("ETL_JOBS_ALL_PATH", "api/etl/logs").strip().lstrip("/")
+ETL_LOG_BY_ID_PATH_PREFIX = os.getenv(
+    "ETL_LOG_BY_ID_PATH_PREFIX", "api/etl/logs"
+).strip().lstrip("/").rstrip("/")
 ETL_LOGS_BY_TYPE_PATH = os.getenv(
     "ETL_LOGS_BY_TYPE_PATH", "api/etl/logs/type"
 ).strip().lstrip("/").rstrip("/")
 ETL_LOGS_BY_CONNECTION_AND_OPERATION_TYPE_PATH = os.getenv(
     "ETL_LOGS_BY_CONNECTION_AND_OPERATION_TYPE_PATH",
     "api/etl/logs/connection/name-and-operation-type",
+).strip().lstrip("/").rstrip("/")
+
+# Data transformation catalog (Object → Job → Work Flow → Flow).
+ETL_TRANSFORMATION_OBJECT_PATH = os.getenv(
+    "ETL_TRANSFORMATION_OBJECT_PATH", "api/transformation/object"
+).strip().lstrip("/").rstrip("/")
+ETL_TRANSFORMATION_JOB_PATH = os.getenv(
+    "ETL_TRANSFORMATION_JOB_PATH", "api/transformation/job"
+).strip().lstrip("/").rstrip("/")
+ETL_TRANSFORMATION_WORKFLOW_PATH = os.getenv(
+    "ETL_TRANSFORMATION_WORKFLOW_PATH", "api/transformation/workflow"
+).strip().lstrip("/").rstrip("/")
+ETL_TRANSFORMATION_FLOW_PATH = os.getenv(
+    "ETL_TRANSFORMATION_FLOW_PATH", "api/transformation/flow"
+).strip().lstrip("/").rstrip("/")
+ETL_TRANSFORMATION_SOURCE_PATH = os.getenv(
+    "ETL_TRANSFORMATION_SOURCE_PATH", "api/transformation/source"
+).strip().lstrip("/").rstrip("/")
+ETL_TRANSFORMATION_TARGET_PATH = os.getenv(
+    "ETL_TRANSFORMATION_TARGET_PATH", "api/transformation/target"
+).strip().lstrip("/").rstrip("/")
+ETL_TRANSFORMATION_COLUMN_PATH = os.getenv(
+    "ETL_TRANSFORMATION_COLUMN_PATH", "api/transformation/column"
+).strip().lstrip("/").rstrip("/")
+ETL_TRANSFORMATION_JOIN_PATH = os.getenv(
+    "ETL_TRANSFORMATION_JOIN_PATH", "api/transformation/join"
+).strip().lstrip("/").rstrip("/")
+ETL_TRANSFORMATION_STEP_PATH = os.getenv(
+    "ETL_TRANSFORMATION_STEP_PATH", "api/transformation/step"
+).strip().lstrip("/").rstrip("/")
+ETL_TRANSFORMATION_STEP_MASTER_PATH = os.getenv(
+    "ETL_TRANSFORMATION_STEP_MASTER_PATH", "api/transformation/step-master"
 ).strip().lstrip("/").rstrip("/")

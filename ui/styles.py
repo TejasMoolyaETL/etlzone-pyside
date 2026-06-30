@@ -227,11 +227,6 @@ def global_application_stylesheet() -> str:
         font-size: {APP_FONT_SIZE_PX}px;
         font-weight: {INPUT_PLACEHOLDER_FONT_WEIGHT};
     }}
-    QPlainTextEdit::placeholder {{
-        color: {INPUT_PLACEHOLDER_COLOR};
-        font-size: {APP_FONT_SIZE_PX}px;
-        font-weight: {INPUT_PLACEHOLDER_FONT_WEIGHT};
-    }}
     """
 
 

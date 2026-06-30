@@ -39,6 +39,7 @@ from ui.form_combobox_style import apply_form_combobox_field
 from ui.form_page_styles import (
     FORM_ERROR_LABEL_STYLE,
     FORM_INPUT_STYLE as INPUT_STYLE,
+    FORM_PLAIN_TEXT_STYLE as PLAIN_TEXT_STYLE,
     FORM_LABEL_STYLE as LABEL_STYLE,
     FORM_PAGE_HEADER_STYLESHEET,
     FORM_PRIMARY_BUTTON_STYLESHEET,
@@ -625,7 +626,7 @@ class CreateDmtObjectTrackerPage(QWidget):
         )
         self._comments_edit = QPlainTextEdit()
         self._comments_edit.setPlaceholderText(placeholder_example("One line per comment"))
-        self._comments_edit.setStyleSheet(INPUT_STYLE)
+        self._comments_edit.setStyleSheet(PLAIN_TEXT_STYLE)
         self._comments_edit.setMinimumHeight(72)
         self._comments_edit.setMaximumHeight(140)
         self._comments_edit.setMinimumWidth(260)

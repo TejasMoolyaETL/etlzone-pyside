@@ -67,6 +67,7 @@ from app.etl.scan_connection import EtlScanConnectionPage
 from app.etl.import_metadata import EtlImportMetadataPage
 from app.etl.extraction import EtlExtractionPage
 from app.etl.job_logs import EtlJobLogsPage
+from app.etl.data_transformation import DataTransformationPage
 from app.user_profile.settings_page import SettingsPage
 from app.user_management.users.user_list import UsersPage
 from app.user_management.user_timepass.user_reset_password import ResetUserPasswordPage
@@ -150,7 +151,8 @@ from app.user_profile.profile_view import ViewProfilePage
 from core.api import api_check_app_version
 from core.app_branding import apply_window_icon
 from core.app_version import APP_VERSION
-from core.config import app_updates_websocket_enabled
+from core.config import app_updates_websocket_enabled, etl_monitor_websocket_enabled
+from core.etl_monitor_ws_client import EtlMonitorWebSocketClient
 from core.reminders_ws_client import AppUpdatesWebSocketClient
 from core.ws_notification import WsNotificationPayload
 from ui.ws_update_banner import WsUpdateBanner
@@ -289,6 +291,7 @@ class DashboardWindow(QMainWindow):
         self._version_check_wait_cursor = False
         self._reminders_ws = AppUpdatesWebSocketClient(self)
         self._reminders_ws.notification.connect(self._on_ws_notification)
+        self._etl_monitor_ws = EtlMonitorWebSocketClient(self)
         self._create_menu_bar()
 
         root = QWidget()
@@ -434,14 +437,23 @@ class DashboardWindow(QMainWindow):
         self.stack.addWidget(self.etl_import_metadata_page)
         self.etl_extraction_page = EtlExtractionPage()
         self.stack.addWidget(self.etl_extraction_page)
-        self.etl_job_logs_page = EtlJobLogsPage()
+        self.etl_job_logs_page = EtlJobLogsPage(monitor_ws=self._etl_monitor_ws)
         self.stack.addWidget(self.etl_job_logs_page)
+        self.etl_data_transformation_page = DataTransformationPage()
+        self.stack.addWidget(self.etl_data_transformation_page)
         self._etl_pages: dict[str, QWidget] = {
             "Connections": self.etl_connections_page,
             "Scan": self.etl_scan_connection_page,
             "Import Metadata": self.etl_import_metadata_page,
             "Extraction": self.etl_extraction_page,
             "Job Logs": self.etl_job_logs_page,
+        }
+        self._data_transformation_pages: dict[str, QWidget] = {
+            "DT: Object": self.etl_data_transformation_page,
+            "DT: Job": self.etl_data_transformation_page,
+            "DT: Flow": self.etl_data_transformation_page,
+            "DT: Work Flow": self.etl_data_transformation_page,
+            "DT: Step": self.etl_data_transformation_page,
         }
 
         self.create_category_page = CreateCategoryPage(
@@ -1091,6 +1103,8 @@ class DashboardWindow(QMainWindow):
         # Help → Check for update uses the same session and is only available here.
         if app_updates_websocket_enabled():
             self._reminders_ws.start()
+        if etl_monitor_websocket_enabled():
+            self._etl_monitor_ws.start()
         # Silent API check after sign-in: show the WS-style strip only when there is news (no modal).
         QTimer.singleShot(0, self._run_post_login_version_banner_check)
 
@@ -1101,6 +1115,7 @@ class DashboardWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._reminders_ws.stop()
+        self._etl_monitor_ws.stop()
         super().closeEvent(event)
 
     @Slot(WsNotificationPayload)
@@ -1128,6 +1143,13 @@ class DashboardWindow(QMainWindow):
     def _handle_left_navigation(self, item_name: str) -> None:
         if not self._confirm_leave_if_unsaved():
             return
+        current = self.stack.currentWidget()
+        if (
+            current is self.etl_extraction_page
+            and item_name != "Extraction"
+            and not self.etl_extraction_page.confirm_leave_unsaved_columns()
+        ):
+            return
         if item_name == "Dashboard":
             self.stack.setCurrentIndex(0)
             self.left_panel.set_current_item("Dashboard")
@@ -1141,6 +1163,10 @@ class DashboardWindow(QMainWindow):
             w = self._etl_pages[item_name]
             self.stack.setCurrentWidget(w)
             # ETL list pages reload in ``showEvent``; avoid duplicate GETs here.
+            self.left_panel.set_current_item(item_name)
+        elif item_name in self._data_transformation_pages:
+            self.stack.setCurrentWidget(self.etl_data_transformation_page)
+            self.etl_data_transformation_page.go_to_nav_item(item_name)
             self.left_panel.set_current_item(item_name)
         elif item_name == MASTER_SETUP_ITEM:
             self.stack.setCurrentWidget(self.master_setup_page)
@@ -2105,7 +2131,6 @@ class DashboardWindow(QMainWindow):
         self.stack.setCurrentWidget(self._api_pages["API: User Involved"])
 
     def _show_api_details(self) -> None:
-        self.create_api_detail_page.reload_api_status_options()
         self.stack.setCurrentWidget(self._api_pages["API: Details"])
 
     def _show_copy_api_dev_to_mgmt(self) -> None:
@@ -2114,7 +2139,6 @@ class DashboardWindow(QMainWindow):
     def _show_create_api_detail(self) -> None:
         self.create_api_detail_page.on_back = self._show_api_details
         self.create_api_detail_page.on_create_success = None
-        self.create_api_detail_page.reload_api_status_options()
         self.stack.setCurrentWidget(self.create_api_detail_page)
 
     def _show_view_api_detail(self, record: dict, edit_mode: bool = False) -> None:
@@ -2157,7 +2181,6 @@ class DashboardWindow(QMainWindow):
     def _show_create_api_detail_from_testing(self) -> None:
         self.create_api_detail_page.on_back = self._show_api_testing
         self.create_api_detail_page.on_create_success = None
-        self.create_api_detail_page.reload_api_status_options()
         self.stack.setCurrentWidget(self.create_api_detail_page)
 
     def _show_view_api_detail_from_testing(self, record: dict, edit_mode: bool = False) -> None:

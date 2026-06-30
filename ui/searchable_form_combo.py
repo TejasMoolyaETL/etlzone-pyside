@@ -1233,15 +1233,17 @@ def populate_master_key_by_field_name(
     token: str | None,
     include_placeholder: bool = False,
     placeholder: str = "Select…",
+    rows: list[Any] | None = None,
 ) -> None:
     """Fill ``combo`` from :func:`core.api.api_get_master_key_by_app_id_field_name`."""
     if combo is None:
         return
-    result = api_get_master_key_by_app_id_field_name(
-        field_name=field_name,
-        token=token,
-    )
-    rows = result.get("data") if result.get("success") else []
+    if rows is None:
+        result = api_get_master_key_by_app_id_field_name(
+            field_name=field_name,
+            token=token,
+        )
+        rows = result.get("data") if result.get("success") else []
     ctrl = getattr(combo, "_etl_searchable_mk_ctrl", None)
     if ctrl is not None:
         ctrl._begin_programmatic_update()

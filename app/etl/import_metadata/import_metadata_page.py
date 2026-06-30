@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QFontMetrics, QShowEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
-    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -21,32 +20,59 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStackedWidget,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from app.etl.widgets.import_field_mismatch_dialog import ImportFieldMismatchDialog
 from app.etl.scan_connection.scan_connection import (
-    _CONNECTION_COLUMNS,
+    _DETAILS_COLUMN_SPEC as _LOG_DETAILS_COLUMN_SPEC,
     _SCAN_LOG_TAB_HEADER_HEIGHT_PX,
     _SCAN_LOG_TAB_HEADER_LAYOUT_MARGINS,
     _SCAN_LOG_TAB_HEADER_LAYOUT_SPACING,
     _SCAN_LOG_TAB_HEADER_STYLESHEET,
+    _SUMMARY_COLUMN_SPEC as _LOG_SUMMARY_COLUMN_SPEC,
+    _TAB_STYLESHEET,
+    _apply_scan_log_id_item_sort_role,
+    _build_scan_log_tab,
+    _build_scan_operation_tab,
+    _build_scan_tables_widget,
+    _build_scanned_sub_table_panel,
+    _cell_text,
     _connection_id,
     _connection_name,
+    _detail_row_cell_text,
     _extract_table_name,
+    _finalize_scan_log_table_sort,
+    _finalize_scanned_list_table_sort,
+    _log_format_cell,
+    _log_row_value,
+    _parent_run_id,
     _prepare_scan_header_button,
+    _scan_log_id_sort_key,
+    _SCAN_LOG_PARENT_ID_KEYS,
+    _sort_rows_by_table_name,
+    normalize_etl_log_detail_items,
+    prepare_scan_log_detail_table,
+    prepare_scan_log_table_data,
     _value_for_column,
+    _value_for_scanned_list_column,
 )
+from app.etl.widgets.etl_connection_picker import EtlConnectionHeaderPicker
 from core.api import (
     api_check_import_metadata_fields,
-    api_get_all_connections,
+    api_get_etl_log_by_id,
+    api_get_etl_logs_by_connection_and_operation_type,
+    api_get_imported_tables,
     api_get_metadata_table_columns,
     api_get_metadata_tables,
     api_import_metadata_tables,
 )
 from core.app_preferences import latest_datetime_display
+from core.etl_connection_context import get_etl_connection_context
 from core.user_context import get_user_profile
 from ui.auto_hide_message import show_auto_hiding_message
 from ui.blank_display import is_blank_display_value
@@ -59,6 +85,7 @@ from ui.data_table import (
     filter_dict_rows_by_column_edits,
     format_data_table_cell,
     install_filter_row,
+    resize_data_table_columns_to_content,
     render_dict_rows_table,
     restore_filter_texts,
     saved_filter_texts,
@@ -79,8 +106,6 @@ from ui.theme import Theme
 _SCANNED_TABLES_COLUMN_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("TABLE_NAME", ("TABLE_NAME", "tableName", "name")),
     ("LAST_SCAN_DATE", ("LAST_SCAN_DATE", "lastScanDate", "last_scan_date")),
-    ("LAST_IMPORT_DATE", ("LAST_IMPORT_DATE", "lastImportDate", "last_import_date")),
-    ("IMPORT_STATUS", ("IMPORT_STATUS", "importStatus", "import_status")),
 )
 
 _COLUMN_DETAIL_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -93,6 +118,43 @@ _COLUMN_DETAIL_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("IS_NULLABLE", ("IS_NULLABLE",)),
     ("is_primary_key", ("is_primary_key",)),
 )
+
+_IMPORTED_LIST_COLUMN_SPEC: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("ID", ("ID", "id", "importTableId", "import_table_id")),
+    ("TABLE_NAME", ("TABLE_NAME", "tableName", "table_name", "name")),
+    ("LAST_SCAN_DATE", ("LAST_SCAN_DATE", "lastScanDate", "last_scan_date")),
+    ("LAST_IMPORT_DATE", ("LAST_IMPORT_DATE", "lastImportDate", "last_import_date")),
+)
+
+_TAB_IMPORT = 0
+_TAB_IMPORT_HISTORY = 1
+_TAB_IMPORT_DETAIL_LOG = 2
+
+_IMPORT_HISTORY_SUBTITLE = (
+    "One row per import run for this connection. "
+    "Double-click a row to load its per-table steps in Import Detail Log."
+)
+_IMPORT_DETAIL_LOG_SUBTITLE_EMPTY = (
+    "Double-click an import run in Import History to load step details from the server."
+)
+_IMPORTED_TABLES_SUBTITLE = (
+    "Tables already imported for the selected connection. "
+    "Click a table row to view its column details below."
+)
+
+
+def _value_for_imported_list_column(row: dict[str, Any], keys: tuple[str, ...]) -> tuple[Any, str]:
+    if not keys:
+        return (None, "")
+    primary = keys[0]
+    if primary in ("LAST_IMPORT_DATE", "lastImportDate", "last_import_date"):
+        if isinstance(row, dict):
+            for key in keys:
+                value = row.get(key)
+                if value not in (None, ""):
+                    return (value, key)
+        return (None, primary)
+    return _value_for_scanned_list_column(row, keys)
 
 
 def _build_import_table_panel(
@@ -177,7 +239,7 @@ def _scanned_row_as_dict(row: Any) -> dict[str, Any]:
     return {"TABLE_NAME": name} if name else {}
 
 
-def _scanned_cell_texts(row_data: dict[str, Any]) -> tuple[str, str, str, str]:
+def _scanned_cell_texts(row_data: dict[str, Any]) -> tuple[str, str]:
     table_name = _extract_table_name(row_data)
     return (
         table_name,
@@ -185,16 +247,6 @@ def _scanned_cell_texts(row_data: dict[str, Any]) -> tuple[str, str, str, str]:
             row_data.get("LAST_SCAN_DATE") or row_data.get("lastScanDate"),
             "LAST_SCAN_DATE",
             ("LAST_SCAN_DATE", "lastScanDate", "last_scan_date"),
-        ),
-        format_data_table_cell(
-            row_data.get("LAST_IMPORT_DATE") or row_data.get("lastImportDate"),
-            "LAST_IMPORT_DATE",
-            ("LAST_IMPORT_DATE", "lastImportDate", "last_import_date"),
-        ),
-        format_data_table_cell(
-            row_data.get("IMPORT_STATUS") or row_data.get("importStatus"),
-            "IMPORT_STATUS",
-            ("IMPORT_STATUS", "importStatus", "import_status"),
         ),
     )
 
@@ -244,87 +296,9 @@ def _latest_last_scan_display(tables: list[Any], *, api_last_scan: str = "") -> 
     return latest_datetime_display(*candidates)
 
 
-class _ImportFieldMismatchDialog(QDialog):
-    """Shows FIELD MISMATCH rows; Yes proceeds with import, No cancels."""
-
-    def __init__(
-        self,
-        parent: QWidget | None,
-        *,
-        message: str,
-        rows: list[dict[str, Any]],
-    ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Field mismatch")
-        self.setMinimumSize(480, 320)
-        self.setStyleSheet("QDialog { background: #ffffff; }")
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-
-        intro = QLabel(
-            message.strip()
-            or "Column definitions do not match. Review the details below."
-        )
-        intro.setWordWrap(True)
-        intro.setStyleSheet(
-            f"font-size: {FORM_PAGE_FONT_SIZE_PX}px; color: {Theme.TEXT_PRIMARY};"
-        )
-        layout.addWidget(intro)
-
-        table = QTableWidget(0, 2)
-        table.setHorizontalHeaderLabels(["Column name", "Table"])
-        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
-        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        apply_data_table_appearance(table, read_only=True, stretch_last_section=True)
-        attach_table_copy_shortcut(table)
-
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            col_name = str(
-                row.get("column_name") or row.get("columnName") or row.get("COLUMN_NAME") or ""
-            ).strip()
-            table_name = str(
-                row.get("msg") or row.get("table") or row.get("tableName") or row.get("TABLE_NAME") or ""
-            ).strip()
-            r_index = table.rowCount()
-            table.insertRow(r_index)
-            for c, text in enumerate((col_name, table_name)):
-                item = QTableWidgetItem(text)
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                table.setItem(r_index, c, item)
-
-        if table.rowCount() == 0:
-            table.setRowCount(1)
-            for c, text in enumerate(("--", "--")):
-                item = QTableWidgetItem(text)
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                table.setItem(0, c, item)
-
-        layout.addWidget(table, 1)
-
-        prompt = QLabel("Do you want to import anyway?")
-        prompt.setStyleSheet(
-            f"font-size: {FORM_PAGE_FONT_SIZE_PX}px; color: {Theme.TEXT_SECONDARY};"
-        )
-        layout.addWidget(prompt)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-
 def _build_import_tables_widget() -> QTableWidget:
-    table = QTableWidget(0, 5)
-    table.setHorizontalHeaderLabels(
-        ["", "TABLE_NAME", "LAST_SCAN_DATE", "LAST_IMPORT_DATE", "IMPORT_STATUS"]
-    )
+    table = QTableWidget(0, 3)
+    table.setHorizontalHeaderLabels(["", "TABLE_NAME", "LAST_SCAN_DATE"])
     table.setColumnWidth(0, 40)
     table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
     table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
@@ -342,8 +316,24 @@ def _build_import_tables_widget() -> QTableWidget:
 class ImportMetadataPageWidget(QWidget):
     """Import metadata UI (connections | import tables + column details)."""
 
+    import_detail_requested = Signal(str)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._summary_source_rows: list[dict[str, str]] = []
+        self._summary_raw_entries: list[dict[str, Any]] = []
+        self._details_source_rows: list[dict[str, str]] = []
+        self._summary_column_spec: list[tuple[str, tuple[str, ...]]] = list(_LOG_SUMMARY_COLUMN_SPEC)
+        self._details_column_spec: list[tuple[str, tuple[str, ...]]] = list(_LOG_DETAILS_COLUMN_SPEC)
+        self._summary_filter_visible = False
+        self._details_filter_visible = False
+        self._detail_import_id_filter: str | None = None
+        self._summary_filter_timer = QTimer(self)
+        self._summary_filter_timer.setSingleShot(True)
+        self._summary_filter_timer.setInterval(200)
+        self._details_filter_timer = QTimer(self)
+        self._details_filter_timer.setSingleShot(True)
+        self._details_filter_timer.setInterval(200)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -360,14 +350,11 @@ class ImportMetadataPageWidget(QWidget):
         )
         page_hl.addWidget(page_title)
         page_hl.addStretch()
-        self.connections_filters_btn = QPushButton("Filters")
-        self.connections_filters_btn.setCheckable(True)
-        self.connections_filters_btn.setFixedWidth(80)
-        self.connections_filters_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.connection_picker = EtlConnectionHeaderPicker()
+        page_hl.addWidget(self.connection_picker)
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.setFixedWidth(100)
         self.refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        page_hl.addWidget(self.connections_filters_btn)
         page_hl.addWidget(self.refresh_btn)
         root.addWidget(page_header)
 
@@ -393,16 +380,6 @@ class ImportMetadataPageWidget(QWidget):
         self.message_label.setVisible(False)
         content_layout.addWidget(self.message_label)
 
-        self.connections_table = QTableWidget()
-        self.connections_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.connections_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        apply_data_table_appearance(
-            self.connections_table,
-            read_only=True,
-            stretch_last_section=False,
-        )
-        attach_table_copy_shortcut(self.connections_table)
-
         right_wrap = QWidget()
         right_wrap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         right_layout = QVBoxLayout(right_wrap)
@@ -415,7 +392,9 @@ class ImportMetadataPageWidget(QWidget):
         empty_page = QWidget()
         empty_layout = QVBoxLayout(empty_page)
         empty_layout.setContentsMargins(24, 48, 24, 48)
-        self.empty_hint = QLabel("Select a connection from the list to import metadata.")
+        self.empty_hint = QLabel(
+            "Select a connection to import metadata and view import logs."
+        )
         self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_hint.setWordWrap(True)
         self.empty_hint.setStyleSheet(
@@ -442,6 +421,67 @@ class ImportMetadataPageWidget(QWidget):
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(12, 10, 12, 12)
         card_layout.setSpacing(10)
+
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet(_TAB_STYLESHEET)
+        self.tabs.setDocumentMode(True)
+        self.tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self.imported_list_refresh_btn = QPushButton("Refresh")
+        self.imported_list_filters_btn = QPushButton("Filters")
+        self.imported_fields_filters_btn = QPushButton("Filters")
+        _prepare_scan_header_button(self.imported_list_refresh_btn, width_px=88)
+        self.imported_list_filters_btn.setCheckable(True)
+        self.imported_list_filters_btn.setFixedWidth(80)
+        self.imported_list_filters_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        _prepare_scan_header_button(self.imported_fields_filters_btn, width_px=80)
+
+        self.imported_tables_list_table = _build_scan_tables_widget(
+            [label for label, _ in _IMPORTED_LIST_COLUMN_SPEC],
+            read_only=True,
+            selectable=True,
+        )
+        self.imported_table_fields_table = QTableWidget(0, len(_COLUMN_DETAIL_SPEC))
+        self.imported_table_fields_table.setHorizontalHeaderLabels(
+            [h for h, _ in _COLUMN_DETAIL_SPEC]
+        )
+        self.imported_table_fields_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.imported_table_fields_table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection
+        )
+        apply_data_table_appearance(
+            self.imported_table_fields_table,
+            read_only=True,
+            stretch_last_section=False,
+        )
+        attach_table_copy_shortcut(self.imported_table_fields_table)
+
+        imported_list_split = QSplitter(Qt.Orientation.Vertical)
+        imported_list_split.setChildrenCollapsible(False)
+        imported_list_split.setHandleWidth(6)
+        imported_list_split.addWidget(self.imported_tables_list_table)
+        imported_list_split.addWidget(
+            _build_scanned_sub_table_panel(
+                "Column details",
+                self.imported_table_fields_table,
+                filters_btn=self.imported_fields_filters_btn,
+            )
+        )
+        imported_list_split.setStretchFactor(0, 2)
+        imported_list_split.setStretchFactor(1, 1)
+        imported_list_split.setSizes([320, 200])
+
+        imported_tables_tab = _build_scan_operation_tab(
+            header_title="Imported tables",
+            subtitle=_IMPORTED_TABLES_SUBTITLE,
+            header_buttons=(
+                self.imported_list_filters_btn,
+                self.imported_list_refresh_btn,
+            ),
+            content=imported_list_split,
+        )
 
         self.refresh_tables_btn = QPushButton("Refresh")
         self.import_btn = QPushButton("Import")
@@ -501,47 +541,365 @@ class ImportMetadataPageWidget(QWidget):
         import_split.setStretchFactor(1, 1)
         import_split.setSizes([320, 200])
 
-        import_content = QWidget()
-        import_content_layout = QVBoxLayout(import_content)
-        import_content_layout.setContentsMargins(0, 0, 0, 0)
-        import_content_layout.setSpacing(8)
+        import_work_content = QWidget()
+        import_work_content_layout = QVBoxLayout(import_work_content)
+        import_work_content_layout.setContentsMargins(0, 0, 0, 0)
+        import_work_content_layout.setSpacing(8)
         select_row = QHBoxLayout()
         select_row.addWidget(self.select_all_checkbox)
         select_row.addStretch()
-        import_content_layout.addLayout(select_row)
-        import_content_layout.addWidget(import_split, 1)
+        import_work_content_layout.addLayout(select_row)
+        import_work_content_layout.addWidget(import_split, 1)
 
-        import_panel = _build_import_main_panel(
+        import_work_tab = _build_import_main_panel(
             header_title="Import tables",
             last_scan_label=self.last_scan_label,
             header_buttons=(self.refresh_tables_btn, self.import_btn),
-            content=import_content,
+            content=import_work_content,
         )
-        card_layout.addWidget(import_panel, 1)
+
+        import_main_tab = QWidget()
+        import_main_tab.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        import_main_tab_layout = QVBoxLayout(import_main_tab)
+        import_main_tab_layout.setContentsMargins(0, 0, 0, 0)
+        import_main_tab_layout.setSpacing(0)
+        self.import_inner_tabs = QTabWidget()
+        self.import_inner_tabs.setDocumentMode(True)
+        self.import_inner_tabs.setStyleSheet(_TAB_STYLESHEET)
+        self.import_inner_tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.import_inner_tabs.addTab(imported_tables_tab, "Imported tables")
+        self.import_inner_tabs.addTab(import_work_tab, "Import")
+        import_main_tab_layout.addWidget(self.import_inner_tabs, 1)
+        self.tabs.addTab(import_main_tab, "Import")
+
+        self.summary_filters_btn = QPushButton("Filters")
+        summary_tab, self.summary_table, _ = _build_scan_log_tab(
+            header_title="Import History",
+            subtitle=_IMPORT_HISTORY_SUBTITLE,
+            column_count=len(_LOG_SUMMARY_COLUMN_SPEC),
+            filters_btn=self.summary_filters_btn,
+        )
+        self.tabs.addTab(summary_tab, "Import History")
+
+        self.detail_show_all_btn = QPushButton("Clear")
+        self.detail_show_all_btn.setVisible(False)
+        self.details_filters_btn = QPushButton("Filters")
+        details_tab, self.details_table, self.detail_log_hint = _build_scan_log_tab(
+            header_title="Import Detail Log",
+            subtitle=_IMPORT_DETAIL_LOG_SUBTITLE_EMPTY,
+            column_count=len(_LOG_DETAILS_COLUMN_SPEC),
+            filters_btn=self.details_filters_btn,
+            header_widgets_before_filters=(self.detail_show_all_btn,),
+        )
+        self.details_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.tabs.addTab(details_tab, "Import Detail Log")
+
+        card_layout.addWidget(self.tabs, 1)
         details_outer.addWidget(card, 1)
         self.detail_stack.addWidget(details_page)
 
         right_layout.addWidget(self.detail_stack, 1)
-        self.set_right_panel_enabled(False)
+        self.set_import_controls_enabled(False)
 
-        split = QSplitter(Qt.Orientation.Horizontal)
-        split.setChildrenCollapsible(False)
-        split.setHandleWidth(6)
-        split.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        split.setMinimumHeight(320)
-        split.addWidget(self.connections_table)
-        split.addWidget(right_wrap)
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 3)
-        split.setSizes([250, 750])
-        content_layout.addWidget(split, 1)
-
-        self.connections_table.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
+        right_wrap.setMinimumHeight(320)
+        content_layout.addWidget(right_wrap, 1)
 
         scroll.setWidget(content)
         root.addWidget(scroll, 1)
+
+        self._summary_filter_timer.timeout.connect(self._apply_summary_column_filters)
+        self._details_filter_timer.timeout.connect(self._apply_details_column_filters)
+        self.summary_filters_btn.toggled.connect(self._on_summary_filters_toggled)
+        self.details_filters_btn.toggled.connect(self._on_details_filters_toggled)
+        self.summary_table.itemDoubleClicked.connect(self._on_summary_row_double_clicked)
+        self.detail_show_all_btn.clicked.connect(self._clear_detail_import_filter)
+
+    def _summary_spec_list(self) -> list[tuple[str, tuple[str, ...]]]:
+        return list(self._summary_column_spec)
+
+    def _details_spec_list(self) -> list[tuple[str, tuple[str, ...]]]:
+        return list(self._details_column_spec)
+
+    def _summary_data_row_offset(self) -> int:
+        return data_row_offset(self._summary_filter_visible)
+
+    def _details_data_row_offset(self) -> int:
+        return data_row_offset(self._details_filter_visible)
+
+    def _schedule_summary_filter_apply(self) -> None:
+        if self._summary_filter_visible:
+            self._summary_filter_timer.start()
+
+    def _schedule_details_filter_apply(self) -> None:
+        if self._details_filter_visible:
+            self._details_filter_timer.start()
+
+    def _filtered_summary_rows(self) -> list[dict[str, str]]:
+        return filter_dict_rows_by_column_edits(
+            self._summary_source_rows,
+            self.summary_table,
+            self._summary_spec_list(),
+            self._summary_filter_visible,
+            _log_row_value,
+            _log_format_cell,
+        )
+
+    def _details_rows_for_display(self) -> list[dict[str, str]]:
+        if not self._detail_import_id_filter:
+            return []
+        return filter_dict_rows_by_column_edits(
+            list(self._details_source_rows),
+            self.details_table,
+            self._details_spec_list(),
+            self._details_filter_visible,
+            _log_row_value,
+            _log_format_cell,
+        )
+
+    def _raw_entry_for_summary_row(self, row: dict[str, str]) -> dict[str, Any] | None:
+        rid = ""
+        for _, keys in self._summary_column_spec:
+            if keys[0] in _SCAN_LOG_PARENT_ID_KEYS:
+                rid = str(row.get(keys[0], "")).strip()
+                if rid and rid != "--":
+                    break
+        if not rid:
+            rid = str(row.get("id", "")).strip()
+        if not rid or rid == "--":
+            return None
+        for raw in self._summary_raw_entries:
+            if _parent_run_id(raw) == rid:
+                return raw
+        return None
+
+    def _write_summary_table(self, rows: list[dict[str, str]]) -> None:
+        spec = self._summary_spec_list()
+        headers = [h for h, _ in spec]
+        self.summary_table.setColumnCount(len(headers))
+        self.summary_table.setHorizontalHeaderLabels(headers)
+        off = self._summary_data_row_offset()
+        total = off + len(rows)
+        if self._summary_filter_visible and total < 1:
+            total = 1
+        self.summary_table.setSortingEnabled(False)
+        self.summary_table.setRowCount(total)
+        if self._summary_filter_visible:
+            for c in range(self.summary_table.columnCount()):
+                self.summary_table.takeItem(0, c)
+            install_filter_row(
+                self.summary_table,
+                self.summary_table.columnCount(),
+                on_text_changed=self._schedule_summary_filter_apply,
+            )
+        for r, row in enumerate(rows):
+            tr = off + r
+            raw = self._raw_entry_for_summary_row(row)
+            for col, (_header, keys) in enumerate(spec):
+                text = row.get(keys[0], "")
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if col == 0:
+                    raw_id = raw.get("id") if isinstance(raw, dict) else row.get(keys[0])
+                    _apply_scan_log_id_item_sort_role(item, raw_id)
+                    if isinstance(raw, dict):
+                        item.setData(Qt.ItemDataRole.UserRole, raw)
+                self.summary_table.setItem(tr, col, item)
+        sync_vertical_header_labels(
+            self.summary_table,
+            filter_visible=self._summary_filter_visible,
+            data_row_count=len(rows),
+        )
+        if self._summary_source_rows:
+            resize_data_table_columns_to_content(
+                self.summary_table,
+                spec,
+                self._summary_source_rows,
+                _log_row_value,
+                _log_format_cell,
+            )
+        _finalize_scan_log_table_sort(
+            self.summary_table,
+            filter_visible=self._summary_filter_visible,
+        )
+
+    def _write_details_table(self, rows: list[dict[str, str]]) -> None:
+        spec = self._details_spec_list()
+        headers = [h for h, _ in spec]
+        self.details_table.clearContents()
+        self.details_table.setColumnCount(len(headers))
+        self.details_table.setHorizontalHeaderLabels(headers)
+        off = self._details_data_row_offset()
+        total = off + len(rows)
+        if self._details_filter_visible and total < 1:
+            total = 1
+        self.details_table.setSortingEnabled(False)
+        self.details_table.setRowCount(total)
+        if self._details_filter_visible:
+            for c in range(self.details_table.columnCount()):
+                self.details_table.takeItem(0, c)
+            install_filter_row(
+                self.details_table,
+                self.details_table.columnCount(),
+                on_text_changed=self._schedule_details_filter_apply,
+            )
+        for r, row in enumerate(rows):
+            tr = off + r
+            for col, (_header, keys) in enumerate(spec):
+                text = _detail_row_cell_text(row, keys)
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if col == 0:
+                    value, _ = _value_for_column(row, keys)
+                    _apply_scan_log_id_item_sort_role(item, value)
+                self.details_table.setItem(tr, col, item)
+        sync_vertical_header_labels(
+            self.details_table,
+            filter_visible=self._details_filter_visible,
+            data_row_count=len(rows),
+        )
+        if self._details_source_rows:
+            resize_data_table_columns_to_content(
+                self.details_table,
+                spec,
+                self._details_source_rows,
+                _log_row_value,
+                _log_format_cell,
+            )
+        _finalize_scan_log_table_sort(
+            self.details_table,
+            filter_visible=self._details_filter_visible,
+        )
+
+    def _apply_summary_column_filters(self) -> None:
+        if not self._summary_filter_visible:
+            return
+        self._write_summary_table(self._filtered_summary_rows())
+
+    def _apply_details_column_filters(self) -> None:
+        if not self._details_filter_visible:
+            return
+        self._write_details_table(self._details_rows_for_display())
+
+    def _on_summary_filters_toggled(self, checked: bool) -> None:
+        self._summary_filter_visible = checked
+        if not checked:
+            self._summary_filter_timer.stop()
+            clear_filter_row_widgets(self.summary_table)
+        rows = self._filtered_summary_rows() if checked else list(self._summary_source_rows)
+        self._write_summary_table(rows)
+
+    def _on_details_filters_toggled(self, checked: bool) -> None:
+        self._details_filter_visible = checked
+        if not checked:
+            self._details_filter_timer.stop()
+            clear_filter_row_widgets(self.details_table)
+        self._write_details_table(self._details_rows_for_display())
+
+    def _on_summary_row_double_clicked(self, item: QTableWidgetItem) -> None:
+        if item.row() < self._summary_data_row_offset():
+            return
+        cell = self.summary_table.item(item.row(), 0)
+        if cell is None:
+            return
+        entry = cell.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(entry, dict):
+            return
+        run_id = _parent_run_id(entry)
+        if not run_id:
+            return
+        self.import_detail_requested.emit(run_id)
+
+    def request_import_log_details(self, import_id: str) -> None:
+        self._detail_import_id_filter = import_id
+        self._details_source_rows = []
+        self._details_column_spec = list(_LOG_DETAILS_COLUMN_SPEC)
+        self._update_detail_filter_hint(loading=True)
+        self._write_details_table([])
+        self.tabs.setCurrentIndex(_TAB_IMPORT_DETAIL_LOG)
+
+    def apply_import_log_details(
+        self,
+        import_id: str,
+        detail_items: list[dict[str, Any]],
+        *,
+        error_message: str = "",
+    ) -> None:
+        self._detail_import_id_filter = import_id
+        if error_message:
+            self._details_source_rows = []
+            self._details_column_spec = list(_LOG_DETAILS_COLUMN_SPEC)
+            self._update_detail_filter_hint(error=error_message)
+            self._write_details_table([])
+            return
+        self._details_column_spec, self._details_source_rows = prepare_scan_log_detail_table(
+            import_id, detail_items
+        )
+        self._update_detail_filter_hint()
+        self._write_details_table(self._details_rows_for_display())
+
+    def _clear_detail_import_filter(self) -> None:
+        self._detail_import_id_filter = None
+        self._details_source_rows = []
+        self._details_column_spec = list(_LOG_DETAILS_COLUMN_SPEC)
+        self._update_detail_filter_hint()
+        self._write_details_table([])
+
+    def _update_detail_filter_hint(
+        self,
+        *,
+        loading: bool = False,
+        error: str = "",
+    ) -> None:
+        if loading and self._detail_import_id_filter:
+            self.detail_log_hint.setText(
+                f"Loading step details for import run Id {self._detail_import_id_filter}…"
+            )
+            self.detail_show_all_btn.setVisible(True)
+        elif error and self._detail_import_id_filter:
+            self.detail_log_hint.setText(
+                f"Import run Id {self._detail_import_id_filter}: {error}"
+            )
+            self.detail_show_all_btn.setVisible(True)
+        elif self._detail_import_id_filter:
+            count = len(self._details_source_rows)
+            self.detail_log_hint.setText(
+                f"Step details for import run Id {self._detail_import_id_filter} ({count} row(s)). "
+                "Use Clear to close."
+            )
+            self.detail_show_all_btn.setVisible(True)
+        else:
+            self.detail_log_hint.setText(_IMPORT_DETAIL_LOG_SUBTITLE_EMPTY)
+            self.detail_show_all_btn.setVisible(False)
+
+    def set_import_log_data(
+        self,
+        entries: list[dict[str, Any]],
+        *,
+        clear_detail: bool = True,
+    ) -> None:
+        if clear_detail:
+            self._detail_import_id_filter = None
+            self._details_source_rows = []
+            self._details_column_spec = list(_LOG_DETAILS_COLUMN_SPEC)
+            self._update_detail_filter_hint()
+        (
+            matched,
+            self._summary_column_spec,
+            _details_spec_unused,
+            self._summary_source_rows,
+            _detail_rows_unused,
+        ) = prepare_scan_log_table_data(entries)
+        self._summary_raw_entries = matched
+        if clear_detail:
+            self._write_details_table([])
+        summary_display = (
+            self._filtered_summary_rows()
+            if self._summary_filter_visible
+            else list(self._summary_source_rows)
+        )
+        self._write_summary_table(summary_display)
+        if not clear_detail and self._detail_import_id_filter:
+            self._write_details_table(self._details_rows_for_display())
 
     def show_empty_detail(self) -> None:
         self.detail_stack.setCurrentIndex(0)
@@ -566,6 +924,36 @@ class ImportMetadataPageWidget(QWidget):
         self.columns_filters_btn.setEnabled(enabled)
         self.metadata_tables_table.setEnabled(enabled)
         self.metadata_table_info_table.setEnabled(enabled)
+        self.imported_list_refresh_btn.setEnabled(enabled)
+        self.imported_list_filters_btn.setEnabled(enabled)
+        self.imported_fields_filters_btn.setEnabled(enabled)
+        self.imported_tables_list_table.setEnabled(enabled)
+        self.imported_table_fields_table.setEnabled(enabled)
+        self.import_inner_tabs.setEnabled(enabled)
+        self.tabs.setEnabled(enabled)
+
+
+class _ImportLogDetailFetchWorker(QObject):
+    finished = Signal(str, object, str, int)
+
+    def __init__(self, log_id: str, token: str | None, seq: int) -> None:
+        super().__init__()
+        self._log_id = log_id
+        self._token = token
+        self._seq = seq
+
+    @Slot()
+    def run(self) -> None:
+        result = api_get_etl_log_by_id(self._log_id, token=self._token)
+        if result.get("success"):
+            self.finished.emit(self._log_id, result.get("data") or [], "", self._seq)
+        else:
+            self.finished.emit(
+                self._log_id,
+                [],
+                str(result.get("message") or "Failed to load log details."),
+                self._seq,
+            )
 
 
 class EtlImportMetadataPage(QWidget):
@@ -578,31 +966,40 @@ class EtlImportMetadataPage(QWidget):
         self._ui = ImportMetadataPageWidget()
         layout.addWidget(self._ui)
 
-        self._connections: list[dict[str, Any]] = []
-        self._current: dict[str, Any] | None = None
-        self._restore_connection_name: str | None = None
+        self._ctx = get_etl_connection_context()
         self._tables_cache: list[Any] = []
         self._scanned_tables_source: list[dict[str, Any]] = []
         self._selected_tables: set[str] = set()
         self._rendering = False
-        self._connections_filter_visible = False
         self._tables_filter_visible = False
         self._columns_filter_visible = False
         self._columns_source: list[dict[str, str]] = []
-        self._connections_filter_timer = QTimer(self)
-        self._connections_filter_timer.setSingleShot(True)
-        self._connections_filter_timer.setInterval(200)
+        self._imported_tables_cache: list[Any] = []
+        self._imported_columns_source: list[dict[str, str]] = []
+        self._connection_import_logs: list[dict[str, Any]] = []
+        self._imported_list_filter_visible = False
+        self._imported_fields_filter_visible = False
         self._tables_filter_timer = QTimer(self)
         self._tables_filter_timer.setSingleShot(True)
         self._tables_filter_timer.setInterval(200)
         self._columns_filter_timer = QTimer(self)
         self._columns_filter_timer.setSingleShot(True)
         self._columns_filter_timer.setInterval(200)
+        self._imported_list_filter_timer = QTimer(self)
+        self._imported_list_filter_timer.setSingleShot(True)
+        self._imported_list_filter_timer.setInterval(200)
+        self._imported_fields_filter_timer = QTimer(self)
+        self._imported_fields_filter_timer.setSingleShot(True)
+        self._imported_fields_filter_timer.setInterval(200)
+        self._detail_fetch_in_flight = False
+        self._detail_fetch_seq = 0
+        self._detail_fetch_pending_id: str | None = None
+        self._detail_fetch_thread: QThread | None = None
+        self._detail_fetch_worker: _ImportLogDetailFetchWorker | None = None
 
         self._ui.refresh_btn.clicked.connect(self.refresh)
-        self._ui.connections_filters_btn.toggled.connect(self._on_connections_filters_toggled)
-        self._connections_filter_timer.timeout.connect(self._refresh_connections_table_view)
-        self._ui.connections_table.itemSelectionChanged.connect(self._on_selection_changed)
+        self._ui.import_detail_requested.connect(self._load_import_log_details)
+        self._ctx.connection_selected.connect(self._on_connection_selected)
         self._ui.metadata_search_input.textChanged.connect(self._on_tables_search_changed)
         self._ui.refresh_tables_btn.clicked.connect(self._fetch_tables)
         self._ui.import_btn.clicked.connect(self._import_tables)
@@ -614,15 +1011,26 @@ class EtlImportMetadataPage(QWidget):
         self._ui.columns_filters_btn.toggled.connect(self._on_columns_filters_toggled)
         self._tables_filter_timer.timeout.connect(self._refresh_scanned_tables_view)
         self._columns_filter_timer.timeout.connect(self._refresh_columns_view)
+        self._ui.imported_list_refresh_btn.clicked.connect(self._fetch_imported_tables)
+        self._ui.imported_list_filters_btn.toggled.connect(self._on_imported_list_filters_toggled)
+        self._ui.imported_fields_filters_btn.toggled.connect(self._on_imported_fields_filters_toggled)
+        self._ui.imported_tables_list_table.cellClicked.connect(self._on_imported_table_cell_clicked)
+        self._imported_list_filter_timer.timeout.connect(self._refresh_imported_list_view)
+        self._imported_fields_filter_timer.timeout.connect(self._refresh_imported_fields_view)
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         self.refresh()
 
     def refresh(self) -> None:
-        if self._current:
-            self._restore_connection_name = _connection_name(self._current)
-        self._load_connections()
+        result = self._ctx.refresh_connections(self._token())
+        if not result.get("success"):
+            self._show_message(
+                str(result.get("message") or "Failed to load connections."), error=True
+            )
+            return
+        show_auto_hiding_message(self, self._ui.message_label, "", error=False)
+        self._on_connection_selected(self._ctx.current_connection())
 
     def _token(self) -> str | None:
         profile = get_user_profile() or {}
@@ -631,121 +1039,11 @@ class EtlImportMetadataPage(QWidget):
     def _show_message(self, text: str, *, error: bool = False) -> None:
         show_auto_hiding_message(self, self._ui.message_label, text, error=error)
 
-    def _load_connections(self) -> None:
-        result = api_get_all_connections(self._token())
-        if not result.get("success"):
-            self._connections = []
-            self._populate_connections()
-            self._show_message(str(result.get("message") or "Failed to load connections."), error=True)
-            return
-        self._connections = list(result.get("data") or [])
-        self._populate_connections()
-        show_auto_hiding_message(self, self._ui.message_label, "", error=False)
+    def _current_connection(self) -> dict[str, Any] | None:
+        return self._ctx.current_connection()
 
-    def _populate_connections(self) -> None:
-        self._refresh_connections_table_view()
-        table = self._ui.connections_table
-
-        sm = table.selectionModel()
-        table.blockSignals(True)
-        if sm is not None:
-            sm.blockSignals(True)
-        try:
-            restored = False
-            if self._restore_connection_name:
-                restored = self._select_connection_by_name(self._restore_connection_name)
-                self._restore_connection_name = None
-            if not restored:
-                table.clearSelection()
-                self._current = None
-                self._ui.set_right_panel_enabled(False)
-            else:
-                self._rebind_current_connection()
-        finally:
-            table.blockSignals(False)
-            if sm is not None:
-                sm.blockSignals(False)
-
-        if self._current:
-            self._apply_connection_selection()
-
-    def _schedule_connections_filter_apply(self) -> None:
-        if self._connections_filter_visible:
-            self._connections_filter_timer.start()
-
-    def _on_connections_filters_toggled(self, checked: bool) -> None:
-        self._connections_filter_visible = checked
-        if not checked:
-            clear_filter_row_widgets(self._ui.connections_table)
-        self._refresh_connections_table_view()
-
-    def _connections_filtered_rows(self) -> list[dict[str, Any]]:
-        rows = list(self._connections)
-        if not self._connections_filter_visible:
-            return rows
-        return filter_dict_rows_by_column_edits(
-            rows,
-            self._ui.connections_table,
-            list(_CONNECTION_COLUMNS),
-            True,
-            _value_for_column,
-            format_data_table_cell,
-        )
-
-    def _refresh_connections_table_view(self) -> None:
-        saved = (
-            saved_filter_texts(self._ui.connections_table)
-            if self._connections_filter_visible
-            else None
-        )
-        render_dict_rows_table(
-            self._ui.connections_table,
-            self._connections_filtered_rows(),
-            list(_CONNECTION_COLUMNS),
-            filter_visible=self._connections_filter_visible,
-            value_for_column=_value_for_column,
-            format_cell=format_data_table_cell,
-            on_filter_text_changed=self._schedule_connections_filter_apply,
-            saved_filter_texts_list=saved,
-        )
-
-    def _select_connection_by_name(self, name: str) -> bool:
-        target = (name or "").strip().lower()
-        if not target:
-            return False
-        table = self._ui.connections_table
-        offset = data_row_offset(self._connections_filter_visible)
-        for row in range(offset, table.rowCount()):
-            item = table.item(row, 0)
-            if item is None:
-                continue
-            conn = item.data(Qt.ItemDataRole.UserRole)
-            if not isinstance(conn, dict):
-                continue
-            if str(conn.get("connectionName") or "").strip().lower() == target:
-                table.selectRow(row)
-                return True
-        return False
-
-    def _selected_connection(self) -> dict[str, Any] | None:
-        sm = self._ui.connections_table.selectionModel()
-        if sm is None:
-            return None
-        rows = sm.selectedRows()
-        if not rows:
-            return None
-        item = self._ui.connections_table.item(int(rows[0].row()), 0)
-        if item is None:
-            return None
-        conn = item.data(Qt.ItemDataRole.UserRole)
-        return conn if isinstance(conn, dict) else None
-
-    def _rebind_current_connection(self) -> None:
-        self._current = self._selected_connection()
-
-    def _on_selection_changed(self) -> None:
-        self._rebind_current_connection()
-        if self._current is None:
+    def _on_connection_selected(self, conn: object) -> None:
+        if not isinstance(conn, dict):
             self._reset_right_panel()
             return
         self._apply_connection_selection()
@@ -755,27 +1053,313 @@ class EtlImportMetadataPage(QWidget):
         self._scanned_tables_source = []
         self._selected_tables = set()
         self._columns_source = []
+        self._imported_tables_cache = []
+        self._imported_columns_source = []
+        self._connection_import_logs = []
         self._tables_filter_visible = False
         self._columns_filter_visible = False
+        self._imported_list_filter_visible = False
+        self._imported_fields_filter_visible = False
         self._ui.scanned_tables_filters_btn.setChecked(False)
         self._ui.columns_filters_btn.setChecked(False)
+        self._ui.imported_list_filters_btn.setChecked(False)
+        self._ui.imported_fields_filters_btn.setChecked(False)
         self._ui.metadata_search_input.clear()
         self._ui.metadata_tables_table.setRowCount(0)
         self._ui.metadata_table_info_table.setRowCount(0)
+        self._ui.imported_tables_list_table.setRowCount(0)
+        self._ui.imported_table_fields_table.setRowCount(0)
         self._ui.last_scan_label.setText("Last scanned: --")
+        self._ui.set_import_log_data([], clear_detail=True)
         self._ui.set_right_panel_enabled(False)
 
     def _apply_connection_selection(self) -> None:
-        if not self._current:
+        if not self._current_connection():
             return
         self._ui.set_right_panel_enabled(True)
         self._tables_cache = []
         self._scanned_tables_source = []
         self._selected_tables = set()
+        self._imported_tables_cache = []
+        self._imported_columns_source = []
         self._fetch_tables()
+        self._fetch_imported_tables()
+        self._refresh_import_logs()
+
+    def _refresh_import_logs(self, *, preserve_page_message: bool = False) -> None:
+        if not self._current_connection():
+            self._connection_import_logs = []
+            self._render_import_logs()
+            return
+        conn_id = _connection_id(self._current_connection())
+        if conn_id is None:
+            self._connection_import_logs = []
+            if not preserve_page_message:
+                self._show_message("Cannot load import logs: connection ID is missing.", error=True)
+            self._render_import_logs()
+            return
+        result = api_get_etl_logs_by_connection_and_operation_type(
+            conn_id,
+            "IMPORT",
+            token=self._token(),
+        )
+        if not result.get("success"):
+            if not preserve_page_message:
+                self._show_message(
+                    str(result.get("message") or "Failed to load import logs."),
+                    error=True,
+                )
+            self._connection_import_logs = []
+        else:
+            rows = result.get("data") or []
+            self._connection_import_logs = [r for r in rows if isinstance(r, dict)]
+            if not preserve_page_message:
+                show_auto_hiding_message(self, self._ui.message_label, "", error=False)
+        self._render_import_logs()
+
+    def _render_import_logs(self) -> None:
+        logs = self._connection_import_logs
+        active_detail_id = self._ui._detail_import_id_filter
+        self._ui.set_import_log_data(logs, clear_detail=active_detail_id is None)
+        if active_detail_id:
+            self._schedule_import_log_details(active_detail_id)
+
+    def _schedule_import_log_details(self, import_id: str) -> None:
+        import_id = str(import_id or "").strip()
+        if not import_id:
+            return
+        self._detail_fetch_pending_id = import_id
+        if not self._detail_fetch_in_flight:
+            self._start_import_log_detail_fetch()
+
+    def _start_import_log_detail_fetch(self) -> None:
+        if self._detail_fetch_in_flight:
+            return
+        import_id = str(self._detail_fetch_pending_id or "").strip()
+        if not import_id:
+            return
+        self._detail_fetch_seq += 1
+        seq = self._detail_fetch_seq
+        self._detail_fetch_in_flight = True
+        self._ui.request_import_log_details(import_id)
+        self._detail_fetch_thread = QThread(self)
+        self._detail_fetch_worker = _ImportLogDetailFetchWorker(import_id, self._token(), seq)
+        self._detail_fetch_worker.moveToThread(self._detail_fetch_thread)
+        self._detail_fetch_thread.started.connect(self._detail_fetch_worker.run)
+        self._detail_fetch_worker.finished.connect(self._on_detail_fetch_finished)
+        self._detail_fetch_worker.finished.connect(self._detail_fetch_thread.quit)
+        self._detail_fetch_thread.finished.connect(self._cleanup_detail_fetch_thread)
+        self._detail_fetch_thread.start()
+
+    def _load_import_log_details(self, import_id: str) -> None:
+        self._schedule_import_log_details(import_id)
+
+    @Slot(str, object, str, int)
+    def _on_detail_fetch_finished(
+        self,
+        import_id: str,
+        payload: object,
+        error_message: str,
+        seq: int,
+    ) -> None:
+        if seq != self._detail_fetch_seq:
+            return
+        self._detail_fetch_in_flight = False
+        current = str(self._ui._detail_import_id_filter or "").strip()
+        if str(import_id) != current:
+            if current:
+                self._detail_fetch_pending_id = current
+                self._start_import_log_detail_fetch()
+            return
+        detail_rows = normalize_etl_log_detail_items(payload)
+        self._ui.apply_import_log_details(
+            import_id,
+            detail_rows,
+            error_message=str(error_message or ""),
+        )
+        pending = str(self._detail_fetch_pending_id or "").strip()
+        if pending and pending != str(import_id):
+            self._start_import_log_detail_fetch()
+
+    @Slot()
+    def _cleanup_detail_fetch_thread(self) -> None:
+        if self._detail_fetch_worker is not None:
+            self._detail_fetch_worker.deleteLater()
+            self._detail_fetch_worker = None
+        if self._detail_fetch_thread is not None:
+            self._detail_fetch_thread.deleteLater()
+            self._detail_fetch_thread = None
+
+    def _fetch_imported_tables(self) -> None:
+        conn_id = _connection_id(self._current_connection())
+        if conn_id is None:
+            self._imported_tables_cache = []
+            self._imported_columns_source = []
+            self._refresh_imported_list_view()
+            self._refresh_imported_fields_view()
+            self._show_message("Select a connection first.", error=True)
+            return
+        result = api_get_imported_tables(conn_id, token=self._token())
+        if not result.get("success"):
+            self._imported_tables_cache = []
+            self._imported_columns_source = []
+            self._refresh_imported_list_view()
+            self._refresh_imported_fields_view()
+            self._show_message(str(result.get("message") or "Failed to load imported tables."), error=True)
+            return
+        self._imported_tables_cache = list(result.get("tables") or [])
+        self._imported_columns_source = []
+        self._refresh_imported_list_view()
+        self._refresh_imported_fields_view()
+        show_auto_hiding_message(self, self._ui.message_label, "", error=False)
+
+    def _imported_list_cache_rows(self) -> list[dict[str, Any]]:
+        rows = [r for r in self._imported_tables_cache if isinstance(r, dict)]
+        return _sort_rows_by_table_name(rows)
+
+    def _imported_list_filtered_rows(self) -> list[dict[str, Any]]:
+        rows = self._imported_list_cache_rows()
+        if not self._imported_list_filter_visible:
+            return rows
+        return filter_dict_rows_by_column_edits(
+            rows,
+            self._ui.imported_tables_list_table,
+            list(_IMPORTED_LIST_COLUMN_SPEC),
+            True,
+            _value_for_imported_list_column,
+            format_data_table_cell,
+        )
+
+    def _schedule_imported_list_filter_apply(self) -> None:
+        if self._imported_list_filter_visible:
+            self._imported_list_filter_timer.start()
+
+    def _on_imported_list_filters_toggled(self, checked: bool) -> None:
+        self._imported_list_filter_visible = checked
+        if not checked:
+            clear_filter_row_widgets(self._ui.imported_tables_list_table)
+        self._refresh_imported_list_view()
+
+    def _refresh_imported_list_view(self) -> None:
+        saved = (
+            saved_filter_texts(self._ui.imported_tables_list_table)
+            if self._imported_list_filter_visible
+            else None
+        )
+        render_dict_rows_table(
+            self._ui.imported_tables_list_table,
+            self._imported_list_filtered_rows(),
+            list(_IMPORTED_LIST_COLUMN_SPEC),
+            filter_visible=self._imported_list_filter_visible,
+            value_for_column=_value_for_imported_list_column,
+            format_cell=format_data_table_cell,
+            on_filter_text_changed=self._schedule_imported_list_filter_apply,
+            saved_filter_texts_list=saved,
+        )
+        _finalize_scanned_list_table_sort(
+            self._ui.imported_tables_list_table,
+            filter_visible=self._imported_list_filter_visible,
+        )
+
+    def _imported_list_data_row_offset(self) -> int:
+        return data_row_offset(self._imported_list_filter_visible)
+
+    def _get_imported_list_row_at(self, table_row: int) -> dict[str, Any] | None:
+        if table_row < self._imported_list_data_row_offset():
+            return None
+        item = self._ui.imported_tables_list_table.item(table_row, 0)
+        if item is None:
+            return None
+        row = item.data(Qt.ItemDataRole.UserRole)
+        return row if isinstance(row, dict) else None
+
+    def _on_imported_table_cell_clicked(self, row: int, _column: int) -> None:
+        imported_row = self._get_imported_list_row_at(row)
+        if not imported_row:
+            return
+        table_name = _extract_table_name(imported_row)
+        if table_name:
+            self._load_imported_table_info(table_name)
+
+    def _load_imported_table_info(self, table_name: str) -> None:
+        conn_id = _connection_id(self._current_connection())
+        if conn_id is None:
+            QMessageBox.warning(self, "Missing", "Select a connection first.")
+            return
+        result = api_get_metadata_table_columns(conn_id, table_name, token=self._token())
+        if not result.get("success"):
+            QMessageBox.warning(
+                self, "Failed", str(result.get("message") or "Could not load table info.")
+            )
+            return
+        self._build_imported_fields_source(
+            str(result.get("tableName") or table_name),
+            list(result.get("columns") or []),
+        )
+        self._refresh_imported_fields_view()
+
+    def _build_imported_fields_source(self, table_name: str, columns: list[Any]) -> None:
+        rows: list[dict[str, str]] = []
+        for col in columns:
+            c = col if isinstance(col, dict) else {}
+            rows.append(
+                {
+                    "TABLE_NAME": table_name,
+                    "COLUMN_NAME": _display_value(c.get("COLUMN_NAME")),
+                    "DATA_TYPE": _display_value(c.get("DATA_TYPE")),
+                    "CHARACTER_MAXIMUM_LENGTH": _display_value(
+                        c.get("CHARACTER_MAXIMUM_LENGTH")
+                    ),
+                    "NUMERIC_PRECISION": _display_value(c.get("NUMERIC_PRECISION")),
+                    "NUMERIC_SCALE": _display_value(c.get("NUMERIC_SCALE")),
+                    "IS_NULLABLE": _display_value(c.get("IS_NULLABLE")),
+                    "is_primary_key": _display_value(c.get("is_primary_key")),
+                }
+            )
+        self._imported_columns_source = rows
+
+    def _schedule_imported_fields_filter_apply(self) -> None:
+        if self._imported_fields_filter_visible:
+            self._imported_fields_filter_timer.start()
+
+    def _on_imported_fields_filters_toggled(self, checked: bool) -> None:
+        self._imported_fields_filter_visible = checked
+        if not checked:
+            clear_filter_row_widgets(self._ui.imported_table_fields_table)
+        self._refresh_imported_fields_view()
+
+    def _imported_fields_filtered_rows(self) -> list[dict[str, str]]:
+        rows = list(self._imported_columns_source)
+        if not self._imported_fields_filter_visible:
+            return rows
+        return filter_dict_rows_by_column_edits(
+            rows,
+            self._ui.imported_table_fields_table,
+            list(_COLUMN_DETAIL_SPEC),
+            True,
+            _value_for_column,
+            format_data_table_cell,
+        )
+
+    def _refresh_imported_fields_view(self) -> None:
+        saved = (
+            saved_filter_texts(self._ui.imported_table_fields_table)
+            if self._imported_fields_filter_visible
+            else None
+        )
+        render_dict_rows_table(
+            self._ui.imported_table_fields_table,
+            self._imported_fields_filtered_rows(),
+            list(_COLUMN_DETAIL_SPEC),
+            filter_visible=self._imported_fields_filter_visible,
+            value_for_column=_value_for_column,
+            format_cell=format_data_table_cell,
+            on_filter_text_changed=self._schedule_imported_fields_filter_apply,
+            saved_filter_texts_list=saved,
+        )
 
     def _fetch_tables(self) -> None:
-        conn_id = _connection_id(self._current)
+        conn_id = _connection_id(self._current_connection())
         if conn_id is None:
             self._show_message("Select a connection first.", error=True)
             return
@@ -910,7 +1494,7 @@ class EtlImportMetadataPage(QWidget):
                 w0.setEnabled(False)
                 w0.setPlaceholderText("")
         for row_idx, row_data in enumerate(dict_rows):
-            table_name, scan_txt, import_txt, status_txt = _scanned_cell_texts(row_data)
+            table_name, scan_txt = _scanned_cell_texts(row_data)
             r_index = offset + row_idx
             check_item = QTableWidgetItem()
             check_item.setFlags(
@@ -924,10 +1508,7 @@ class EtlImportMetadataPage(QWidget):
                 else Qt.CheckState.Unchecked
             )
             table.setItem(r_index, 0, check_item)
-            for col, text in enumerate(
-                (table_name, scan_txt, import_txt, status_txt),
-                start=1,
-            ):
+            for col, text in enumerate((table_name, scan_txt), start=1):
                 item = QTableWidgetItem(text)
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if col == 1:
@@ -942,7 +1523,7 @@ class EtlImportMetadataPage(QWidget):
         self._sync_select_all()
 
     def _import_tables(self) -> None:
-        conn_id = _connection_id(self._current)
+        conn_id = _connection_id(self._current_connection())
         if conn_id is None:
             QMessageBox.warning(self, "Missing", "Select a connection first.")
             return
@@ -957,7 +1538,7 @@ class EtlImportMetadataPage(QWidget):
             return
 
         if check.get("field_mismatch"):
-            dlg = _ImportFieldMismatchDialog(
+            dlg = ImportFieldMismatchDialog(
                 self,
                 message=str(check.get("message") or "FIELD MISMATCH"),
                 rows=list(check.get("data") or []),
@@ -983,6 +1564,9 @@ class EtlImportMetadataPage(QWidget):
             )
             show_auto_hiding_message(self, self._ui.message_label, "", error=False)
             self._fetch_tables()
+            self._fetch_imported_tables()
+            self._refresh_import_logs(preserve_page_message=True)
+            self._ui.tabs.setCurrentIndex(_TAB_IMPORT_HISTORY)
         else:
             self._show_message(str(result.get("message") or "Import failed."), error=True)
 
@@ -1025,7 +1609,7 @@ class EtlImportMetadataPage(QWidget):
         self._open_scanned_row_details(row)
 
     def _load_table_info(self, table_name: str) -> None:
-        conn_id = _connection_id(self._current)
+        conn_id = _connection_id(self._current_connection())
         if conn_id is None:
             QMessageBox.warning(self, "Missing", "Select a connection first.")
             return

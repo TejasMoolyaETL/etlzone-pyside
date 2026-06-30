@@ -38,10 +38,12 @@ from ui.form_combobox_style import apply_form_combobox_field
 from ui.form_page_styles import (
     FORM_ERROR_LABEL_STYLE,
     FORM_INPUT_STYLE as INPUT_STYLE,
+    FORM_PLAIN_TEXT_STYLE as PLAIN_TEXT_STYLE,
     FORM_LABEL_STYLE as LABEL_STYLE,
     FORM_PAGE_HEADER_STYLESHEET,
     FORM_PRIMARY_BUTTON_STYLESHEET,
     FORM_READONLY_INPUT_STYLE as READONLY_INPUT_STYLE,
+    FORM_READONLY_PLAIN_TEXT_STYLE as READONLY_PLAIN_TEXT_STYLE,
     FORM_SECONDARY_BUTTON_STYLESHEET,
     FORM_SINGLELINE_FIELD_HEIGHT_PX,
     LIST_PAGE_HEADER_HEIGHT_PX,
@@ -237,7 +239,7 @@ class ViewDmtIssueTrackerPage(QWidget):
             if canonical in ("issueDescription", "description"):
                 edit = QPlainTextEdit()
                 edit.setFixedHeight(100)
-                edit.setStyleSheet(INPUT_STYLE)
+                edit.setStyleSheet(PLAIN_TEXT_STYLE)
                 self._description_edit = edit
                 if canonical not in _READONLY_KEYS:
                     self._editable_keys.append(canonical)
@@ -444,7 +446,7 @@ class ViewDmtIssueTrackerPage(QWidget):
             edit.setStyleSheet(INPUT_STYLE)
         if self._description_edit is not None:
             self._description_edit.setReadOnly(False)
-            self._description_edit.setStyleSheet(INPUT_STYLE)
+            self._description_edit.setStyleSheet(PLAIN_TEXT_STYLE)
         for combo in (self._module_combo, self._object_combo, self._status_combo, self._priority_combo):
             if combo is not None:
                 combo.setEnabled(True)
@@ -476,6 +478,7 @@ class ViewDmtIssueTrackerPage(QWidget):
             edit.setStyleSheet(READONLY_INPUT_STYLE)
         if self._description_edit is not None:
             self._description_edit.setReadOnly(True)
+            self._description_edit.setStyleSheet(READONLY_PLAIN_TEXT_STYLE)
         for combo in (self._module_combo, self._object_combo, self._status_combo, self._priority_combo):
             if combo is not None:
                 combo.setEnabled(False)

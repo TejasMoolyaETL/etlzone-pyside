@@ -82,6 +82,15 @@ ETL_SUB_OPTIONS = [
     "Job Logs",
 ]
 
+# Data Transformation (below ETL)
+DATA_TRANSFORMATION_SUB_OPTIONS = [
+    "DT: Object",
+    "DT: Job",
+    "DT: Work Flow",
+    "DT: Flow",
+    "DT: Step",
+]
+
 MASTER_SETUP_ITEM = "Master Setup Value"
 MASTER_SETUP_CONFIG_ITEM = "Master Setup Config"
 MASTER_SETUP_KEY_ITEM = "Master Setup Key"

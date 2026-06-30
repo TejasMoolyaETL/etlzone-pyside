@@ -33,6 +33,7 @@ from ui.form_combobox_style import FORM_COMBOBOX_STYLE, apply_form_combobox_fiel
 from ui.form_page_styles import (
     FORM_ERROR_LABEL_STYLE,
     FORM_INPUT_STYLE as INPUT_STYLE,
+    FORM_PLAIN_TEXT_STYLE as PLAIN_TEXT_STYLE,
     FORM_LABEL_STYLE as LABEL_STYLE,
     FORM_PAGE_HEADER_STYLESHEET,
     FORM_SINGLELINE_FIELD_HEIGHT_PX,
@@ -41,6 +42,7 @@ from ui.form_page_styles import (
     LIST_PAGE_HEADER_LAYOUT_SPACING,
     FORM_PRIMARY_BUTTON_STYLESHEET,
     FORM_READONLY_INPUT_STYLE as READONLY_INPUT_STYLE,
+    FORM_READONLY_PLAIN_TEXT_STYLE as READONLY_PLAIN_TEXT_STYLE,
     FORM_SECONDARY_BUTTON_STYLESHEET,
 )
 from ui.post_save_navigation import navigate_after_no_changes, schedule_after_success
@@ -347,7 +349,9 @@ class ViewAPIValidationPage(QWidget):
                 value_widget = QPlainTextEdit()
                 value_widget.setFixedHeight(_MULTILINE_HEIGHT)
                 value_widget.setReadOnly(is_read_only)
-                value_widget.setStyleSheet(READONLY_INPUT_STYLE if is_read_only else INPUT_STYLE)
+                value_widget.setStyleSheet(
+                    READONLY_PLAIN_TEXT_STYLE if is_read_only else PLAIN_TEXT_STYLE
+                )
                 self._field_edits[chosen] = value_widget
             else:
                 value_widget = QLineEdit()
@@ -483,7 +487,7 @@ class ViewAPIValidationPage(QWidget):
                     widget.setStyleSheet(FORM_COMBOBOX_STYLE)
                 elif isinstance(widget, QPlainTextEdit):
                     widget.setReadOnly(False)
-                    widget.setStyleSheet(INPUT_STYLE)
+                    widget.setStyleSheet(PLAIN_TEXT_STYLE)
                 else:
                     widget.setReadOnly(False)
                     widget.setStyleSheet(INPUT_STYLE)
@@ -603,7 +607,7 @@ class ViewAPIValidationPage(QWidget):
                     widget.setStyleSheet(FORM_COMBOBOX_STYLE)
                 elif isinstance(widget, QPlainTextEdit):
                     widget.setReadOnly(True)
-                    widget.setStyleSheet(READONLY_INPUT_STYLE)
+                    widget.setStyleSheet(READONLY_PLAIN_TEXT_STYLE)
                 else:
                     widget.setReadOnly(True)
                     widget.setStyleSheet(READONLY_INPUT_STYLE)

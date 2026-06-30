@@ -42,6 +42,7 @@ from ui.form_page_styles import (
     APP_FONT_SIZE_PX,
     FORM_ERROR_LABEL_STYLE,
     FORM_INPUT_STYLE as INPUT_STYLE,
+    FORM_PLAIN_TEXT_STYLE as PLAIN_TEXT_STYLE,
     FORM_LABEL_FIELD_SPACING_PX,
     FORM_LABEL_STYLE as LABEL_STYLE,
     INPUT_PLACEHOLDER_COLOR,
@@ -49,6 +50,7 @@ from ui.form_page_styles import (
     FORM_PAGE_HEADER_STYLESHEET,
     FORM_PRIMARY_BUTTON_STYLESHEET,
     FORM_READONLY_INPUT_STYLE as READONLY_INPUT_STYLE,
+    FORM_READONLY_PLAIN_TEXT_STYLE as READONLY_PLAIN_TEXT_STYLE,
     FORM_SECONDARY_BUTTON_STYLESHEET,
     LIST_PAGE_HEADER_HEIGHT_PX,
     LIST_PAGE_HEADER_LAYOUT_MARGINS,
@@ -641,16 +643,8 @@ class ViewLeadPage(QWidget):
                 edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
                 edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
                 edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-                self._jd_style_editing = (
-                    f"QPlainTextEdit {{ font-size: {APP_FONT_SIZE_PX}px; padding: 4px 8px; "
-                    "border: 1px solid #e2e8f0; border-radius: 4px; background-color: #ffffff; }}"
-                    f"QPlainTextEdit::placeholder {{ color: {INPUT_PLACEHOLDER_COLOR}; "
-                    f"font-size: {APP_FONT_SIZE_PX}px; font-weight: {INPUT_PLACEHOLDER_FONT_WEIGHT}; }}"
-                )
-                self._jd_style_readonly = (
-                    f"QPlainTextEdit {{ font-size: {APP_FONT_SIZE_PX}px; padding: 4px 8px; "
-                    "border: 1px solid #e2e8f0; border-radius: 4px; background-color: #f1f5f9; color: #64748b; }}"
-                )
+                self._jd_style_editing = PLAIN_TEXT_STYLE
+                self._jd_style_readonly = READONLY_PLAIN_TEXT_STYLE
                 edit.setStyleSheet(self._jd_style_editing)
                 wrap = _JobDescEditorWithGrip(edit)
                 wrap.setMinimumHeight(jd_h0)

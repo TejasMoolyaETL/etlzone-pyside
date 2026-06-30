@@ -70,6 +70,18 @@ LINEEDIT_PLACEHOLDER_SUBSTYLE = (
     f"font-weight: {INPUT_PLACEHOLDER_FONT_WEIGHT}; }}"
 )
 
+# Use on QPlainTextEdit only — unscoped properties (same pattern as :data:`FORM_INPUT_STYLE` on QLineEdit).
+# Do not append :data:`LINEEDIT_PLACEHOLDER_SUBSTYLE` (``QLineEdit::placeholder`` is invalid on plain text).
+FORM_PLAIN_TEXT_STYLE = (
+    f"font-size: {APP_FONT_SIZE_PX}px; padding: 2px 8px; border: 1px solid #e2e8f0; "
+    "border-radius: 4px; background-color: #ffffff;"
+)
+
+FORM_READONLY_PLAIN_TEXT_STYLE = (
+    f"font-size: {APP_FONT_SIZE_PX}px; padding: 2px 8px; border: 1px solid #e2e8f0; "
+    "border-radius: 4px; background-color: #f1f5f9; color: #64748b;"
+)
+
 # Muted subtitle under a screen title (not the 14px marketing :data:`ui.styles.SUBTITLE_STYLE`).
 PAGE_SUBTITLE_FONT_SIZE_PX = 12
 PAGE_SUBTITLE_STYLE = (

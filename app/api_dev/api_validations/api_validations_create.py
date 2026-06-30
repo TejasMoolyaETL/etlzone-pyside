@@ -33,6 +33,7 @@ from ui.form_combobox_style import apply_form_combobox_field
 from ui.form_page_styles import (
     FORM_ERROR_LABEL_STYLE,
     FORM_INPUT_STYLE as INPUT_STYLE,
+    FORM_PLAIN_TEXT_STYLE as PLAIN_TEXT_STYLE,
     FORM_LABEL_STYLE as LABEL_STYLE,
     FORM_PAGE_HEADER_STYLESHEET,
     FORM_SINGLELINE_FIELD_HEIGHT_PX,
@@ -204,7 +205,7 @@ class CreateAPIValidationPage(QWidget):
             elif field_key in ("api_validation", "error_message", "success_message"):
                 w = QPlainTextEdit()
                 w.setFixedHeight(_multiline_h)
-                w.setStyleSheet(INPUT_STYLE)
+                w.setStyleSheet(PLAIN_TEXT_STYLE)
                 if field_key == "api_validation":
                     self.api_validation_edit = w
                 elif field_key == "error_message":

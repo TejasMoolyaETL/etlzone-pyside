@@ -14,6 +14,7 @@ from core.left_panel_nav_items import (
     API_SUB_OPTIONS,
     DATA_MIGRATION_ADMIN_SUB_OPTIONS,
     DATA_MIGRATION_ONBOARDING_SUB_OPTIONS,
+    DATA_TRANSFORMATION_SUB_OPTIONS,
     ETL_SUB_OPTIONS,
     LEAD_MANAGEMENT_SUB_OPTIONS,
     MASTER_SETUP_ITEM,
@@ -458,7 +459,31 @@ class AppLeftPanel(QWidget):
         self._etl_sub_container.setMinimumHeight(0)
         self._etl_sub_container.set_content_height(len(ETL_SUB_OPTIONS) * 36 + 20)
 
-        # 12. App Config (collapsible, start collapsed)
+        # 12. Data Transformation (below ETL, collapsible)
+        self._data_transformation_toggle = QPushButton("Data Transformation")
+        self._data_transformation_toggle.setCheckable(True)
+        self._data_transformation_toggle.setChecked(False)
+        self._data_transformation_toggle.setStyleSheet(_toggle_style)
+        self._data_transformation_toggle.clicked.connect(self._on_data_transformation_toggle)
+        content_layout.addWidget(self._data_transformation_toggle)
+        self._data_transformation_sub_container = _CollapsibleWidget()
+        self._data_transformation_sub_container.setMaximumHeight(0)
+        dt_layout = QVBoxLayout(self._data_transformation_sub_container)
+        dt_layout.setContentsMargins(20, 4, 0, 8)
+        dt_layout.setSpacing(6)
+        for opt in DATA_TRANSFORMATION_SUB_OPTIONS:
+            btn = QPushButton(opt)
+            btn.setStyleSheet(_sub_btn_style)
+            btn.clicked.connect(lambda checked=False, name=opt: self.navigation_requested.emit(name))
+            self._nav_buttons[opt] = btn
+            dt_layout.addWidget(btn)
+        content_layout.addWidget(self._data_transformation_sub_container)
+        self._data_transformation_sub_container.setMinimumHeight(0)
+        self._data_transformation_sub_container.set_content_height(
+            len(DATA_TRANSFORMATION_SUB_OPTIONS) * 36 + 20
+        )
+
+        # 13. App Config (collapsible, start collapsed)
         self._app_config_toggle = QPushButton("App Config")
         self._app_config_toggle.setCheckable(True)
         self._app_config_toggle.setChecked(False)
@@ -613,6 +638,9 @@ class AppLeftPanel(QWidget):
         _pair(self._etl_toggle, self._etl_sub_container, True)
         _apply_subs(ETL_SUB_OPTIONS, self._etl_sub_container)
 
+        _pair(self._data_transformation_toggle, self._data_transformation_sub_container, True)
+        _apply_subs(DATA_TRANSFORMATION_SUB_OPTIONS, self._data_transformation_sub_container)
+
         _pair(self._api_toggle, self._api_sub_container, state.show_api_development)
         if state.show_api_development:
             _apply_subs(API_SUB_OPTIONS, self._api_sub_container)
@@ -675,6 +703,10 @@ class AppLeftPanel(QWidget):
             self._collapse_others_except(self._etl_toggle)
             self._etl_toggle.setChecked(True)
             self._etl_sub_container.expand()
+        elif item_name in DATA_TRANSFORMATION_SUB_OPTIONS:
+            self._collapse_others_except(self._data_transformation_toggle)
+            self._data_transformation_toggle.setChecked(True)
+            self._data_transformation_sub_container.expand()
         elif item_name in APP_CONFIG_SUB_OPTIONS:
             self._collapse_others_except(self._app_config_toggle)
             self._app_config_toggle.setChecked(True)
@@ -702,6 +734,8 @@ class AppLeftPanel(QWidget):
         self._object_tracker_sub_container.collapse()
         self._etl_toggle.setChecked(False)
         self._etl_sub_container.collapse()
+        self._data_transformation_toggle.setChecked(False)
+        self._data_transformation_sub_container.collapse()
         self._app_config_toggle.setChecked(False)
         self._app_config_sub_container.collapse()
 
@@ -734,6 +768,9 @@ class AppLeftPanel(QWidget):
         if except_toggle is not self._etl_toggle:
             self._etl_toggle.setChecked(False)
             self._etl_sub_container.collapse()
+        if except_toggle is not self._data_transformation_toggle:
+            self._data_transformation_toggle.setChecked(False)
+            self._data_transformation_sub_container.collapse()
         if except_toggle is not self._app_config_toggle:
             self._app_config_toggle.setChecked(False)
             self._app_config_sub_container.collapse()
@@ -744,6 +781,13 @@ class AppLeftPanel(QWidget):
             self._etl_sub_container.expand()
         else:
             self._etl_sub_container.collapse()
+
+    def _on_data_transformation_toggle(self) -> None:
+        if self._data_transformation_toggle.isChecked():
+            self._collapse_others_except(self._data_transformation_toggle)
+            self._data_transformation_sub_container.expand()
+        else:
+            self._data_transformation_sub_container.collapse()
 
     def _on_org_mgmt_toggle(self) -> None:
         if self._org_mgmt_toggle.isChecked():

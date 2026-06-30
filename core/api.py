@@ -148,16 +148,41 @@ from core.config import (
     ETL_METADATA_SCAN_FIELDS_PATH_PREFIX,
     ETL_METADATA_IMPORT_TABLE_DETAILS_PATH,
     ETL_METADATA_CHECK_FIELD_PATH_PREFIX,
+    ETL_SCAN_CONNECTION_CHECK_FIELD_PATH_PREFIX,
     ETL_METADATA_SCAN_ALL_PATH,
     ETL_METADATA_SCAN_BY_FILTER_PATH_PREFIX,
+    ETL_SCAN_UPDATE_TGT_TABLE_NAME_PATH_PREFIX,
+    ETL_IMPORT_METADATA_UPDATE_WHERE_CLAUSE_PATH_PREFIX,
+    ETL_EXTRACTION_PATH,
+    ETL_EXTRACTION_BY_CONNECTION_PATH_PREFIX,
+    ETL_EXTRACTION_UPDATE_TARGET_TABLE_PATH_PREFIX,
+    ETL_EXTRACTION_UPDATE_WHERE_CLAUSE_PATH_PREFIX,
     ETL_METADATA_IMPORTED_TABLES_PATH_PREFIX,
+    ETL_EXTRACT_METADATA_EXTRACTED_TABLE_BY_ID_PATH_PREFIX,
     ETL_METADATA_IMPORTED_REMOVE_PATH_PREFIX,
     ETL_METADATA_SCAN_EXTRACTED_FIELDS_PATH_PREFIX,
     ETL_METADATA_UPDATE_EXTRACTED_FIELDS_PATH_PREFIX,
+    ETL_METADATA_GET_TABLE_NAME_FROM_ETL_DETAILS_PATH_PREFIX,
+    ETL_EXTRACT_GROUP_PATH,
+    ETL_EXTRACT_GROUP_UPDATE_TGT_TABLE_PATH,
+    ETL_GROUP_TABLE_ADD_WHERE_CLAUSE_PATH,
+    ETL_GROUP_VALIDATE_WHERE_CLAUSE_PATH,
     ETL_JOB_START_PATH,
+    ETL_GROUP_JOB_START_PATH,
     ETL_JOBS_ALL_PATH,
+    ETL_LOG_BY_ID_PATH_PREFIX,
     ETL_LOGS_BY_TYPE_PATH,
     ETL_LOGS_BY_CONNECTION_AND_OPERATION_TYPE_PATH,
+    ETL_TRANSFORMATION_OBJECT_PATH,
+    ETL_TRANSFORMATION_JOB_PATH,
+    ETL_TRANSFORMATION_WORKFLOW_PATH,
+    ETL_TRANSFORMATION_FLOW_PATH,
+    ETL_TRANSFORMATION_SOURCE_PATH,
+    ETL_TRANSFORMATION_TARGET_PATH,
+    ETL_TRANSFORMATION_COLUMN_PATH,
+    ETL_TRANSFORMATION_JOIN_PATH,
+    ETL_TRANSFORMATION_STEP_PATH,
+    ETL_TRANSFORMATION_STEP_MASTER_PATH,
 )
 
 _LOG_ZAP_INVISIBLE = re.compile(r"[\u200b-\u200f\u202f\u2060-\u2064\ufeff\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -12180,6 +12205,26 @@ def _parse_connections_list_payload(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _connection_row_id_sort_key(conn: dict[str, Any]) -> tuple[int, int | str]:
+    """Sort key for connection rows: ascending numeric id, then non-numeric id text."""
+    for key in ("connectionId", "connectionID", "connection_id", "id"):
+        value = conn.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        try:
+            return (0, int(text))
+        except (ValueError, TypeError):
+            return (1, text.lower())
+    return (2, 0)
+
+
+def _sort_connections_by_id(connections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(connections, key=_connection_row_id_sort_key)
+
+
 def _connection_post_result(payload: Any, *, ok_fallback: str, fail_fallback: str) -> dict[str, Any]:
     if isinstance(payload, dict):
         rej = _reject_json_business_failure(payload, message_fallback=fail_fallback)
@@ -12206,7 +12251,7 @@ def api_get_all_connections(token: str | None = None) -> dict[str, Any]:
     url = _api_url(ETL_CONNECTIONS_LIST_PATH)
     try:
         payload = _http_get_json(url, headers=headers, timeout_s=12.0)
-        items = _parse_connections_list_payload(payload)
+        items = _sort_connections_by_id(_parse_connections_list_payload(payload))
         if isinstance(payload, dict) and not items:
             rej = _reject_json_business_failure(
                 payload, message_fallback="Failed to load connections.", data=[]
@@ -12371,6 +12416,438 @@ def api_delete_connection(
         return {"success": False, "message": "Backend not reachable."}
 
 
+def _parse_extract_groups_list(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if isinstance(payload, dict):
+        rej = _reject_json_business_failure(payload, message_fallback="Failed to load extract groups.", data=[])
+        if rej is not None:
+            return []
+        for key in ("data", "groups", "content", "result"):
+            raw = payload.get(key)
+            if isinstance(raw, list):
+                return [r for r in raw if isinstance(r, dict)]
+    return []
+
+
+def api_get_extract_groups(*, token: str | None = None) -> dict[str, Any]:
+    """GET all extract groups (default: ``group``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again.", "data": []}
+    url = _api_url(ETL_EXTRACT_GROUP_PATH)
+    try:
+        payload = _http_get_json(url, headers=headers, timeout_s=15.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Failed to load extract groups.", data=[]
+            )
+            if rej is not None:
+                return rej
+        groups = _parse_extract_groups_list(payload)
+        return {"success": True, "data": groups, "message": ""}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Request failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+            "data": [],
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable.", "data": []}
+
+
+def api_create_extract_group(payload: dict[str, Any], *, token: str | None = None) -> dict[str, Any]:
+    """POST create an extract group (default: ``group``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    url = _api_url(ETL_EXTRACT_GROUP_PATH)
+    try:
+        body = _http_post_json(url, payload, timeout_s=15.0, extra_headers=headers)
+        return _connection_post_result(
+            body,
+            ok_fallback="Extract group created.",
+            fail_fallback="Failed to create extract group.",
+        )
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Create failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_update_extract_group(
+    group_id: int | str,
+    payload: dict[str, Any],
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """PUT update an extract group (default: ``group/{id}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(group_id)
+    if not seg:
+        return {"success": False, "message": "Group ID is required."}
+    url = _api_url(f"{ETL_EXTRACT_GROUP_PATH}/{seg}")
+    try:
+        status, body = _http_put_json(url, payload, timeout_s=15.0, extra_headers=headers)
+        if status in (200, 201, 204):
+            if isinstance(body, dict) and body:
+                result = _connection_post_result(
+                    body,
+                    ok_fallback="Extract group updated.",
+                    fail_fallback="Failed to update extract group.",
+                )
+                if result.get("success"):
+                    return result
+            return {"success": True, "message": "Extract group updated."}
+        if isinstance(body, dict):
+            return {
+                "success": False,
+                "message": _extract_error_message(body, "Failed to update extract group."),
+            }
+        return {"success": False, "message": f"Update failed (HTTP {status})."}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Update failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_add_extract_group_tables(
+    group_id: int | str,
+    tables: list[dict[str, str]],
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """POST add tables to an extract group (``group/table/{id}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(group_id)
+    if not seg:
+        return {"success": False, "message": "Group ID is required."}
+    table_entries: list[dict[str, str]] = []
+    for item in tables:
+        if not isinstance(item, dict):
+            continue
+        table_name = str(item.get("tableName") or "").strip()
+        if not table_name:
+            continue
+        table_entries.append(
+            {
+                "tableName": table_name,
+                "newTableName": str(item.get("newTableName") or "").strip(),
+            }
+        )
+    if not table_entries:
+        return {"success": False, "message": "At least one table is required."}
+    url = _api_url(f"{ETL_EXTRACT_GROUP_PATH}/table/{seg}")
+    try:
+        body = _http_post_json(url, {"tables": table_entries}, timeout_s=15.0, extra_headers=headers)
+        return _connection_post_result(
+            body,
+            ok_fallback="Tables added to extract group.",
+            fail_fallback="Failed to add tables to extract group.",
+        )
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Add tables failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_delete_extract_group_table(
+    group_table_id: int | str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """DELETE a table from an extract group (``group/table/{id}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(group_table_id)
+    if not seg:
+        return {"success": False, "message": "Group table ID is required."}
+    url = _api_url(f"{ETL_EXTRACT_GROUP_PATH}/table/{seg}")
+    try:
+        payload = _http_delete(url, headers=headers, timeout_s=12.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Failed to remove table from extract group."
+            )
+            if rej is not None:
+                return rej
+            if payload.get("success") is False:
+                return {
+                    "success": False,
+                    "message": _extract_error_message(
+                        payload, "Failed to remove table from extract group."
+                    ),
+                }
+            return {
+                "success": True,
+                "message": str(payload.get("message") or "Table removed from extract group."),
+            }
+        return {"success": True, "message": "Table removed from extract group."}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Remove table failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_update_group_tgt_table_name(
+    group_table_id: int | str,
+    new_table_name: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """PUT update group table target name (``group/update/tgt-table/{id}?newTableName=…``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(group_table_id)
+    new_tbl = (new_table_name or "").strip()
+    if not seg:
+        return {"success": False, "message": "Group table ID is required."}
+    if not new_tbl:
+        return {"success": False, "message": "New target table name is required."}
+    query = urlencode({"newTableName": new_tbl})
+    url = _api_url(f"{ETL_EXTRACT_GROUP_UPDATE_TGT_TABLE_PATH}/{seg}?{query}")
+    put_headers = {
+        "Accept": "application/json",
+        "User-Agent": "MY-ETLZONE-App/1.0",
+        **headers,
+    }
+    try:
+        req = Request(url, data=b"", headers=put_headers, method="PUT")
+        with _http_urlopen_logged(req, timeout=30.0) as resp:
+            raw = resp.read()
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        return _connection_post_result(
+            payload,
+            ok_fallback="Target table name updated.",
+            fail_fallback="Failed to update target table name.",
+        )
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Update failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_add_group_table_where_clause(
+    group_table_id: int | str,
+    where_clause: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """POST add or update a group table WHERE clause (``group/table/add-where-clause/{id}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(group_table_id)
+    clause = (where_clause or "").strip()
+    if not seg:
+        return {"success": False, "message": "Group table ID is required."}
+    if not clause:
+        return {"success": False, "message": "Where clause is required."}
+    url = _api_url(f"{ETL_GROUP_TABLE_ADD_WHERE_CLAUSE_PATH}/{seg}")
+    try:
+        body = _http_post_json(
+            url,
+            {"whereClause": clause},
+            timeout_s=30.0,
+            extra_headers=headers,
+        )
+        return _connection_post_result(
+            body,
+            ok_fallback="Where clause saved.",
+            fail_fallback="Failed to save where clause.",
+        )
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Save where clause failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_validate_group_table_where_clause(
+    connection_id: int | str,
+    table_name: str,
+    where_clause: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """POST validate a WHERE clause (``group/table/validate-where-clause/{connectionId}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "valid": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(connection_id)
+    clause = (where_clause or "").strip()
+    tbl = (table_name or "").strip()
+    if not seg:
+        return {"success": False, "valid": False, "message": "Connection ID is required."}
+    if not tbl:
+        return {"success": False, "valid": False, "message": "Table name is required."}
+    if not clause:
+        return {"success": False, "valid": False, "message": "Where clause is required."}
+    url = _api_url(f"{ETL_GROUP_VALIDATE_WHERE_CLAUSE_PATH}/{seg}")
+    try:
+        body = _http_post_json(
+            url,
+            {"whereClause": clause, "tableName": tbl},
+            timeout_s=30.0,
+            extra_headers=headers,
+        )
+        if isinstance(body, dict):
+            rej = _reject_json_business_failure(body, message_fallback="Validation failed.")
+            if rej is not None:
+                return {
+                    "success": False,
+                    "valid": False,
+                    "message": str(
+                        rej.get("error")
+                        or rej.get("message")
+                        or "Validation failed."
+                    ),
+                }
+            valid = body.get("valid")
+            is_valid = valid is True or str(valid).strip().lower() in ("true", "1", "yes")
+            if is_valid:
+                message = str(body.get("message") or "Validation successful.")
+            else:
+                message = str(
+                    body.get("error")
+                    or body.get("message")
+                    or _extract_error_message(body, "Validation failed.")
+                ).strip()
+            return {"success": is_valid, "valid": is_valid, "message": message}
+        return {"success": False, "valid": False, "message": "Validation failed."}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "valid": False,
+            "message": str(
+                err_payload.get("error")
+                or _extract_error_message(
+                    err_payload, f"Validation failed ({getattr(exc, 'code', 'HTTP error')})."
+                )
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "valid": False, "message": "Backend not reachable."}
+
+
+def api_delete_extract_group(group_id: int | str, *, token: str | None = None) -> dict[str, Any]:
+    """DELETE an extract group (default: ``group/{id}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(group_id)
+    if not seg:
+        return {"success": False, "message": "Group ID is required."}
+    url = _api_url(f"{ETL_EXTRACT_GROUP_PATH}/{seg}")
+    try:
+        payload = _http_delete(url, headers=headers, timeout_s=12.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(payload, message_fallback="Failed to delete extract group.")
+            if rej is not None:
+                return rej
+            if payload.get("success") is False:
+                return {
+                    "success": False,
+                    "message": _extract_error_message(payload, "Failed to delete extract group."),
+                }
+            return {
+                "success": True,
+                "message": str(payload.get("message") or "Extract group deleted."),
+            }
+        return {"success": True, "message": "Extract group deleted."}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Delete failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
 def _metadata_json_success(payload: Any, *, fail_fallback: str) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -12385,11 +12862,35 @@ def _extract_scan_tables_list(payload: Any) -> list[Any]:
         return payload
     if not isinstance(payload, dict):
         return []
-    for key in ("tableList", "tables", "data", "content"):
+    for key in (
+        "tableList",
+        "tables",
+        "data",
+        "content",
+        "extractedTables",
+        "extractedTableList",
+        "tableNames",
+        "result",
+    ):
         value = payload.get(key)
         if isinstance(value, list):
             return value
+        if isinstance(value, dict):
+            for nested_key in ("tables", "tableList", "data", "content"):
+                nested = value.get(nested_key)
+                if isinstance(nested, list):
+                    return nested
     return []
+
+
+def _normalize_metadata_table_rows(items: list[Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            rows.append(item)
+        elif isinstance(item, str) and item.strip():
+            rows.append({"tableName": item.strip()})
+    return rows
 
 
 def api_post_scan_connection_source_tables(
@@ -12500,6 +13001,58 @@ def api_get_metadata_tables(
         return {"success": False, "message": "Backend not reachable.", "tables": []}
 
 
+def api_get_extracted_metadata_tables_by_connection(
+    connection_id: int | str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """GET extracted tables (``api/etl/extract-metadata/extracted-table-by-id/{id}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again.", "tables": []}
+    seg = _api_path_id_segment(connection_id)
+    if not seg:
+        return {"success": False, "message": "Connection ID is required.", "tables": []}
+    url = _api_url(f"{ETL_EXTRACT_METADATA_EXTRACTED_TABLE_BY_ID_PATH_PREFIX}/{seg}")
+    try:
+        payload = _http_get_json(url, headers=headers, timeout_s=30.0)
+        raw_tables = _extract_scan_tables_list(payload)
+        tables = _normalize_metadata_table_rows(raw_tables)
+        if tables:
+            return {"success": True, "tables": tables}
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Failed to load extracted tables.", data=[]
+            )
+            if rej is not None:
+                return {**rej, "tables": []}
+            if _metadata_json_success(payload, fail_fallback="Failed to load extracted tables."):
+                return {"success": True, "tables": []}
+            return {
+                "success": False,
+                "message": _extract_error_message(payload, "Failed to load extracted tables."),
+                "tables": [],
+            }
+        if isinstance(payload, list):
+            return {"success": True, "tables": []}
+        return {"success": False, "message": "Failed to load extracted tables.", "tables": []}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Request failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+            "tables": [],
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable.", "tables": []}
+
+
 def api_get_metadata_table_columns(
     connection_id: int | str,
     table_name: str,
@@ -12547,13 +13100,142 @@ def api_get_metadata_table_columns(
         return {"success": False, "message": "Backend not reachable.", "columns": []}
 
 
-def api_check_import_metadata_fields(
+def _parse_etl_details_alias_name(record: dict[str, Any]) -> str:
+    for key in (
+        "aliasName",
+        "alias_name",
+        "ALIAS_NAME",
+        "sourceAlias",
+        "source_alias",
+        "SOURCE_ALIAS",
+        "alias",
+        "ALIAS",
+    ):
+        text = str(record.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _parse_etl_details_column_field_name(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("columnName", "column_name", "COLUMN_NAME", "fieldName", "field_name", "name"):
+            text = str(value.get(key) or "").strip()
+            if text:
+                return text
+        return ""
+    return str(value or "").strip()
+
+
+def _parse_etl_details_column_rows(payload: Any) -> list[dict[str, Any]]:
+    """Normalize ETL-details column payload to rows with tableName and columnName."""
+    if isinstance(payload, list):
+        raw_items = payload
+    elif isinstance(payload, dict):
+        raw_items = None
+        for key in ("data", "content", "result", "fieldList", "columns", "rows"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                raw_items = value
+                break
+        if raw_items is None:
+            if _parse_etl_details_column_field_name(payload) or str(
+                payload.get("tableName") or payload.get("table_name") or ""
+            ).strip():
+                raw_items = [payload]
+            else:
+                raw_items = []
+    else:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        table_name = str(
+            item.get("tableName") or item.get("table_name") or item.get("TABLE_NAME") or ""
+        ).strip()
+        nested = item.get("columns") or item.get("columnList") or item.get("fields") or item.get(
+            "fieldList"
+        )
+        if isinstance(nested, list):
+            parent_alias = _parse_etl_details_alias_name(item)
+            for col in nested:
+                column_name = _parse_etl_details_column_field_name(col)
+                if not column_name:
+                    continue
+                row = {"tableName": table_name, "columnName": column_name}
+                if parent_alias:
+                    row.setdefault("aliasName", parent_alias)
+                    row.setdefault("sourceAlias", parent_alias)
+                if isinstance(col, dict):
+                    row.update(col)
+                if not _parse_etl_details_alias_name(row) and parent_alias:
+                    row["aliasName"] = parent_alias
+                    row["sourceAlias"] = parent_alias
+                rows.append(row)
+            continue
+        column_name = _parse_etl_details_column_field_name(item)
+        if table_name and column_name:
+            row = dict(item)
+            row.setdefault("tableName", table_name)
+            row.setdefault("columnName", column_name)
+            rows.append(row)
+    return rows
+
+
+def api_get_table_columns_from_etl_details(
     connection_id: int | str,
     table_list: list[str],
     *,
     token: str | None = None,
 ) -> dict[str, Any]:
-    """POST validate fields before import (``api/etl/import-metadata/check-field/{id}``)."""
+    """POST column metadata for tables (``api/metadata/get-table-name-from-etl-details/{id}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again.", "rows": []}
+    seg = _api_path_id_segment(connection_id)
+    if not seg:
+        return {"success": False, "message": "Connection ID is required.", "rows": []}
+    tables = [str(t).strip() for t in table_list if str(t).strip()]
+    if not tables:
+        return {"success": False, "message": "At least one table is required.", "rows": []}
+    url = _api_url(f"{ETL_METADATA_GET_TABLE_NAME_FROM_ETL_DETAILS_PATH_PREFIX}/{seg}")
+    payload_body: dict[str, Any] = {"tableList": tables}
+    try:
+        body = _http_post_json(url, payload_body, timeout_s=60.0, extra_headers=headers)
+        if isinstance(body, dict):
+            rej = _reject_json_business_failure(
+                body, message_fallback="Failed to load table columns.", data=[]
+            )
+            if rej is not None:
+                return {**rej, "rows": []}
+        rows = _parse_etl_details_column_rows(body)
+        return {"success": True, "rows": rows, "message": ""}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Request failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+            "rows": [],
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable.", "rows": []}
+
+
+def _api_check_metadata_fields(
+    connection_id: int | str,
+    table_list: list[str],
+    path_prefix: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
     headers = _connections_auth_headers(token)
     if headers is None:
         return {"success": False, "message": "Session expired. Please log in again."}
@@ -12564,7 +13246,7 @@ def api_check_import_metadata_fields(
     if not tables:
         return {"success": False, "message": "Select at least one table."}
     payload: dict[str, Any] = {"tableList": tables}
-    url = _api_url(f"{ETL_METADATA_CHECK_FIELD_PATH_PREFIX}/{seg}")
+    url = _api_url(f"{path_prefix}/{seg}")
     try:
         body = _http_post_json(url, payload, timeout_s=60.0, extra_headers=headers)
         if not isinstance(body, dict):
@@ -12600,6 +13282,36 @@ def api_check_import_metadata_fields(
         }
     except (URLError, TimeoutError, ValueError):
         return {"success": False, "message": "Backend not reachable."}
+
+
+def api_check_import_metadata_fields(
+    connection_id: int | str,
+    table_list: list[str],
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """POST validate fields before import (``api/etl/import-metadata/check-field/{id}``)."""
+    return _api_check_metadata_fields(
+        connection_id,
+        table_list,
+        ETL_METADATA_CHECK_FIELD_PATH_PREFIX,
+        token=token,
+    )
+
+
+def api_check_scan_connection_fields(
+    connection_id: int | str,
+    table_list: list[str],
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """POST validate fields after scan (``api/etl/scan-connection/check-field/{id}``)."""
+    return _api_check_metadata_fields(
+        connection_id,
+        table_list,
+        ETL_SCAN_CONNECTION_CHECK_FIELD_PATH_PREFIX,
+        token=token,
+    )
 
 
 def api_import_metadata_tables(
@@ -12761,13 +13473,393 @@ def api_get_imported_tables(
         return {"success": False, "message": "Backend not reachable.", "tables": []}
 
 
+def api_update_tgt_table_name(
+    import_table_id: int | str,
+    new_table_name: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """PUT update imported table target name (``api/etl/import-metadata/update-tgt-table-name/{id}?newTableName=…``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(import_table_id)
+    new_tbl = (new_table_name or "").strip()
+    if not seg:
+        return {"success": False, "message": "Import table ID is required."}
+    if not new_tbl:
+        return {"success": False, "message": "New target table name is required."}
+    query = urlencode({"newTableName": new_tbl})
+    url = _api_url(f"{ETL_SCAN_UPDATE_TGT_TABLE_NAME_PATH_PREFIX}/{seg}?{query}")
+    put_headers = {
+        "Accept": "application/json",
+        "User-Agent": "MY-ETLZONE-App/1.0",
+        **headers,
+    }
+    try:
+        req = Request(url, data=b"", headers=put_headers, method="PUT")
+        with _http_urlopen_logged(req, timeout=30.0) as resp:
+            raw = resp.read()
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        return _connection_post_result(
+            payload,
+            ok_fallback="Target table name updated.",
+            fail_fallback="Failed to update target table name.",
+        )
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Update failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_update_import_table_where_clause(
+    import_table_id: int | str,
+    where_clause: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """PUT update imported table WHERE clause (``api/etl/import-metadata/update-where-clause/{id}?whereClause=…``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(import_table_id)
+    clause = (where_clause or "").strip()
+    if not seg:
+        return {"success": False, "message": "Import table ID is required."}
+    if not clause:
+        return {"success": False, "message": "Where clause is required."}
+    query = urlencode({"whereClause": clause})
+    url = _api_url(f"{ETL_IMPORT_METADATA_UPDATE_WHERE_CLAUSE_PATH_PREFIX}/{seg}?{query}")
+    put_headers = {
+        "Accept": "application/json",
+        "User-Agent": "MY-ETLZONE-App/1.0",
+        **headers,
+    }
+    try:
+        req = Request(url, data=b"", headers=put_headers, method="PUT")
+        with _http_urlopen_logged(req, timeout=30.0) as resp:
+            raw = resp.read()
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        return _connection_post_result(
+            payload,
+            ok_fallback="Where clause saved.",
+            fail_fallback="Failed to save where clause.",
+        )
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Update failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def _parse_extraction_tables_list(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("data", "tables", "tableList", "content", "result"):
+        raw = payload.get(key)
+        if isinstance(raw, list):
+            return [r for r in raw if isinstance(r, dict)]
+    return []
+
+
+def api_get_extraction_tables_by_connection(
+    connection_id: int | str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """GET extraction tables for a connection (``api/extraction/connection/{connectionId}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again.", "tables": []}
+    seg = _api_path_id_segment(connection_id)
+    if not seg:
+        return {"success": False, "message": "Connection ID is required.", "tables": []}
+    url = _api_url(f"{ETL_EXTRACTION_BY_CONNECTION_PATH_PREFIX}/{seg}")
+    try:
+        payload = _http_get_json(url, headers=headers, timeout_s=30.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Failed to load extraction tables.", data=[]
+            )
+            if rej is not None:
+                return {**rej, "tables": []}
+        tables = _parse_extraction_tables_list(payload)
+        return {"success": True, "tables": tables, "message": ""}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Request failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+            "tables": [],
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable.", "tables": []}
+
+
+def api_get_extraction_by_id(
+    extraction_id: int | str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """GET one extraction record (``api/extraction/{id}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(extraction_id)
+    if not seg:
+        return {"success": False, "message": "Extraction ID is required."}
+    url = _api_url(f"{ETL_EXTRACTION_PATH}/{seg}")
+    try:
+        payload = _http_get_json(url, headers=headers, timeout_s=30.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Failed to load extraction record."
+            )
+            if rej is not None:
+                return rej
+            for key in ("data", "result", "extraction"):
+                nested = payload.get(key)
+                if isinstance(nested, dict):
+                    return {"success": True, "data": nested, "message": ""}
+            return {"success": True, "data": payload, "message": ""}
+        return {"success": False, "message": "Failed to load extraction record."}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Request failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_create_extraction_table(
+    table_name: str,
+    connection_id: int | str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """POST add a table to extraction (``api/extraction?tableName=…&connectionName={connectionId}``).
+
+    The backend expects the connection ID in the ``connectionName`` query parameter.
+    """
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    tbl = (table_name or "").strip()
+    conn_id = str(connection_id or "").strip()
+    if not tbl:
+        return {"success": False, "message": "Table name is required."}
+    if not conn_id:
+        return {"success": False, "message": "Connection ID is required."}
+    query = urlencode({"tableName": tbl, "connectionName": conn_id})
+    url = _api_url(f"{ETL_EXTRACTION_PATH}?{query}")
+    post_headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "MY-ETLZONE-App/1.0",
+        **headers,
+    }
+    try:
+        req = Request(url, data=b"", headers=post_headers, method="POST")
+        with _http_urlopen_logged(req, timeout=30.0) as resp:
+            raw = resp.read()
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        return _connection_post_result(
+            payload,
+            ok_fallback="Table added to extraction.",
+            fail_fallback="Failed to add table to extraction.",
+        )
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Add failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_update_extraction_target_table(
+    extraction_id: int | str,
+    target_table_name: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """PUT update extraction target table name (``api/extraction/target-table/{id}?targetTableName=…``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(extraction_id)
+    tgt = (target_table_name or "").strip()
+    if not seg:
+        return {"success": False, "message": "Extraction ID is required."}
+    if not tgt:
+        return {"success": False, "message": "Target table name is required."}
+    query = urlencode({"targetTableName": tgt})
+    url = _api_url(f"{ETL_EXTRACTION_UPDATE_TARGET_TABLE_PATH_PREFIX}/{seg}?{query}")
+    put_headers = {
+        "Accept": "application/json",
+        "User-Agent": "MY-ETLZONE-App/1.0",
+        **headers,
+    }
+    try:
+        req = Request(url, data=b"", headers=put_headers, method="PUT")
+        with _http_urlopen_logged(req, timeout=30.0) as resp:
+            raw = resp.read()
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        return _connection_post_result(
+            payload,
+            ok_fallback="Target table name updated.",
+            fail_fallback="Failed to update target table name.",
+        )
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Update failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_update_extraction_where_clause(
+    extraction_id: int | str,
+    where_clause: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """PUT update extraction where clause (``api/extraction/where-clause/{id}?whereClause=…``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(extraction_id)
+    clause = (where_clause or "").strip()
+    if not seg:
+        return {"success": False, "message": "Extraction ID is required."}
+    if not clause:
+        return {"success": False, "message": "Where clause is required."}
+    query = urlencode({"whereClause": clause})
+    url = _api_url(f"{ETL_EXTRACTION_UPDATE_WHERE_CLAUSE_PATH_PREFIX}/{seg}?{query}")
+    put_headers = {
+        "Accept": "application/json",
+        "User-Agent": "MY-ETLZONE-App/1.0",
+        **headers,
+    }
+    try:
+        req = Request(url, data=b"", headers=put_headers, method="PUT")
+        with _http_urlopen_logged(req, timeout=30.0) as resp:
+            raw = resp.read()
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        return _connection_post_result(
+            payload,
+            ok_fallback="Where clause saved.",
+            fail_fallback="Failed to save where clause.",
+        )
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Update failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_delete_extraction_table(
+    extraction_id: int | str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """DELETE an extraction table (``api/extraction/{id}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(extraction_id)
+    if not seg:
+        return {"success": False, "message": "Extraction ID is required."}
+    url = _api_url(f"{ETL_EXTRACTION_PATH}/{seg}")
+    try:
+        payload = _http_delete(url, headers=headers, timeout_s=30.0)
+        return _connection_post_result(
+            payload,
+            ok_fallback="Table removed from extraction.",
+            fail_fallback="Failed to remove extraction table.",
+        )
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Delete failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
 def api_remove_imported_table(
     connection_name: str,
     table_name: str,
     *,
     token: str | None = None,
 ) -> dict[str, Any]:
-    """DELETE an imported table (``api/metadata/imported-remove/{table}/{connection}``)."""
+    """DELETE an imported table (``api/metadata/imported-remove/{connection}?tableName={table}``)."""
     headers = _connections_auth_headers(token)
     if headers is None:
         return {"success": False, "message": "Session expired. Please log in again."}
@@ -12776,7 +13868,7 @@ def api_remove_imported_table(
     if not conn or not tbl:
         return {"success": False, "message": "Connection and table name are required."}
     url = _api_url(
-        f"{ETL_METADATA_IMPORTED_REMOVE_PATH_PREFIX}/{quote(tbl, safe='')}/{quote(conn, safe='')}"
+        f"{ETL_METADATA_IMPORTED_REMOVE_PATH_PREFIX}/{quote(conn, safe='')}?tableName={quote(tbl, safe='')}"
     )
     try:
         payload = _http_delete(url, headers=headers, timeout_s=30.0)
@@ -12807,7 +13899,7 @@ def api_get_extracted_fields(
     *,
     token: str | None = None,
 ) -> dict[str, Any]:
-    """GET extraction column metadata (``api/metadata/scan-extracted-feilds/...``)."""
+    """GET extraction column metadata (``api/metadata/scan-extracted-feilds/{connection}?tableName={table}``)."""
     headers = _connections_auth_headers(token)
     if headers is None:
         return {"success": False, "message": "Session expired. Please log in again.", "columns": []}
@@ -12816,7 +13908,7 @@ def api_get_extracted_fields(
     if not conn or not tbl:
         return {"success": False, "message": "Connection and table name are required.", "columns": []}
     url = _api_url(
-        f"{ETL_METADATA_SCAN_EXTRACTED_FIELDS_PATH_PREFIX}/{quote(tbl, safe='')}/{quote(conn, safe='')}"
+        f"{ETL_METADATA_SCAN_EXTRACTED_FIELDS_PATH_PREFIX}/{quote(conn, safe='')}?tableName={quote(tbl, safe='')}"
     )
     try:
         payload = _http_get_json(url, headers=headers, timeout_s=30.0)
@@ -12859,7 +13951,7 @@ def api_update_extracted_fields(
     *,
     token: str | None = None,
 ) -> dict[str, Any]:
-    """POST update checked/unchecked extraction columns."""
+    """POST update extraction columns (``api/metadata/update-extracted-feilds/{connection}?tableName={table}``)."""
     headers = _connections_auth_headers(token)
     if headers is None:
         return {"success": False, "message": "Session expired. Please log in again."}
@@ -12868,7 +13960,7 @@ def api_update_extracted_fields(
     if not conn or not tbl:
         return {"success": False, "message": "Connection and table name are required."}
     url = _api_url(
-        f"{ETL_METADATA_UPDATE_EXTRACTED_FIELDS_PATH_PREFIX}/{quote(tbl, safe='')}/{quote(conn, safe='')}"
+        f"{ETL_METADATA_UPDATE_EXTRACTED_FIELDS_PATH_PREFIX}/{quote(conn, safe='')}?tableName={quote(tbl, safe='')}"
     )
     payload = {
         "checkedColumns": list(checked_columns),
@@ -12897,11 +13989,61 @@ def api_update_extracted_fields(
         return {"success": False, "message": "Backend not reachable."}
 
 
+def api_start_group_extraction_job(
+    group_id: int | str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """POST start an extract-group ETL job (``etl/jobs/group/start/{id}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(group_id)
+    if not seg:
+        return {"success": False, "message": "Group ID is required."}
+    url = _api_url(f"{ETL_GROUP_JOB_START_PATH}/{seg}")
+    try:
+        body = _http_post_json(url, {}, timeout_s=120.0, extra_headers=headers)
+        if isinstance(body, dict):
+            rej = _reject_json_business_failure(body, message_fallback="Failed to start extraction job.")
+            if rej is not None:
+                return rej
+            status = str(body.get("status") or "").strip().upper()
+            if body.get("success") is True or status in ("SUCCESS", "QUEUED"):
+                job_id = body.get("jobId")
+                msg = body.get("message") or body.get("msg")
+                if job_id is not None:
+                    message = f"Job queued successfully. Job ID: {job_id}"
+                else:
+                    message = str(msg or "Job queued successfully.")
+                return {"success": True, "message": message, "jobId": job_id}
+            return {
+                "success": False,
+                "message": _extract_error_message(body, "Failed to start extraction job."),
+            }
+        return {"success": False, "message": "Failed to start extraction job."}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Job start failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
 def api_start_etl_job(job_payload: dict[str, Any], *, token: str | None = None) -> dict[str, Any]:
     """POST start an ETL extraction job (``etl/jobs/start``).
 
     Expected body keys: ``connection_name_src``, ``connection_name_tgt``,
-    ``src_fetch_size``, ``tgt_commit_size``, ``tableName`` (list of table names).
+    ``src_fetch_size``, ``tgt_commit_size``, ``tableName`` (list of
+    ``{tableName, newTableName, whereClause}`` objects).
     """
     headers = _connections_auth_headers(token)
     if headers is None:
@@ -12943,24 +14085,52 @@ def api_start_etl_job(job_payload: dict[str, Any], *, token: str | None = None) 
         return {"success": False, "message": "Backend not reachable."}
 
 
-def api_get_all_etl_jobs(token: str | None = None) -> dict[str, Any]:
-    """GET all ETL job logs (default: ``etl/jobs/all``)."""
+def _extract_etl_log_detail_rows(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("details", "data", "logs", "steps", "content"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [r for r in value if isinstance(r, dict)]
+    return []
+
+
+def api_get_etl_log_by_id(
+    log_id: int | str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """GET step details for one ETL log (default: ``api/etl/logs/{id}``)."""
     headers = _connections_auth_headers(token)
     if headers is None:
-        return {"success": False, "message": "Session expired. Please log in again.", "data": {}}
-    url = _api_url(ETL_JOBS_ALL_PATH)
+        return {"success": False, "message": "Session expired. Please log in again.", "data": []}
+    seg = _api_path_id_segment(log_id)
+    if not seg:
+        return {"success": False, "message": "Log ID is required.", "data": []}
+    url = _api_url(f"{ETL_LOG_BY_ID_PATH_PREFIX}/{seg}")
     try:
         payload = _http_get_json(url, headers=headers, timeout_s=15.0)
         if isinstance(payload, dict):
             rej = _reject_json_business_failure(
-                payload, message_fallback="Failed to load job logs.", data={}
+                payload, message_fallback="Failed to load log details.", data=[]
             )
             if rej is not None:
                 return rej
-            return {"success": True, "data": payload}
+            rows = _extract_etl_log_detail_rows(payload)
+            if rows:
+                return {"success": True, "data": rows, "message": str(payload.get("message") or "")}
+            if any(k in payload for k in ("details", "data", "logs", "steps")):
+                return {"success": True, "data": [], "message": str(payload.get("message") or "")}
+            return {"success": True, "data": [payload], "message": str(payload.get("message") or "")}
         if isinstance(payload, list):
-            return {"success": True, "data": {"jobs": payload}}
-        return {"success": False, "message": "Unexpected response format.", "data": {}}
+            return {
+                "success": True,
+                "data": [r for r in payload if isinstance(r, dict)],
+                "message": "",
+            }
+        return {"success": False, "message": "Unexpected response format.", "data": []}
     except HTTPError as exc:
         try:
             raw = exc.read()
@@ -12972,7 +14142,1280 @@ def api_get_all_etl_jobs(token: str | None = None) -> dict[str, Any]:
             "message": _extract_error_message(
                 err_payload, f"Request failed ({getattr(exc, 'code', 'HTTP error')})."
             ),
-            "data": {},
+            "data": [],
         }
     except (URLError, TimeoutError, ValueError):
-        return {"success": False, "message": "Backend not reachable.", "data": {}}
+        return {"success": False, "message": "Backend not reachable.", "data": []}
+
+
+def api_get_all_etl_jobs(token: str | None = None) -> dict[str, Any]:
+    """GET all ETL job logs (default: ``api/etl/logs``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again.", "data": []}
+    url = _api_url(ETL_JOBS_ALL_PATH)
+    try:
+        payload = _http_get_json(url, headers=headers, timeout_s=15.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Failed to load job logs.", data={}
+            )
+            if rej is not None:
+                return rej
+            for key in ("data", "jobs", "logs", "content"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return {
+                        "success": True,
+                        "data": [r for r in value if isinstance(r, dict)],
+                        "message": str(payload.get("message") or ""),
+                    }
+            return {
+                "success": True,
+                "data": [payload],
+                "message": str(payload.get("message") or ""),
+            }
+        if isinstance(payload, list):
+            return {"success": True, "data": [r for r in payload if isinstance(r, dict)]}
+        return {"success": False, "message": "Unexpected response format.", "data": []}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Request failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+            "data": [],
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable.", "data": []}
+
+
+def _parse_transformation_list(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("data", "content", "result", "objects", "jobs", "workflows", "flows", "stepMasters", "stepMasterList", "masters", "sources", "sourceList"):
+        raw = payload.get(key)
+        if isinstance(raw, list):
+            return [r for r in raw if isinstance(r, dict)]
+    return []
+
+
+def _transformation_record(payload: Any) -> dict[str, Any] | None:
+    if isinstance(payload, dict):
+        # Source/target rows include a nested ``flow`` object — keep the parent row.
+        if (
+            _transformation_step_table_name(payload)
+            or str(payload.get("connectionId") or payload.get("connection_id") or "").strip()
+            or "whereClause" in payload
+            or "where_clause" in payload
+            or "loadType" in payload
+            or "commitSize" in payload
+            or "fetchSize" in payload
+        ):
+            return payload
+        for key in (
+            "data",
+            "result",
+            "content",
+            "object",
+            "job",
+            "workflow",
+            "flow",
+            "source",
+            "target",
+        ):
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                return nested
+            if isinstance(nested, list):
+                for item in nested:
+                    if isinstance(item, dict):
+                        return item
+        return payload
+    if isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, dict):
+                return item
+    return None
+
+
+def _transformation_step_table_name(record: dict[str, Any]) -> str:
+    for key in ("tableName", "TABLE_NAME", "table_name", "name"):
+        value = record.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _transformation_step_has_data(record: dict[str, Any], *id_keys: str) -> bool:
+    for key in id_keys:
+        value = record.get(key)
+        if value is not None and str(value).strip() != "":
+            return True
+    for key in ("connectionId", "connection_id", "CONNECTION_ID"):
+        if str(record.get(key) or "").strip():
+            return True
+    return bool(_transformation_step_table_name(record))
+
+
+def _get_transformation_list(
+    base_path: str,
+    *,
+    token: str | None = None,
+    fail_message: str = "Failed to load records.",
+) -> dict[str, Any]:
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again.", "data": []}
+    url = _api_url(base_path)
+    try:
+        payload = _http_get_json(url, headers=headers, timeout_s=30.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(payload, message_fallback=fail_message, data=[])
+            if rej is not None:
+                return {**rej, "data": []}
+        rows = _parse_transformation_list(payload)
+        return {"success": True, "data": rows, "message": ""}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Request failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+            "data": [],
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable.", "data": []}
+
+
+def _get_transformation_by_id(
+    base_path: str,
+    record_id: int | str,
+    *,
+    token: str | None = None,
+    fail_message: str = "Failed to load record.",
+) -> dict[str, Any]:
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(record_id)
+    if not seg:
+        return {"success": False, "message": "ID is required."}
+    url = _api_url(f"{base_path}/{seg}")
+    try:
+        payload = _http_get_json(url, headers=headers, timeout_s=30.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(payload, message_fallback=fail_message)
+            if rej is not None:
+                return rej
+        record = _transformation_record(payload)
+        if record:
+            return {"success": True, "data": record, "message": ""}
+        return {"success": False, "message": fail_message}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Request failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def _get_transformation_by_parent(
+    base_path: str,
+    parent_segment: str,
+    parent_id: int | str,
+    *,
+    token: str | None = None,
+    fail_message: str = "Failed to load records.",
+) -> dict[str, Any]:
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again.", "data": []}
+    seg = _api_path_id_segment(parent_id)
+    if not seg:
+        return {"success": False, "message": "Parent ID is required.", "data": []}
+    url = _api_url(f"{base_path}/{parent_segment}/{seg}")
+    try:
+        payload = _http_get_json(url, headers=headers, timeout_s=30.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(payload, message_fallback=fail_message, data=[])
+            if rej is not None:
+                return {**rej, "data": []}
+        rows = _parse_transformation_list(payload)
+        return {"success": True, "data": rows, "message": ""}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Request failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+            "data": [],
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable.", "data": []}
+
+
+def _post_transformation(
+    base_path: str,
+    payload: dict[str, Any],
+    *,
+    token: str | None = None,
+    ok_fallback: str = "Saved.",
+    fail_fallback: str = "Save failed.",
+) -> dict[str, Any]:
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    url = _api_url(base_path)
+    try:
+        body = _http_post_json(url, payload, timeout_s=30.0, extra_headers=headers)
+        result = _connection_post_result(body, ok_fallback=ok_fallback, fail_fallback=fail_fallback)
+        if result.get("success") and isinstance(body, dict):
+            data = body.get("data")
+            if isinstance(data, dict):
+                result["data"] = data
+            elif body.get("id") is not None:
+                result["data"] = body
+        return result
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Save failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def _put_transformation(
+    base_path: str,
+    record_id: int | str,
+    payload: dict[str, Any],
+    *,
+    token: str | None = None,
+    ok_fallback: str = "Updated.",
+    fail_fallback: str = "Update failed.",
+) -> dict[str, Any]:
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(record_id)
+    if not seg:
+        return {"success": False, "message": "ID is required."}
+    url = _api_url(f"{base_path}/{seg}")
+    try:
+        status, body = _http_put_json(url, payload, timeout_s=30.0, extra_headers=headers)
+        if status in (200, 201, 204):
+            if isinstance(body, dict) and body:
+                result = _connection_post_result(body, ok_fallback=ok_fallback, fail_fallback=fail_fallback)
+                if result.get("success"):
+                    data = body.get("data")
+                    if isinstance(data, dict):
+                        result["data"] = data
+                    elif body.get("id") is not None:
+                        result["data"] = body
+                    return result
+            return {"success": True, "message": ok_fallback}
+        if isinstance(body, dict):
+            return {"success": False, "message": _extract_error_message(body, fail_fallback)}
+        return {"success": False, "message": f"Update failed (HTTP {status})."}
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Update failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def _delete_transformation(
+    base_path: str,
+    record_id: int | str,
+    *,
+    token: str | None = None,
+    ok_fallback: str = "Deleted.",
+    fail_fallback: str = "Delete failed.",
+) -> dict[str, Any]:
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(record_id)
+    if not seg:
+        return {"success": False, "message": "ID is required."}
+    url = _api_url(f"{base_path}/{seg}")
+    try:
+        payload = _http_delete(url, headers=headers, timeout_s=30.0)
+        return _connection_post_result(payload, ok_fallback=ok_fallback, fail_fallback=fail_fallback)
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Delete failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def api_get_transformation_objects(*, token: str | None = None) -> dict[str, Any]:
+    return _get_transformation_list(
+        ETL_TRANSFORMATION_OBJECT_PATH, token=token, fail_message="Failed to load objects."
+    )
+
+
+def api_get_transformation_object_by_id(
+    object_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    return _get_transformation_by_id(
+        ETL_TRANSFORMATION_OBJECT_PATH, object_id, token=token, fail_message="Failed to load object."
+    )
+
+
+def api_create_transformation_object(
+    payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _post_transformation(
+        ETL_TRANSFORMATION_OBJECT_PATH,
+        payload,
+        token=token,
+        ok_fallback="Object created.",
+        fail_fallback="Failed to create object.",
+    )
+
+
+def api_update_transformation_object(
+    object_id: int | str, payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _put_transformation(
+        ETL_TRANSFORMATION_OBJECT_PATH,
+        object_id,
+        payload,
+        token=token,
+        ok_fallback="Object updated.",
+        fail_fallback="Failed to update object.",
+    )
+
+
+def api_delete_transformation_object(
+    object_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    return _delete_transformation(
+        ETL_TRANSFORMATION_OBJECT_PATH,
+        object_id,
+        token=token,
+        ok_fallback="Object deleted.",
+        fail_fallback="Failed to delete object.",
+    )
+
+
+def api_get_transformation_jobs(*, token: str | None = None) -> dict[str, Any]:
+    return _get_transformation_list(
+        ETL_TRANSFORMATION_JOB_PATH, token=token, fail_message="Failed to load jobs."
+    )
+
+
+def api_get_transformation_job_by_id(job_id: int | str, *, token: str | None = None) -> dict[str, Any]:
+    return _get_transformation_by_id(
+        ETL_TRANSFORMATION_JOB_PATH, job_id, token=token, fail_message="Failed to load job."
+    )
+
+
+def api_get_transformation_jobs_by_object(
+    object_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    return _get_transformation_by_parent(
+        ETL_TRANSFORMATION_JOB_PATH,
+        "object",
+        object_id,
+        token=token,
+        fail_message="Failed to load jobs for object.",
+    )
+
+
+def api_create_transformation_job(
+    payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _post_transformation(
+        ETL_TRANSFORMATION_JOB_PATH,
+        payload,
+        token=token,
+        ok_fallback="Job created.",
+        fail_fallback="Failed to create job.",
+    )
+
+
+def api_update_transformation_job(
+    job_id: int | str, payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _put_transformation(
+        ETL_TRANSFORMATION_JOB_PATH,
+        job_id,
+        payload,
+        token=token,
+        ok_fallback="Job updated.",
+        fail_fallback="Failed to update job.",
+    )
+
+
+def api_delete_transformation_job(job_id: int | str, *, token: str | None = None) -> dict[str, Any]:
+    return _delete_transformation(
+        ETL_TRANSFORMATION_JOB_PATH,
+        job_id,
+        token=token,
+        ok_fallback="Job deleted.",
+        fail_fallback="Failed to delete job.",
+    )
+
+
+def api_get_transformation_workflows(*, token: str | None = None) -> dict[str, Any]:
+    return _get_transformation_list(
+        ETL_TRANSFORMATION_WORKFLOW_PATH, token=token, fail_message="Failed to load work flows."
+    )
+
+
+def api_get_transformation_workflow_by_id(
+    workflow_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    return _get_transformation_by_id(
+        ETL_TRANSFORMATION_WORKFLOW_PATH,
+        workflow_id,
+        token=token,
+        fail_message="Failed to load work flow.",
+    )
+
+
+def api_get_transformation_workflows_by_job(
+    job_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    return _get_transformation_by_parent(
+        ETL_TRANSFORMATION_WORKFLOW_PATH,
+        "job",
+        job_id,
+        token=token,
+        fail_message="Failed to load work flows for job.",
+    )
+
+
+def api_create_transformation_workflow(
+    payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _post_transformation(
+        ETL_TRANSFORMATION_WORKFLOW_PATH,
+        payload,
+        token=token,
+        ok_fallback="Work flow created.",
+        fail_fallback="Failed to create work flow.",
+    )
+
+
+def api_update_transformation_workflow(
+    workflow_id: int | str, payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _put_transformation(
+        ETL_TRANSFORMATION_WORKFLOW_PATH,
+        workflow_id,
+        payload,
+        token=token,
+        ok_fallback="Work flow updated.",
+        fail_fallback="Failed to update work flow.",
+    )
+
+
+def api_delete_transformation_workflow(
+    workflow_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    return _delete_transformation(
+        ETL_TRANSFORMATION_WORKFLOW_PATH,
+        workflow_id,
+        token=token,
+        ok_fallback="Work flow deleted.",
+        fail_fallback="Failed to delete work flow.",
+    )
+
+
+def api_get_transformation_flows(*, token: str | None = None) -> dict[str, Any]:
+    return _get_transformation_list(
+        ETL_TRANSFORMATION_FLOW_PATH, token=token, fail_message="Failed to load flows."
+    )
+
+
+def api_get_transformation_flow_by_id(
+    flow_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    return _get_transformation_by_id(
+        ETL_TRANSFORMATION_FLOW_PATH, flow_id, token=token, fail_message="Failed to load flow."
+    )
+
+
+def api_get_transformation_flows_by_workflow(
+    workflow_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    return _get_transformation_by_parent(
+        ETL_TRANSFORMATION_FLOW_PATH,
+        "workflow",
+        workflow_id,
+        token=token,
+        fail_message="Failed to load flows for work flow.",
+    )
+
+
+def api_create_transformation_flow(
+    payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _post_transformation(
+        ETL_TRANSFORMATION_FLOW_PATH,
+        payload,
+        token=token,
+        ok_fallback="Flow created.",
+        fail_fallback="Failed to create flow.",
+    )
+
+
+def api_update_transformation_flow(
+    flow_id: int | str, payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _put_transformation(
+        ETL_TRANSFORMATION_FLOW_PATH,
+        flow_id,
+        payload,
+        token=token,
+        ok_fallback="Flow updated.",
+        fail_fallback="Failed to update flow.",
+    )
+
+
+def api_delete_transformation_flow(flow_id: int | str, *, token: str | None = None) -> dict[str, Any]:
+    return _delete_transformation(
+        ETL_TRANSFORMATION_FLOW_PATH,
+        flow_id,
+        token=token,
+        ok_fallback="Flow deleted.",
+        fail_fallback="Failed to delete flow.",
+    )
+
+
+def api_create_transformation_source(
+    payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _post_transformation(
+        ETL_TRANSFORMATION_SOURCE_PATH,
+        payload,
+        token=token,
+        ok_fallback="Source configuration saved.",
+        fail_fallback="Failed to save source configuration.",
+    )
+
+
+def api_update_transformation_source(
+    source_id: int | str, payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _put_transformation(
+        ETL_TRANSFORMATION_SOURCE_PATH,
+        source_id,
+        payload,
+        token=token,
+        ok_fallback="Source configuration updated.",
+        fail_fallback="Failed to update source configuration.",
+    )
+
+
+def _transformation_source_not_found(
+    payload: Any = None,
+    *,
+    http_code: int | None = None,
+    message: str = "",
+) -> bool:
+    if http_code == 404:
+        return True
+    text = (message or "").strip().lower()
+    if isinstance(payload, dict) and not text:
+        text = str(payload.get("message") or payload.get("error") or "").strip().lower()
+    if not text:
+        return False
+    markers = (
+        "not found",
+        "no source",
+        "source not present",
+        "does not exist",
+        "doesn't exist",
+        "not exist",
+        "not present",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _parse_transformation_sources_list(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("data", "content", "result", "sources", "sourceList", "source"):
+        raw = payload.get(key)
+        if isinstance(raw, list):
+            return [r for r in raw if isinstance(r, dict)]
+    return []
+
+
+def api_get_transformation_source_by_id(
+    source_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    return _get_transformation_by_id(
+        ETL_TRANSFORMATION_SOURCE_PATH,
+        source_id,
+        token=token,
+        fail_message="Failed to load source configuration.",
+    )
+
+
+def api_get_transformation_sources_by_flow(
+    flow_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    """GET source tables for a flow (``api/transformation/source/flow/{flowId}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again.", "data": []}
+    seg = _api_path_id_segment(flow_id)
+    if not seg:
+        return {"success": False, "message": "Flow ID is required.", "data": []}
+    url = _api_url(f"{ETL_TRANSFORMATION_SOURCE_PATH}/flow/{seg}")
+    try:
+        payload = _http_get_json(url, headers=headers, timeout_s=30.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Failed to load source configurations.", data=[]
+            )
+            if rej is not None:
+                if _transformation_source_not_found(
+                    payload, message=str(rej.get("message") or "")
+                ):
+                    return {"success": True, "data": [], "message": ""}
+                return {**rej, "data": []}
+        rows = _parse_transformation_sources_list(payload)
+        if not rows:
+            rows = _parse_transformation_list(payload)
+        if not rows and isinstance(payload, dict):
+            record = _transformation_record(payload)
+            if isinstance(record, dict) and _transformation_step_has_data(
+                record, "id", "sourceId", "source_id", "ID"
+            ):
+                rows = [record]
+        return {"success": True, "data": rows, "message": ""}
+    except HTTPError as exc:
+        code = getattr(exc, "code", None)
+        if code == 404:
+            return {"success": True, "data": [], "message": ""}
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        message = _extract_error_message(
+            err_payload, f"Request failed ({code or 'HTTP error'})."
+        )
+        if _transformation_source_not_found(err_payload, http_code=code, message=message):
+            return {"success": True, "data": [], "message": ""}
+        return {"success": False, "message": message, "data": []}
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable.", "data": []}
+
+
+def api_delete_transformation_source(
+    source_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    return _delete_transformation(
+        ETL_TRANSFORMATION_SOURCE_PATH,
+        source_id,
+        token=token,
+        ok_fallback="Source configuration deleted.",
+        fail_fallback="Failed to delete source configuration.",
+    )
+
+
+def api_get_transformation_source_by_flow(
+    flow_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    """Backward-compatible wrapper — returns first source row if any."""
+    result = api_get_transformation_sources_by_flow(flow_id, token=token)
+    if not result.get("success"):
+        return result
+    rows = [r for r in (result.get("data") or []) if isinstance(r, dict)]
+    return {**result, "data": rows[0] if rows else None}
+
+
+def api_create_transformation_target(
+    payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _post_transformation(
+        ETL_TRANSFORMATION_TARGET_PATH,
+        payload,
+        token=token,
+        ok_fallback="Target configuration saved.",
+        fail_fallback="Failed to save target configuration.",
+    )
+
+
+def api_update_transformation_target(
+    target_id: int | str, payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _put_transformation(
+        ETL_TRANSFORMATION_TARGET_PATH,
+        target_id,
+        payload,
+        token=token,
+        ok_fallback="Target configuration updated.",
+        fail_fallback="Failed to update target configuration.",
+    )
+
+
+def _transformation_target_not_found(
+    payload: Any = None,
+    *,
+    http_code: int | None = None,
+    message: str = "",
+) -> bool:
+    if http_code == 404:
+        return True
+    text = (message or "").strip().lower()
+    if isinstance(payload, dict) and not text:
+        text = str(payload.get("message") or payload.get("error") or "").strip().lower()
+    if not text:
+        return False
+    markers = (
+        "not found",
+        "no target",
+        "target not present",
+        "does not exist",
+        "doesn't exist",
+        "not exist",
+        "not present",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _parse_transformation_targets_list(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("data", "content", "result", "targets", "targetList", "target"):
+        raw = payload.get(key)
+        if isinstance(raw, list):
+            return [r for r in raw if isinstance(r, dict)]
+        if isinstance(raw, dict):
+            return [raw]
+    if _transformation_step_has_data(payload, "id", "targetId", "target_id", "ID"):
+        return [payload]
+    return []
+
+
+def api_get_transformation_targets_by_flow(
+    flow_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    """GET target rows for a flow (``api/transformation/target/flow/{flowId}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again.", "data": []}
+    seg = _api_path_id_segment(flow_id)
+    if not seg:
+        return {"success": False, "message": "Flow ID is required.", "data": []}
+    url = _api_url(f"{ETL_TRANSFORMATION_TARGET_PATH}/flow/{seg}")
+    try:
+        payload = _http_get_json(url, headers=headers, timeout_s=30.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Failed to load target configuration.", data=[]
+            )
+            if rej is not None:
+                if _transformation_target_not_found(
+                    payload, message=str(rej.get("message") or "")
+                ):
+                    return {"success": True, "data": [], "message": ""}
+                return {**rej, "data": []}
+        rows = _parse_transformation_targets_list(payload)
+        if not rows:
+            rows = _parse_transformation_list(payload)
+        if not rows and isinstance(payload, dict):
+            record = _transformation_record(payload)
+            if isinstance(record, dict) and _transformation_step_has_data(
+                record, "id", "targetId", "target_id", "ID"
+            ):
+                rows = [record]
+        return {"success": True, "data": rows, "message": ""}
+    except HTTPError as exc:
+        code = getattr(exc, "code", None)
+        if code == 404:
+            return {"success": True, "data": [], "message": ""}
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        message = _extract_error_message(
+            err_payload, f"Request failed ({code or 'HTTP error'})."
+        )
+        if _transformation_target_not_found(err_payload, http_code=code, message=message):
+            return {"success": True, "data": [], "message": ""}
+        return {"success": False, "message": message, "data": []}
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable.", "data": []}
+
+
+def api_get_transformation_target_by_flow(
+    flow_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    """Backward-compatible wrapper — returns first target row if any."""
+    result = api_get_transformation_targets_by_flow(flow_id, token=token)
+    if not result.get("success"):
+        return result
+    rows = [r for r in (result.get("data") or []) if isinstance(r, dict)]
+    return {**result, "data": rows[0] if rows else None}
+
+
+def _parse_transformation_columns_list(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("data", "content", "result", "columns", "columnList"):
+        raw = payload.get(key)
+        if isinstance(raw, list):
+            return [r for r in raw if isinstance(r, dict)]
+    return []
+
+
+def _transformation_columns_not_found(
+    payload: Any = None,
+    *,
+    http_code: int | None = None,
+    message: str = "",
+) -> bool:
+    if http_code == 404:
+        return True
+    text = (message or "").strip().lower()
+    if isinstance(payload, dict) and not text:
+        text = str(payload.get("message") or payload.get("error") or "").strip().lower()
+    if not text:
+        return False
+    markers = (
+        "not found",
+        "no column",
+        "columns not present",
+        "does not exist",
+        "doesn't exist",
+        "not exist",
+        "not present",
+    )
+    return any(marker in text for marker in markers)
+
+
+def api_create_transformation_column(
+    payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _post_transformation(
+        ETL_TRANSFORMATION_COLUMN_PATH,
+        payload,
+        token=token,
+        ok_fallback="Column mapping saved.",
+        fail_fallback="Failed to save column mapping.",
+    )
+
+
+def api_update_transformation_column(
+    column_id: int | str, payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _put_transformation(
+        ETL_TRANSFORMATION_COLUMN_PATH,
+        column_id,
+        payload,
+        token=token,
+        ok_fallback="Column mapping updated.",
+        fail_fallback="Failed to update column mapping.",
+    )
+
+
+def api_get_transformation_columns_by_flow(
+    flow_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    """GET column mappings for a flow (``api/transformation/column/flow/{flowId}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again.", "data": []}
+    seg = _api_path_id_segment(flow_id)
+    if not seg:
+        return {"success": False, "message": "Flow ID is required.", "data": []}
+    url = _api_url(f"{ETL_TRANSFORMATION_COLUMN_PATH}/flow/{seg}")
+    try:
+        payload = _http_get_json(url, headers=headers, timeout_s=30.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Failed to load column mappings.", data=[]
+            )
+            if rej is not None:
+                if _transformation_columns_not_found(
+                    payload, message=str(rej.get("message") or "")
+                ):
+                    return {"success": True, "data": [], "message": ""}
+                return {**rej, "data": []}
+        rows = _parse_transformation_columns_list(payload)
+        return {"success": True, "data": rows, "message": ""}
+    except HTTPError as exc:
+        code = getattr(exc, "code", None)
+        if code == 404:
+            return {"success": True, "data": [], "message": ""}
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        message = _extract_error_message(
+            err_payload, f"Request failed ({code or 'HTTP error'})."
+        )
+        if _transformation_columns_not_found(err_payload, http_code=code, message=message):
+            return {"success": True, "data": [], "message": ""}
+        return {"success": False, "message": message, "data": []}
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable.", "data": []}
+
+
+def api_delete_transformation_columns_by_flow(
+    flow_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    """DELETE all column mappings for a flow (``api/transformation/column/flow/{flowId}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    seg = _api_path_id_segment(flow_id)
+    if not seg:
+        return {"success": False, "message": "Flow ID is required."}
+    url = _api_url(f"{ETL_TRANSFORMATION_COLUMN_PATH}/flow/{seg}")
+    try:
+        payload = _http_delete(url, headers=headers, timeout_s=30.0)
+        return _connection_post_result(
+            payload,
+            ok_fallback="Column mappings deleted.",
+            fail_fallback="Failed to delete column mappings.",
+        )
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Delete failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def _parse_transformation_joins_list(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("data", "content", "result", "joins", "joinList"):
+        raw = payload.get(key)
+        if isinstance(raw, list):
+            return [r for r in raw if isinstance(r, dict)]
+    return []
+
+
+def _transformation_joins_not_found(
+    payload: Any = None,
+    *,
+    http_code: int | None = None,
+    message: str = "",
+) -> bool:
+    if http_code == 404:
+        return True
+    text = (message or "").strip().lower()
+    if isinstance(payload, dict) and not text:
+        text = str(payload.get("message") or payload.get("error") or "").strip().lower()
+    if not text:
+        return False
+    markers = (
+        "not found",
+        "no join",
+        "joins not present",
+        "does not exist",
+        "doesn't exist",
+        "not exist",
+        "not present",
+    )
+    return any(marker in text for marker in markers)
+
+
+def api_create_transformation_join(
+    payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _post_transformation(
+        ETL_TRANSFORMATION_JOIN_PATH,
+        payload,
+        token=token,
+        ok_fallback="Join configuration saved.",
+        fail_fallback="Failed to save join configuration.",
+    )
+
+
+def api_update_transformation_join(
+    join_id: int | str, payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _put_transformation(
+        ETL_TRANSFORMATION_JOIN_PATH,
+        join_id,
+        payload,
+        token=token,
+        ok_fallback="Join configuration updated.",
+        fail_fallback="Failed to update join configuration.",
+    )
+
+
+def api_get_transformation_join_by_id(
+    join_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    return _get_transformation_by_id(
+        ETL_TRANSFORMATION_JOIN_PATH,
+        join_id,
+        token=token,
+        fail_message="Failed to load join configuration.",
+    )
+
+
+def api_get_transformation_joins_by_flow(
+    flow_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    """GET join configurations for a flow (``api/transformation/join/flow/{flowId}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again.", "data": []}
+    seg = _api_path_id_segment(flow_id)
+    if not seg:
+        return {"success": False, "message": "Flow ID is required.", "data": []}
+    url = _api_url(f"{ETL_TRANSFORMATION_JOIN_PATH}/flow/{seg}")
+    try:
+        payload = _http_get_json(url, headers=headers, timeout_s=30.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Failed to load join configurations.", data=[]
+            )
+            if rej is not None:
+                if _transformation_joins_not_found(
+                    payload, message=str(rej.get("message") or "")
+                ):
+                    return {"success": True, "data": [], "message": ""}
+                return {**rej, "data": []}
+        rows = _parse_transformation_joins_list(payload)
+        return {"success": True, "data": rows, "message": ""}
+    except HTTPError as exc:
+        code = getattr(exc, "code", None)
+        if code == 404:
+            return {"success": True, "data": [], "message": ""}
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        message = _extract_error_message(
+            err_payload, f"Request failed ({code or 'HTTP error'})."
+        )
+        if _transformation_joins_not_found(err_payload, http_code=code, message=message):
+            return {"success": True, "data": [], "message": ""}
+        return {"success": False, "message": message, "data": []}
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable.", "data": []}
+
+
+def api_delete_transformation_join(
+    join_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    return _delete_transformation(
+        ETL_TRANSFORMATION_JOIN_PATH,
+        join_id,
+        token=token,
+        ok_fallback="Join configuration deleted.",
+        fail_fallback="Failed to delete join configuration.",
+    )
+
+
+def _parse_transformation_steps_list(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("data", "content", "result", "steps", "stepList"):
+        raw = payload.get(key)
+        if isinstance(raw, list):
+            return [r for r in raw if isinstance(r, dict)]
+    return []
+
+
+def _transformation_steps_not_found(
+    payload: Any = None,
+    *,
+    http_code: int | None = None,
+    message: str = "",
+) -> bool:
+    if http_code == 404:
+        return True
+    text = (message or "").strip().lower()
+    if isinstance(payload, dict) and not text:
+        text = str(payload.get("message") or payload.get("error") or "").strip().lower()
+    if not text:
+        return False
+    markers = (
+        "not found",
+        "no step",
+        "steps not present",
+        "does not exist",
+        "doesn't exist",
+        "not exist",
+        "not present",
+    )
+    return any(marker in text for marker in markers)
+
+
+def api_get_transformation_step_masters(*, token: str | None = None) -> dict[str, Any]:
+    """GET step master catalog (``api/transformation/step-master``)."""
+    return _get_transformation_list(
+        ETL_TRANSFORMATION_STEP_MASTER_PATH,
+        token=token,
+        fail_message="Failed to load step masters.",
+    )
+
+
+def api_create_transformation_step(
+    payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _post_transformation(
+        ETL_TRANSFORMATION_STEP_PATH,
+        payload,
+        token=token,
+        ok_fallback="Transform step saved.",
+        fail_fallback="Failed to save transform step.",
+    )
+
+
+def api_update_transformation_step(
+    step_id: int | str, payload: dict[str, Any], *, token: str | None = None
+) -> dict[str, Any]:
+    return _put_transformation(
+        ETL_TRANSFORMATION_STEP_PATH,
+        step_id,
+        payload,
+        token=token,
+        ok_fallback="Transform step updated.",
+        fail_fallback="Failed to update transform step.",
+    )
+
+
+def api_get_transformation_step_by_id(
+    step_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    return _get_transformation_by_id(
+        ETL_TRANSFORMATION_STEP_PATH,
+        step_id,
+        token=token,
+        fail_message="Failed to load transform step.",
+    )
+
+
+def api_get_transformation_steps_by_flow(
+    flow_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    """GET transform steps for a flow (``api/transformation/step/flow/{flowId}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again.", "data": []}
+    seg = _api_path_id_segment(flow_id)
+    if not seg:
+        return {"success": False, "message": "Flow ID is required.", "data": []}
+    url = _api_url(f"{ETL_TRANSFORMATION_STEP_PATH}/flow/{seg}")
+    try:
+        payload = _http_get_json(url, headers=headers, timeout_s=30.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Failed to load transform steps.", data=[]
+            )
+            if rej is not None:
+                if _transformation_steps_not_found(
+                    payload, message=str(rej.get("message") or "")
+                ):
+                    return {"success": True, "data": [], "message": ""}
+                return {**rej, "data": []}
+        rows = _parse_transformation_steps_list(payload)
+        return {"success": True, "data": rows, "message": ""}
+    except HTTPError as exc:
+        code = getattr(exc, "code", None)
+        if code == 404:
+            return {"success": True, "data": [], "message": ""}
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        message = _extract_error_message(
+            err_payload, f"Request failed ({code or 'HTTP error'})."
+        )
+        if _transformation_steps_not_found(err_payload, http_code=code, message=message):
+            return {"success": True, "data": [], "message": ""}
+        return {"success": False, "message": message, "data": []}
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable.", "data": []}
+
+
+def api_delete_transformation_step(
+    step_id: int | str, *, token: str | None = None
+) -> dict[str, Any]:
+    return _delete_transformation(
+        ETL_TRANSFORMATION_STEP_PATH,
+        step_id,
+        token=token,
+        ok_fallback="Transform step deleted.",
+        fail_fallback="Failed to delete transform step.",
+    )

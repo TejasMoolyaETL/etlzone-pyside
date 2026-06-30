@@ -41,6 +41,7 @@ from core.api import (
     api_test_connection,
     api_update_connection,
 )
+from core.etl_connection_context import get_etl_connection_context
 from core.user_context import get_user_profile
 from ui.auto_hide_message import cancel_auto_hide_message, show_auto_hiding_message
 from ui.data_table import (
@@ -116,6 +117,14 @@ def _connection_id(conn: dict[str, Any] | None) -> int | str | None:
         if value is not None and str(value).strip() != "":
             return value
     return None
+
+
+def _connection_numeric_field_text(conn: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = conn.get(key)
+        if value is not None and str(value).strip() != "":
+            return str(value).strip()
+    return ""
 
 
 class ConnectionsPageWidget(QWidget):
@@ -247,13 +256,22 @@ class ConnectionsPageWidget(QWidget):
             w.setStyleSheet(FORM_READONLY_INPUT_STYLE)
             return w
 
+        self.conn_id_value = _line_field()
+        conn_grid.addWidget(
+            labeled_field_block(
+                field_caption_label("Connection ID", FORM_LABEL_STYLE),
+                self.conn_id_value,
+            ),
+            0,
+            0,
+        )
         self.conn_name_value = _line_field()
         conn_grid.addWidget(
             labeled_field_block(
                 field_caption_label("Connection Name", FORM_LABEL_STYLE),
                 self.conn_name_value,
             ),
-            0,
+            1,
             0,
         )
         self.db_type_value = QComboBox()
@@ -265,7 +283,7 @@ class ConnectionsPageWidget(QWidget):
                 field_caption_label("Db Type*", FORM_LABEL_STYLE),
                 self.db_type_value,
             ),
-            1,
+            2,
             0,
         )
         self.host_value = _line_field()
@@ -274,13 +292,13 @@ class ConnectionsPageWidget(QWidget):
                 field_caption_label("Host*", FORM_LABEL_STYLE),
                 self.host_value,
             ),
-            2,
+            3,
             0,
         )
         self.port_value = _line_field()
         conn_grid.addWidget(
             labeled_field_block(field_caption_label("Port", FORM_LABEL_STYLE), self.port_value),
-            3,
+            4,
             0,
         )
         self.database_value = _line_field()
@@ -289,7 +307,7 @@ class ConnectionsPageWidget(QWidget):
                 field_caption_label("Database / Service*", FORM_LABEL_STYLE),
                 self.database_value,
             ),
-            4,
+            5,
             0,
         )
         self.username_value = _line_field()
@@ -298,7 +316,7 @@ class ConnectionsPageWidget(QWidget):
                 field_caption_label("Username*", FORM_LABEL_STYLE),
                 self.username_value,
             ),
-            5,
+            6,
             0,
         )
         self.password_value = _line_field()
@@ -308,7 +326,25 @@ class ConnectionsPageWidget(QWidget):
                 field_caption_label("Password*", FORM_LABEL_STYLE),
                 self.password_value,
             ),
-            6,
+            7,
+            0,
+        )
+        self.fetch_size_value = _line_field()
+        conn_grid.addWidget(
+            labeled_field_block(
+                field_caption_label("Fetch Size", FORM_LABEL_STYLE),
+                self.fetch_size_value,
+            ),
+            8,
+            0,
+        )
+        self.chunk_size_value = _line_field()
+        conn_grid.addWidget(
+            labeled_field_block(
+                field_caption_label("Chunk Size", FORM_LABEL_STYLE),
+                self.chunk_size_value,
+            ),
+            9,
             0,
         )
 
@@ -381,7 +417,7 @@ class ConnectionsPageWidget(QWidget):
         )
         self.detail_status_label.setVisible(False)
 
-        btn_row = 7
+        btn_row = 10
         conn_grid.addWidget(self.detail_status_label, btn_row, 0)
         conn_grid.addWidget(
             action_btns,
@@ -449,6 +485,7 @@ class EtlConnectionsPage(QWidget):
         self._ui = ConnectionsPageWidget()
         layout.addWidget(self._ui)
 
+        self._ctx = get_etl_connection_context()
         self._connections: list[dict[str, Any]] = []
         self._current: dict[str, Any] | None = None
         self._editing = False
@@ -489,10 +526,12 @@ class EtlConnectionsPage(QWidget):
         result = api_get_all_connections(token)
         if not result.get("success"):
             self._connections = []
+            self._ctx.set_connections([])
             self._populate_table()
             self._show_page_message(str(result.get("message") or "Failed to load connections."), error=True)
             return
         self._connections = list(result.get("data") or [])
+        self._ctx.set_connections(self._connections)
         self._populate_table()
         show_auto_hiding_message(self, self._ui.message_label, "", error=False)
 
@@ -599,12 +638,14 @@ class EtlConnectionsPage(QWidget):
         conn = self._selected_connection()
         if conn is None:
             self._current = None
+            self._ctx.select_connection(None)
             self._editing = False
             self._ui.show_empty_detail()
             self._clear_detail_status()
             return
 
         self._current = conn
+        self._ctx.select_connection(conn)
         self._editing = False
         self._ui.show_view_buttons()
         self._set_details_editable(False)
@@ -693,6 +734,8 @@ class EtlConnectionsPage(QWidget):
         field.setPlaceholderText(placeholder_example(placeholder) if editable and placeholder else "")
 
     def _set_connection_details(self, conn: dict[str, Any]) -> None:
+        conn_id = _connection_id(conn)
+        self._ui.conn_id_value.setText("" if conn_id is None else str(conn_id))
         self._ui.conn_name_value.setText(str(conn.get("connectionName") or ""))
         db = str(conn.get("dbType") or "")
         idx = self._ui.db_type_value.findText(db)
@@ -711,9 +754,17 @@ class EtlConnectionsPage(QWidget):
             self._ui.password_value.setText(pwd)
         else:
             self._ui.password_value.setText(_PASSWORD_MASK if pwd else "")
+        self._ui.fetch_size_value.setText(
+            _connection_numeric_field_text(conn, "fetchSize", "fetch_size")
+        )
+        self._ui.chunk_size_value.setText(
+            _connection_numeric_field_text(conn, "chunkSize", "chunk_size", "chunkSIze")
+        )
 
     def _set_details_editable(self, editable: bool) -> None:
-        self._apply_field_style(self._ui.conn_name_value, editable=False)
+        self._apply_field_style(
+            self._ui.conn_name_value, editable=editable, placeholder="my connection"
+        )
         self._ui.db_type_value.setEnabled(editable)
         self._apply_field_style(self._ui.host_value, editable=editable, placeholder="localhost")
         self._apply_field_style(self._ui.port_value, editable=editable, placeholder="1521")
@@ -722,6 +773,12 @@ class EtlConnectionsPage(QWidget):
         )
         self._apply_field_style(self._ui.username_value, editable=editable, placeholder="dbuser")
         self._apply_field_style(self._ui.password_value, editable=editable, placeholder="password")
+        self._apply_field_style(
+            self._ui.fetch_size_value, editable=editable, placeholder="2000"
+        )
+        self._apply_field_style(
+            self._ui.chunk_size_value, editable=editable, placeholder="2000"
+        )
         if self._current and editable:
             pwd = str(self._current.get("dbPassword") or self._current.get("password") or "")
             self._ui.password_value.setText(pwd)
@@ -785,6 +842,8 @@ class EtlConnectionsPage(QWidget):
             database_name=self._ui.database_value.text(),
             username=self._ui.username_value.text(),
             password=self._password_for_api(),
+            fetch_size_text=self._ui.fetch_size_value.text(),
+            chunk_size_text=self._ui.chunk_size_value.text(),
         )
 
     def _clear_detail_status(self) -> None:
@@ -806,12 +865,15 @@ class EtlConnectionsPage(QWidget):
 
     def _detail_editable_fields(self) -> tuple[QWidget, ...]:
         return (
+            self._ui.conn_name_value,
             self._ui.db_type_value,
             self._ui.host_value,
             self._ui.port_value,
             self._ui.database_value,
             self._ui.username_value,
             self._ui.password_value,
+            self._ui.fetch_size_value,
+            self._ui.chunk_size_value,
         )
 
     def _set_detail_pending(self, text: str) -> None:
@@ -907,6 +969,9 @@ class EtlConnectionsPage(QWidget):
         conn_id = _connection_id(self._current)
         if conn_id is None:
             self._set_detail_status("Cannot update: connection ID is missing.", is_error=True)
+            return
+        if not self._ui.conn_name_value.text().strip():
+            self._set_detail_status("Connection name is required.", is_error=True)
             return
 
         def _update(payload: dict[str, Any]) -> dict[str, Any]:

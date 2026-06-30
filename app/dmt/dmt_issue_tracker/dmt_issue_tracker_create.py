@@ -26,6 +26,7 @@ from ui.form_combobox_style import apply_form_combobox_field
 from ui.form_page_styles import (
     FORM_ERROR_LABEL_STYLE,
     FORM_INPUT_STYLE as INPUT_STYLE,
+    FORM_PLAIN_TEXT_STYLE as PLAIN_TEXT_STYLE,
     FORM_LABEL_STYLE as LABEL_STYLE,
     FORM_PAGE_HEADER_STYLESHEET,
     FORM_PRIMARY_BUTTON_STYLESHEET,
@@ -130,7 +131,7 @@ class CreateDmtIssueTrackerPage(QWidget):
 
         self.description_edit = QPlainTextEdit()
         self.description_edit.setPlaceholderText(placeholder_example("Describe the issue…"))
-        self.description_edit.setStyleSheet(INPUT_STYLE)
+        self.description_edit.setStyleSheet(PLAIN_TEXT_STYLE)
         self.description_edit.setFixedHeight(100)
         card_layout.addWidget(
             labeled_field_block(field_caption_label("Description", LABEL_STYLE), self.description_edit)
