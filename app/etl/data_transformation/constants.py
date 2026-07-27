@@ -79,7 +79,7 @@ STEP_SETUP_LABELS: tuple[str, ...] = (
 STEP_SETUP_HINTS: tuple[str, ...] = (
     "Add one or more source tables. Each needs a connection, table, alias, and sequence.",
     "Choose the connection and target table where transformed data will be loaded.",
-    "Map each source column to a target column and set its data type.",
+    "Select a source alias, check the columns to map, then click Save.",
     "If you have multiple sources, define how they are joined. Skip when using one source.",
     "Add transformation rules (trim, replace, etc.) on mapped columns.",
 )

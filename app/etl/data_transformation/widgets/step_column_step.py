@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QFrame,
@@ -15,6 +17,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -58,9 +62,31 @@ def _normalize_data_type(value: str) -> str:
     return text.upper() if text else ""
 
 
+def _parse_sequence_no(text: str) -> tuple[int | None, str]:
+    sequence_text = text.strip() or "1"
+    if not sequence_text.isdigit():
+        return None, "Sequence no. must be a number."
+    return int(sequence_text), ""
+
+
+class _BoundedTableWidget(QTableWidget):
+    """Table that scrolls internally instead of growing the parent layout."""
+
+    def __init__(self, *args: Any, layout_min_height: int = 120, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._layout_min_height = layout_min_height
+        self.setMinimumHeight(layout_min_height)
+        self.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(super().minimumSizeHint().width(), self._layout_min_height)
+
+
 class StepColumnStepWidget(QWidget):
     def __init__(self, service: TransformationDataService, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._service = service
         self._flow_id: int | str | None = None
         self._columns: list[dict[str, Any]] = []
@@ -71,91 +97,40 @@ class StepColumnStepWidget(QWidget):
         self._column_record_id: int | str | None = None
         self._edit_mode = False
         self._loading_selection = False
-        self._pending_source_column: str | None = None
+        self._columns_table_rendering = False
         self._target_linked_to_source = True
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(10)
+        root.setSpacing(8)
 
         card = QFrame()
         card.setObjectName("dtCard")
         card.setStyleSheet(CARD_STYLE)
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(14, 12, 14, 12)
-        card_layout.setSpacing(10)
+        card_layout.setSpacing(8)
 
         title = QLabel("Column mapping")
         title.setStyleSheet(PANEL_TITLE_STYLE)
         card_layout.addWidget(title)
 
         hint = QLabel(
-            "Select a source alias and column. Target column and data type are filled "
-            "automatically from the source column; rename the target if needed."
+            "On the left, pick a source alias and check columns to map. "
+            "On the right, review saved mappings. Click Save to add selected columns."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet(PANEL_HINT_STYLE)
         card_layout.addWidget(hint)
 
-        list_lbl = QLabel("Mapped columns")
-        list_lbl.setStyleSheet(PANEL_TITLE_STYLE)
-        card_layout.addWidget(list_lbl)
-
-        self.columns_table = QTableWidget(0, 5)
-        self.columns_table.setHorizontalHeaderLabels(
-            ["Source alias", "Source column", "Target column", "Data type", "Status"]
+        self._action_section = QWidget()
+        self._action_section.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
-        apply_data_table_appearance(self.columns_table, read_only=True, hide_vertical_header=True)
-        self.columns_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.columns_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.columns_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.columns_table.setMinimumHeight(140)
-        attach_table_copy_shortcut(self.columns_table)
-        card_layout.addWidget(self.columns_table)
-
-        form = QFormLayout()
-        form.setSpacing(10)
-
-        self._alias_cell = QWidget()
-        alias_cell_layout = QHBoxLayout(self._alias_cell)
-        alias_cell_layout.setContentsMargins(0, 0, 0, 0)
-        alias_cell_layout.setSpacing(0)
-        self.source_alias_view_label = QLabel("—")
-        self.source_alias_view_label.setMinimumWidth(280)
-        self.source_alias_view_label.setStyleSheet("color: #0f172a;")
-        self.source_alias_combo = QComboBox()
-        self.source_alias_combo.setMinimumWidth(280)
-        alias_cell_layout.addWidget(self.source_alias_view_label)
-        alias_cell_layout.addWidget(self.source_alias_combo, 1)
-        form.addRow("Source alias", self._alias_cell)
-
-        self._source_column_cell = QWidget()
-        source_column_cell_layout = QHBoxLayout(self._source_column_cell)
-        source_column_cell_layout.setContentsMargins(0, 0, 0, 0)
-        source_column_cell_layout.setSpacing(0)
-        self.source_column_view_label = QLabel("—")
-        self.source_column_view_label.setMinimumWidth(280)
-        self.source_column_view_label.setStyleSheet("color: #0f172a;")
-        self.source_column_combo = QComboBox()
-        self.source_column_combo.setMinimumWidth(280)
-        self.source_column_combo.setPlaceholderText("Select source column")
-        source_column_cell_layout.addWidget(self.source_column_view_label)
-        source_column_cell_layout.addWidget(self.source_column_combo, 1)
-        form.addRow("Source column", self._source_column_cell)
-
-        self.target_column_input = QLineEdit()
-        self.target_column_input.setPlaceholderText("Defaults to source column name")
-        self.target_column_input.setMinimumWidth(280)
-        form.addRow("Target column", self.target_column_input)
-
-        self.data_type_input = QLineEdit()
-        self.data_type_input.setPlaceholderText("e.g. VARCHAR")
-        form.addRow("Data type", self.data_type_input)
-
-        self.status_input = QLineEdit("ACTIVE")
-        form.addRow("Status", self.status_input)
-
-        card_layout.addLayout(form)
+        action_section_layout = QVBoxLayout(self._action_section)
+        action_section_layout.setContentsMargins(0, 0, 0, 0)
+        action_section_layout.setSpacing(6)
 
         action_row = QHBoxLayout()
         action_row.addStretch()
@@ -171,25 +146,142 @@ class StepColumnStepWidget(QWidget):
         action_row.addWidget(self.delete_all_btn)
         action_row.addWidget(self.save_btn)
         action_row.addWidget(self.edit_btn)
-        card_layout.addLayout(action_row)
+        action_section_layout.addLayout(action_row)
 
         self._success_label = QLabel("")
         self._success_label.setWordWrap(True)
         self._success_label.setStyleSheet("color: #15803d;")
         self._success_label.setVisible(False)
-        card_layout.addWidget(self._success_label)
+        action_section_layout.addWidget(self._success_label)
 
         self._error_label = QLabel("")
         self._error_label.setWordWrap(True)
         self._error_label.setStyleSheet(FORM_ERROR_LABEL_STYLE)
         self._error_label.setVisible(False)
-        card_layout.addWidget(self._error_label)
+        action_section_layout.addWidget(self._error_label)
+        card_layout.addWidget(self._action_section)
+
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.setChildrenCollapsible(False)
+
+        self._bulk_section = QFrame()
+        self._bulk_section.setFrameShape(QFrame.Shape.StyledPanel)
+        self._bulk_section.setStyleSheet(
+            "QFrame { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; }"
+        )
+        self._bulk_section.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        bulk_layout = QVBoxLayout(self._bulk_section)
+        bulk_layout.setContentsMargins(10, 10, 10, 10)
+        bulk_layout.setSpacing(6)
+
+        left_title = QLabel("Source columns")
+        left_title.setStyleSheet(PANEL_TITLE_STYLE)
+        bulk_layout.addWidget(left_title)
+
+        alias_row = QHBoxLayout()
+        alias_row.addWidget(QLabel("Source alias"))
+        self.source_alias_combo = QComboBox()
+        self.source_alias_combo.setMinimumWidth(180)
+        alias_row.addWidget(self.source_alias_combo, 1)
+        bulk_layout.addLayout(alias_row)
+
+        select_row = QHBoxLayout()
+        self.select_all_checkbox = QCheckBox("Select all")
+        select_row.addWidget(self.select_all_checkbox)
+        select_row.addStretch()
+        bulk_layout.addLayout(select_row)
+
+        self.source_columns_table = _BoundedTableWidget(0, 3, layout_min_height=120)
+        self.source_columns_table.setHorizontalHeaderLabels(["", "Column name", "Data type"])
+        apply_data_table_appearance(
+            self.source_columns_table, read_only=False, hide_vertical_header=True
+        )
+        self.source_columns_table.setColumnWidth(0, 40)
+        self.source_columns_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
+        self.source_columns_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents
+        )
+        attach_table_copy_shortcut(self.source_columns_table)
+        bulk_layout.addWidget(self.source_columns_table, 1)
+
+        self.selection_label = QLabel("0 column(s) selected")
+        self.selection_label.setStyleSheet(PANEL_HINT_STYLE)
+        bulk_layout.addWidget(self.selection_label)
+        split.addWidget(self._bulk_section)
+
+        self._right_panel = QFrame()
+        self._right_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        self._right_panel.setStyleSheet(
+            "QFrame { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 6px; }"
+        )
+        self._right_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        right_layout = QVBoxLayout(self._right_panel)
+        right_layout.setContentsMargins(10, 10, 10, 10)
+        right_layout.setSpacing(6)
+
+        right_title = QLabel("Mapped columns")
+        right_title.setStyleSheet(PANEL_TITLE_STYLE)
+        right_layout.addWidget(right_title)
+
+        self.columns_table = _BoundedTableWidget(0, 5, layout_min_height=120)
+        self.columns_table.setHorizontalHeaderLabels(
+            ["Source alias", "Source column", "Target column", "Data type", "Status"]
+        )
+        apply_data_table_appearance(self.columns_table, read_only=True, hide_vertical_header=True)
+        self.columns_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.columns_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.columns_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        attach_table_copy_shortcut(self.columns_table)
+        right_layout.addWidget(self.columns_table, 1)
+
+        self._detail_section = QWidget()
+        detail_layout = QFormLayout(self._detail_section)
+        detail_layout.setSpacing(10)
+
+        self.source_alias_view_label = QLabel("—")
+        self.source_alias_view_label.setMinimumWidth(200)
+        self.source_alias_view_label.setStyleSheet("color: #0f172a;")
+        detail_layout.addRow("Source alias", self.source_alias_view_label)
+
+        self.source_column_view_label = QLabel("—")
+        self.source_column_view_label.setMinimumWidth(200)
+        self.source_column_view_label.setStyleSheet("color: #0f172a;")
+        detail_layout.addRow("Source column", self.source_column_view_label)
+
+        self.target_column_input = QLineEdit()
+        self.target_column_input.setPlaceholderText("Defaults to source column name")
+        self.target_column_input.setMinimumWidth(200)
+        detail_layout.addRow("Target column", self.target_column_input)
+
+        self.data_type_input = QLineEdit()
+        self.data_type_input.setPlaceholderText("e.g. VARCHAR")
+        detail_layout.addRow("Data type", self.data_type_input)
+
+        self.sequence_input = QLineEdit("1")
+        detail_layout.addRow("Sequence no.", self.sequence_input)
+
+        self.status_input = QLineEdit("ACTIVE")
+        detail_layout.addRow("Status", self.status_input)
+        right_layout.addWidget(self._detail_section)
+        split.addWidget(self._right_panel)
+
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 1)
+        split.setSizes([420, 420])
+        card_layout.addWidget(split, 1)
 
         root.addWidget(card, 1)
 
         self.columns_table.itemSelectionChanged.connect(self._on_row_selected)
         self.source_alias_combo.currentIndexChanged.connect(self._on_source_alias_changed)
-        self.source_column_combo.currentIndexChanged.connect(self._on_source_column_changed)
+        self.source_columns_table.itemChanged.connect(self._on_source_column_item_changed)
+        self.select_all_checkbox.stateChanged.connect(self._on_select_all_columns)
         self.target_column_input.textEdited.connect(self._on_target_column_edited)
         self.new_btn.clicked.connect(self._on_new)
         self.delete_all_btn.clicked.connect(self._on_delete_all)
@@ -208,9 +300,8 @@ class StepColumnStepWidget(QWidget):
         self._column_option_rows = {}
         self._column_record_id = None
         self._edit_mode = False
-        self._pending_source_column = None
         self._populate_source_alias_combo([])
-        self._populate_source_column_combo([])
+        self._populate_source_columns_table([])
         self._clear_form()
         self._refresh_table()
         self._clear_messages()
@@ -219,7 +310,7 @@ class StepColumnStepWidget(QWidget):
     def setup_status(self) -> tuple[str, bool]:
         count = len(self._columns)
         if count == 0:
-            return "No column mappings yet — click New, map columns, then Save.", False
+            return "No column mappings yet — select columns with checkboxes, then Save.", False
         suffix = "s" if count != 1 else ""
         return f"{count} column mapping{suffix} configured.", True
 
@@ -249,6 +340,22 @@ class StepColumnStepWidget(QWidget):
         self._on_new()
         return True, ""
 
+    def _mapped_columns_for_alias(self, alias: str) -> set[str]:
+        mapped: set[str] = set()
+        target_alias = alias.strip()
+        if not target_alias:
+            return mapped
+        for record in self._columns:
+            record_alias = _column_field(record, "sourceAlias", "source_alias", "SOURCE_ALIAS")
+            if not record_alias:
+                record_alias = transformation_source_alias(record)
+            if record_alias.strip() != target_alias:
+                continue
+            source_column = _column_field(record, "sourceColumn", "source_column", "SOURCE_COLUMN")
+            if source_column:
+                mapped.add(source_column)
+        return mapped
+
     def _populate_source_alias_combo(self, alias_entries: list[dict[str, Any]]) -> None:
         current_alias = ""
         current_data = self.source_alias_combo.currentData()
@@ -274,30 +381,35 @@ class StepColumnStepWidget(QWidget):
             return self._alias_entry_by_alias.get(alias.strip())
         return None
 
-    def _populate_source_column_combo(
-        self, options: list[dict[str, Any]], *, selected_column: str | None = None
-    ) -> None:
+    def _populate_source_columns_table(self, options: list[dict[str, Any]], *, alias: str = "") -> None:
         self._column_option_rows = {}
-        self.source_column_combo.blockSignals(True)
-        self.source_column_combo.clear()
-        self.source_column_combo.addItem("Select source column…", "")
-        select_index = 0
-        combo_index = 1
+        mapped = self._mapped_columns_for_alias(alias)
+        self._columns_table_rendering = True
+        self.source_columns_table.blockSignals(True)
+        self.source_columns_table.setRowCount(0)
         for row in options:
             name = _column_option_name(row)
             if not name:
                 continue
             self._column_option_rows[name] = row
-            self.source_column_combo.addItem(name, name)
-            if selected_column and name == selected_column:
-                select_index = combo_index
-            combo_index += 1
-        self.source_column_combo.setCurrentIndex(select_index)
-        self.source_column_combo.blockSignals(False)
-        if select_index > 0:
-            name = self.source_column_combo.currentData()
-            if isinstance(name, str) and name.strip():
-                self._apply_source_column_defaults(name.strip())
+            row_index = self.source_columns_table.rowCount()
+            self.source_columns_table.insertRow(row_index)
+            check = QTableWidgetItem()
+            check.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            check.setCheckState(
+                Qt.CheckState.Checked if name in mapped else Qt.CheckState.Unchecked
+            )
+            self.source_columns_table.setItem(row_index, 0, check)
+            name_item = QTableWidgetItem(name)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.source_columns_table.setItem(row_index, 1, name_item)
+            type_item = QTableWidgetItem(_normalize_data_type(_column_option_type(row)))
+            type_item.setFlags(type_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.source_columns_table.setItem(row_index, 2, type_item)
+        self.source_columns_table.blockSignals(False)
+        self._columns_table_rendering = False
+        self._sync_select_all_checkbox()
+        self._update_selection_label()
 
     def _infer_alias_for_column(self, source_column: str) -> str:
         matches: list[str] = []
@@ -317,7 +429,7 @@ class StepColumnStepWidget(QWidget):
     def _set_source_alias_combo(self, alias: str | None) -> None:
         if not alias:
             self.source_alias_combo.setCurrentIndex(0)
-            self._populate_source_column_combo([])
+            self._populate_source_columns_table([])
             return
         index = self.source_alias_combo.findData(alias.strip())
         if index >= 0:
@@ -325,47 +437,69 @@ class StepColumnStepWidget(QWidget):
             return
         self.source_alias_combo.setCurrentIndex(0)
 
-    def _set_source_column_combo(self, column_name: str | None) -> None:
-        if not column_name:
-            return
-        index = self.source_column_combo.findText(column_name)
-        if index >= 0:
-            self.source_column_combo.setCurrentIndex(index)
-
     def _on_source_alias_changed(self) -> None:
         if self._column_record_id is not None and not self._edit_mode:
             return
         alias = self.source_alias_combo.currentData()
         if not isinstance(alias, str) or not alias.strip():
-            self._populate_source_column_combo([])
+            self._populate_source_columns_table([])
             return
         options = self._columns_by_alias.get(alias.strip(), [])
-        pending = self._pending_source_column
-        self._populate_source_column_combo(options, selected_column=pending)
-        self._pending_source_column = None
+        self._populate_source_columns_table(options, alias=alias.strip())
 
-    def _apply_source_column_defaults(self, column_name: str) -> None:
-        row = self._column_option_rows.get(column_name.strip())
-        data_type = _normalize_data_type(_column_option_type(row)) if isinstance(row, dict) else ""
-        if data_type:
-            self.data_type_input.setText(data_type)
-        if self._target_linked_to_source:
-            self.target_column_input.blockSignals(True)
-            self.target_column_input.setText(column_name.strip())
-            self.target_column_input.blockSignals(False)
+    def _selected_source_columns(self) -> list[str]:
+        selected: list[str] = []
+        for row in range(self.source_columns_table.rowCount()):
+            check = self.source_columns_table.item(row, 0)
+            name_item = self.source_columns_table.item(row, 1)
+            if check and name_item and check.checkState() == Qt.CheckState.Checked:
+                name = name_item.text().strip()
+                if name:
+                    selected.append(name)
+        return selected
+
+    def _update_selection_label(self) -> None:
+        count = len(self._selected_source_columns())
+        suffix = "s" if count != 1 else ""
+        self.selection_label.setText(f"{count} column{suffix} selected")
+
+    def _sync_select_all_checkbox(self) -> None:
+        self.select_all_checkbox.blockSignals(True)
+        row_count = self.source_columns_table.rowCount()
+        if row_count == 0:
+            self.select_all_checkbox.setChecked(False)
+            self.select_all_checkbox.setEnabled(False)
+        else:
+            self.select_all_checkbox.setEnabled(True)
+            all_checked = all(
+                self.source_columns_table.item(row, 0)
+                and self.source_columns_table.item(row, 0).checkState() == Qt.CheckState.Checked
+                for row in range(row_count)
+                if self.source_columns_table.item(row, 0)
+            )
+            self.select_all_checkbox.setChecked(all_checked)
+        self.select_all_checkbox.blockSignals(False)
+
+    def _on_select_all_columns(self, state: int) -> None:
+        checked = Qt.CheckState(state) == Qt.CheckState.Checked
+        self._columns_table_rendering = True
+        for row in range(self.source_columns_table.rowCount()):
+            check_item = self.source_columns_table.item(row, 0)
+            if check_item:
+                check_item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        self._columns_table_rendering = False
+        self._update_selection_label()
+
+    def _on_source_column_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._columns_table_rendering or item.column() != 0:
+            return
+        self._update_selection_label()
+        self._sync_select_all_checkbox()
 
     def _on_target_column_edited(self, _text: str) -> None:
         if self._column_record_id is not None and not self._edit_mode:
             return
         self._target_linked_to_source = False
-
-    def _on_source_column_changed(self) -> None:
-        if self._column_record_id is not None and not self._edit_mode:
-            return
-        column_name = self.source_column_combo.currentData()
-        if not isinstance(column_name, str) or not column_name.strip():
-            return
-        self._apply_source_column_defaults(column_name.strip())
 
     def _refresh_table(self) -> None:
         self._loading_selection = True
@@ -393,6 +527,7 @@ class StepColumnStepWidget(QWidget):
         self.source_column_view_label.setText("—")
         self.target_column_input.clear()
         self.data_type_input.clear()
+        self.sequence_input.setText("1")
         self.status_input.setText("ACTIVE")
 
     def _apply_record(self, record: dict[str, Any]) -> None:
@@ -406,18 +541,16 @@ class StepColumnStepWidget(QWidget):
         source_column = _column_field(record, "sourceColumn", "source_column", "SOURCE_COLUMN")
         if not alias and source_column:
             alias = self._infer_alias_for_column(source_column)
-        self._pending_source_column = source_column or None
-        self._set_source_alias_combo(alias or None)
         self.source_alias_view_label.setText(alias or "—")
-        self._on_source_alias_changed()
-        if source_column:
-            self._set_source_column_combo(source_column)
-            self.source_column_view_label.setText(source_column)
+        self.source_column_view_label.setText(source_column or "—")
         self.target_column_input.setText(
             _column_field(record, "targetColumn", "target_column", "TARGET_COLUMN")
         )
         self.data_type_input.setText(
             _normalize_data_type(_column_field(record, "dataType", "data_type", "DATA_TYPE"))
+        )
+        self.sequence_input.setText(
+            _column_field(record, "sequenceNo", "sequence_no", "SEQUENCE_NO") or "1"
         )
         self.status_input.setText(_column_field(record, "status", "STATUS") or "ACTIVE")
         target_column = _column_field(record, "targetColumn", "target_column", "TARGET_COLUMN")
@@ -428,35 +561,22 @@ class StepColumnStepWidget(QWidget):
     def _refresh_form_mode(self) -> None:
         has_record = self._column_record_id is not None
         view_only = has_record and not self._edit_mode
+        bulk_mode = not has_record
 
-        if view_only:
-            alias_text = str(self.source_alias_combo.currentData() or "").strip()
-            if not alias_text:
-                alias_text = self.source_alias_view_label.text().strip() or "—"
-            self.source_alias_view_label.setText(alias_text)
-            self.source_alias_view_label.setVisible(True)
-            self.source_alias_combo.setVisible(False)
+        self._bulk_section.setEnabled(bulk_mode)
+        self._detail_section.setVisible(has_record)
 
-            column_text = self.source_column_combo.currentText()
-            if self.source_column_combo.currentIndex() <= 0:
-                column_text = self.source_column_view_label.text() or "—"
-            self.source_column_view_label.setText(column_text)
-            self.source_column_view_label.setVisible(True)
-            self.source_column_combo.setVisible(False)
-        else:
-            self.source_alias_view_label.setVisible(False)
-            self.source_alias_combo.setVisible(True)
-            self.source_column_view_label.setVisible(False)
-            self.source_column_combo.setVisible(True)
+        self.source_alias_combo.setEnabled(bulk_mode)
+        self.source_columns_table.setEnabled(bulk_mode)
+        self.select_all_checkbox.setEnabled(bulk_mode and self.source_columns_table.rowCount() > 0)
 
-        self.source_alias_combo.setEnabled(not view_only)
-        self.source_column_combo.setEnabled(not view_only)
         self.target_column_input.setReadOnly(view_only)
         self.data_type_input.setReadOnly(view_only)
+        self.sequence_input.setReadOnly(view_only)
         self.status_input.setReadOnly(view_only)
         self.columns_table.setEnabled(not self._edit_mode)
 
-        self.save_btn.setEnabled((not has_record) or self._edit_mode)
+        self.save_btn.setEnabled(bulk_mode or self._edit_mode)
         self.edit_btn.setEnabled(has_record and not self._edit_mode)
         self.new_btn.setEnabled(True)
         self.delete_all_btn.setEnabled(bool(self._columns))
@@ -464,22 +584,15 @@ class StepColumnStepWidget(QWidget):
     def build_payload(
         self, flow_id: int | str | None, *, for_create: bool
     ) -> tuple[dict[str, Any] | None, str]:
-        entry = self._selected_alias_entry()
-        source_alias = str(entry.get("alias") or "").strip() if isinstance(entry, dict) else ""
-        if not source_alias:
-            current = self.source_alias_combo.currentData()
-            source_alias = current.strip() if isinstance(current, str) else ""
-            if source_alias == "Select source alias…":
-                source_alias = ""
-        column_row = self.source_column_combo.currentData()
-        source_column = column_row.strip() if isinstance(column_row, str) else ""
-        if not source_column:
-            source_column = self.source_column_combo.currentText().strip()
-            if source_column in ("Select source column…", ""):
-                source_column = ""
+        source_alias = self.source_alias_view_label.text().strip()
+        if source_alias == "—":
+            source_alias = ""
+        source_column = self.source_column_view_label.text().strip()
+        if source_column == "—":
+            source_column = ""
         target_column = self.target_column_input.text().strip()
         data_type = self.data_type_input.text().strip()
-        if not source_alias or source_alias == "Select source alias…":
+        if not source_alias:
             return None, "Source alias is required."
         if not source_column:
             return None, "Source column is required."
@@ -487,11 +600,15 @@ class StepColumnStepWidget(QWidget):
             return None, "Target column is required."
         if not data_type:
             return None, "Data type is required."
+        sequence_no, seq_err = _parse_sequence_no(self.sequence_input.text())
+        if sequence_no is None:
+            return None, seq_err
         payload: dict[str, Any] = {
             "sourceAlias": source_alias,
             "sourceColumn": source_column,
             "targetColumn": target_column,
             "dataType": data_type,
+            "sequenceNo": sequence_no,
             "status": self.status_input.text().strip() or "ACTIVE",
         }
         if for_create:
@@ -500,23 +617,80 @@ class StepColumnStepWidget(QWidget):
             payload["flowId"] = int(flow_id) if str(flow_id).isdigit() else flow_id
         return payload, ""
 
-    def create_column(self) -> tuple[bool, str]:
+    def _max_sequence_no(self) -> int:
+        max_seq = 0
+        for record in self._columns:
+            seq_text = _column_field(record, "sequenceNo", "sequence_no", "SEQUENCE_NO")
+            if seq_text.isdigit():
+                max_seq = max(max_seq, int(seq_text))
+        return max_seq
+
+    def _build_bulk_payload(
+        self, flow_id: int | str, alias: str, source_column: str, *, sequence_no: int = 1
+    ) -> dict[str, Any] | None:
+        row = self._column_option_rows.get(source_column.strip())
+        data_type = _normalize_data_type(_column_option_type(row)) if isinstance(row, dict) else ""
+        if not data_type:
+            return None
+        return {
+            "flowId": int(flow_id) if str(flow_id).isdigit() else flow_id,
+            "sourceAlias": alias.strip(),
+            "sourceColumn": source_column.strip(),
+            "targetColumn": source_column.strip(),
+            "dataType": data_type,
+            "sequenceNo": sequence_no,
+            "status": "ACTIVE",
+        }
+
+    def create_columns_bulk(self) -> tuple[bool, str]:
         if self._flow_id is None:
             return False, "Select a flow using Switch Flow first."
         if not self._alias_entries:
             return False, "Configure source tables before adding column mappings."
-        payload, err = self.build_payload(self._flow_id, for_create=True)
-        if payload is None:
-            return False, err or "Column mapping is incomplete."
-        result = self._service.save_transformation_column(payload)
-        if not result.get("success"):
-            return False, str(result.get("message") or "Failed to save column mapping.")
+        alias_data = self.source_alias_combo.currentData()
+        alias = alias_data.strip() if isinstance(alias_data, str) else ""
+        if not alias or alias == "Select source alias…":
+            return False, "Source alias is required."
+        selected = self._selected_source_columns()
+        if not selected:
+            return False, "Select at least one column to map."
+        already_mapped = self._mapped_columns_for_alias(alias)
+        to_create = [name for name in selected if name not in already_mapped]
+        if not to_create:
+            return False, "All selected columns are already mapped for this alias."
+        created = 0
+        errors: list[str] = []
+        sequence_no = max(self._max_sequence_no() + 1, 1)
+        for source_column in to_create:
+            payload = self._build_bulk_payload(
+                self._flow_id, alias, source_column, sequence_no=sequence_no
+            )
+            sequence_no += 1
+            if payload is None:
+                errors.append(f"{source_column}: data type is missing.")
+                continue
+            result = self._service.save_transformation_column(payload)
+            if result.get("success"):
+                created += 1
+            else:
+                errors.append(
+                    f"{source_column}: {result.get('message') or 'Failed to save.'}"
+                )
+        if created == 0:
+            return False, errors[0] if errors else "Failed to save column mappings."
         if self._flow_id is not None:
             ok, msg = self.load_columns(self._flow_id)
             if not ok:
                 return False, msg
-        self._show_success(str(result.get("message") or "Column mapping saved."))
+        if errors:
+            self._show_success(f"{created} column mapping(s) saved. Some failed: {'; '.join(errors)}")
+            return True, ""
+        suffix = "s" if created != 1 else ""
+        self._show_success(f"{created} column mapping{suffix} saved.")
         return True, ""
+
+    def create_column(self) -> tuple[bool, str]:
+        return self.create_columns_bulk()
 
     def update_column(self) -> tuple[bool, str]:
         if self._flow_id is None:
@@ -544,7 +718,7 @@ class StepColumnStepWidget(QWidget):
             return self.update_column()
         if self._column_record_id is not None and not self._edit_mode:
             return True, ""
-        return self.create_column()
+        return self.create_columns_bulk()
 
     def _select_row_by_id(self, record_id: int | str | None) -> None:
         if record_id is None:
@@ -578,12 +752,14 @@ class StepColumnStepWidget(QWidget):
 
     def _on_new(self) -> None:
         self._column_record_id = None
-        self._edit_mode = True
-        self._pending_source_column = None
+        self._edit_mode = False
         self._loading_selection = True
         self.columns_table.clearSelection()
         self._loading_selection = False
         self._clear_form()
+        if self.source_alias_combo.count() > 1:
+            self.source_alias_combo.setCurrentIndex(1)
+            self._on_source_alias_changed()
         self._clear_messages()
         self._refresh_form_mode()
 
@@ -596,13 +772,6 @@ class StepColumnStepWidget(QWidget):
         if source_column == "—":
             source_column = ""
         self._target_linked_to_source = not target_column or target_column == source_column
-        self._pending_source_column = source_column or None
-        alias = self.source_alias_view_label.text().strip()
-        if alias and alias != "—":
-            self._set_source_alias_combo(alias)
-            self._on_source_alias_changed()
-            if self._pending_source_column:
-                self._set_source_column_combo(self._pending_source_column)
         self._clear_messages()
         self._refresh_form_mode()
 

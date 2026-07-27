@@ -275,7 +275,7 @@ class ConnectionsPageWidget(QWidget):
             0,
         )
         self.db_type_value = QComboBox()
-        self.db_type_value.addItems(["ORACLE", "MYSQL", "POSTGRES"])
+        self.db_type_value.addItems(["ORACLE", "MYSQL", "POSTGRES", "SQLSERVER"])
         apply_form_combobox_field(self.db_type_value, height_px=field_h, min_width=440)
         self.db_type_value.setEnabled(False)
         conn_grid.addWidget(

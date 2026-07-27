@@ -294,7 +294,7 @@ class AddConnectionDialog(QDialog):
 
         self._db_type = QComboBox()
 
-        self._db_type.addItems(["ORACLE", "MYSQL", "POSTGRES"])
+        self._db_type.addItems(["ORACLE", "MYSQL", "POSTGRES", "SQLSERVER"])
 
         apply_form_combobox_field(self._db_type, height_px=fh, min_width=360)
 
