@@ -10,7 +10,7 @@ when both use the same ``height_px`` (e.g. :data:`MODAL_FIELD_HEIGHT_PX` or
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, QSize, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -20,27 +20,28 @@ from PySide6.QtWidgets import (
 )
 
 from ui.form_page_styles import APP_FONT_SIZE_PX
+from ui.theme import Theme
 
 _fs = APP_FONT_SIZE_PX
 # Compact popup rows (native dropdown + searchable completer list).
 FORM_COMBO_LIST_ROW_HEIGHT_PX = 20
 
 # Shared list / menu row hover (combo popups, QCompleter popups, QMenu).
-FORM_LIST_ITEM_HOVER_BG = "#dbeafe"
-FORM_LIST_ITEM_HOVER_FG = "#1e40af"
-FORM_LIST_ITEM_SELECTED_BG = "#eef2ff"
-FORM_LIST_ITEM_SELECTED_FG = "#4338ca"
+FORM_LIST_ITEM_HOVER_BG = Theme.ACCENT_SOFT
+FORM_LIST_ITEM_HOVER_FG = Theme.BTN_PRIMARY_PRESSED
+FORM_LIST_ITEM_SELECTED_BG = Theme.ACCENT_SOFT
+FORM_LIST_ITEM_SELECTED_FG = Theme.BTN_PRIMARY_HOVER
 
 # Shared popup list chrome (native combo dropdown and QCompleter popup).
 FORM_COMBO_POPUP_LIST_STYLE = f"""
     QListView {{
-        border: 1px solid #e2e8f0;
+        border: 1px solid {Theme.BORDER_DEFAULT};
         outline: 0;
-        background: #ffffff;
+        background: {Theme.BG_WHITE};
         border-radius: 4px;
         font-size: {_fs}px;
         font-weight: 400;
-        color: #0f172a;
+        color: {Theme.TEXT_PRIMARY};
     }}
     QListView::item {{
         margin: 0px;
@@ -62,24 +63,24 @@ FORM_COMBOBOX_STYLE = f"""
     QComboBox {{
         font-size: {_fs}px;
         font-weight: 400;
-        color: #0f172a;
+        color: {Theme.TEXT_PRIMARY};
         margin: 0px;
         padding: 2px 22px 2px 8px;
-        border: 1px solid #e2e8f0;
+        border: 1px solid {Theme.BORDER_INPUT};
         border-radius: 4px;
-        background-color: #ffffff;
+        background-color: {Theme.BG_WHITE};
         outline: none;
     }}
     QComboBox:disabled {{
-        color: #64748b;
-        background-color: #f8fafc;
-        border: 1px solid #e2e8f0;
+        color: {Theme.TEXT_SECONDARY};
+        background-color: {Theme.BG_PAGE_ALT};
+        border: 1px solid {Theme.BORDER_DEFAULT};
     }}
     QComboBox:hover:enabled {{
-        border-color: #94a3b8;
+        border-color: {Theme.FOCUS_RING};
     }}
     QComboBox:focus:enabled {{
-        border: 1px solid #334155;
+        border: 1px solid {Theme.FOCUS_RING};
     }}
     QComboBox::drop-down {{
         subcontrol-origin: padding;
@@ -90,14 +91,14 @@ FORM_COMBOBOX_STYLE = f"""
         width: 18px;
     }}
     QComboBox QAbstractItemView {{
-        border: 1px solid #e2e8f0;
+        border: 1px solid {Theme.BORDER_DEFAULT};
         outline: 0;
-        background: #ffffff;
+        background: {Theme.BG_WHITE};
         border-radius: 4px;
         margin: 0px;
         padding: 0px;
-        selection-background-color: #e2e8f0;
-        selection-color: #0f172a;
+        selection-background-color: {Theme.ACCENT_SOFT};
+        selection-color: {Theme.TEXT_PRIMARY};
         font-size: {_fs}px;
         font-weight: 400;
     }}
@@ -122,12 +123,12 @@ FORM_COMBOBOX_READONLY_STYLE = f"""
     QComboBox {{
         font-size: {_fs}px;
         font-weight: 400;
-        color: #64748b;
+        color: {Theme.TEXT_SECONDARY};
         margin: 0px;
         padding: 2px 8px;
-        border: 1px solid #e2e8f0;
+        border: 1px solid {Theme.BORDER_DEFAULT};
         border-radius: 4px;
-        background-color: #f1f5f9;
+        background-color: {Theme.BG_PAGE_ALT};
         outline: none;
     }}
     QComboBox::drop-down {{
@@ -330,6 +331,38 @@ def install_combo_ignore_wheel_when_closed(combo: QComboBox) -> None:
     if le is not None:
         le.installEventFilter(filt)
     setattr(combo, attr, filt)
+
+
+def install_combo_popup_below_field(combo: QComboBox) -> None:
+    """Anchor the list under the field.
+
+    Some platform styles center the popup on the current item, so picking a lower entry
+    shifts the list upward and covers the caption above the field.
+    """
+    attr = "_etl_combo_popup_below"
+    if getattr(combo, attr, False):
+        return
+    open_list = combo.showPopup
+
+    def show_popup() -> None:
+        open_list()
+        view = combo.view()
+        if view is None:
+            return
+        popup = view.parentWidget() or view
+        popup.resize(max(combo.width(), popup.width()), popup.height())
+        target = combo.mapToGlobal(QPoint(0, combo.height()))
+        screen = combo.screen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            if target.y() + popup.height() > available.bottom():
+                above_y = combo.mapToGlobal(QPoint(0, 0)).y() - popup.height()
+                if above_y >= available.top():
+                    target.setY(above_y)
+        popup.move(target)
+
+    combo.showPopup = show_popup  # type: ignore[method-assign]
+    setattr(combo, attr, True)
 
 
 def apply_form_combobox_field(

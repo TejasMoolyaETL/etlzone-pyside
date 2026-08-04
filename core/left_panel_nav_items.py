@@ -82,7 +82,14 @@ ETL_SUB_OPTIONS = [
     "Job Logs",
 ]
 
-# Data Transformation (below ETL)
+# Excel (below ETL)
+EXCEL_SUB_OPTIONS = [
+    "Import State",
+    "Upload File",
+    "Extract File",
+]
+
+# Data Transformation (below Excel)
 DATA_TRANSFORMATION_SUB_OPTIONS = [
     "DT: Object",
     "DT: Job",

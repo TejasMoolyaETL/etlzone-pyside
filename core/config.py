@@ -558,6 +558,40 @@ ETL_CONNECTIONS_REMOVE_BY_ID_PREFIX = os.getenv(
     "ETL_CONNECTIONS_REMOVE_BY_ID_PREFIX", "api/etl/connection/remove-by-id"
 ).strip().lstrip("/").rstrip("/")
 
+# Excel / file imports (``POST /imports``).
+IMPORTS_CREATE_PATH = os.getenv("ETL_IMPORTS_CREATE_PATH", "imports").strip().lstrip("/").rstrip("/")
+IMPORTS_GET_ALL_SESSION_ID_PATH = os.getenv(
+    "ETL_IMPORTS_GET_ALL_SESSION_ID_PATH", "imports/get-all-sessionId"
+).strip().lstrip("/").rstrip("/")
+# POST multipart file: ``imports/{sessionId}/upload``
+IMPORTS_UPLOAD_PATH_PREFIX = os.getenv(
+    "ETL_IMPORTS_UPLOAD_PATH_PREFIX", "imports"
+).strip().lstrip("/").rstrip("/")
+# POST analyze uploaded file: ``imports/{sessionId}/analyze``
+IMPORTS_ANALYZE_PATH_PREFIX = os.getenv(
+    "ETL_IMPORTS_ANALYZE_PATH_PREFIX", "imports"
+).strip().lstrip("/").rstrip("/")
+# POST analyze if already uploaded: ``imports/{sessionId}/analyze-if-present``
+IMPORTS_ANALYZE_IF_PRESENT_PATH_PREFIX = os.getenv(
+    "ETL_IMPORTS_ANALYZE_IF_PRESENT_PATH_PREFIX", "imports"
+).strip().lstrip("/").rstrip("/")
+# POST save column mapping: ``imports/{sessionId}/mapping``
+IMPORTS_MAPPING_PATH_PREFIX = os.getenv(
+    "ETL_IMPORTS_MAPPING_PATH_PREFIX", "imports"
+).strip().lstrip("/").rstrip("/")
+# GET mapped import sheets for Extract File: ``imports/get-all-import-sheet``
+IMPORTS_GET_ALL_IMPORT_SHEET_PATH = os.getenv(
+    "ETL_IMPORTS_GET_ALL_IMPORT_SHEET_PATH", "imports/get-all-import-sheet"
+).strip().lstrip("/").rstrip("/")
+# GET sheets for one session: ``imports/get-import-sheet-by-uuid/{sessionId}``
+IMPORTS_GET_IMPORT_SHEET_BY_UUID_PREFIX = os.getenv(
+    "ETL_IMPORTS_GET_IMPORT_SHEET_BY_UUID_PREFIX", "imports/get-import-sheet-by-uuid"
+).strip().lstrip("/").rstrip("/")
+# POST extract/execute import sheet: ``imports/{sessionId}/execute``
+IMPORTS_EXECUTE_PATH_PREFIX = os.getenv(
+    "ETL_IMPORTS_EXECUTE_PATH_PREFIX", "imports"
+).strip().lstrip("/").rstrip("/")
+
 # ETL — import metadata (connection id in path / body; table name as query where noted).
 ETL_METADATA_SCAN_TABLES_PATH_PREFIX = os.getenv(
     "ETL_METADATA_SCAN_TABLES_PATH_PREFIX",

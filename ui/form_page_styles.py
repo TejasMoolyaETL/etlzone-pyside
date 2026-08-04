@@ -22,15 +22,15 @@ and :data:`LIST_PAGE_HEADER_HEIGHT_PX`.
 
 from __future__ import annotations
 
-from ui.theme import Theme
+from ui.theme import IS_LEGACY_THEME, Theme
 
-APP_FONT_SIZE_PX = 10
+APP_FONT_SIZE_PX = 10 if IS_LEGACY_THEME else 11
 
 # Menu bar dropdowns and shared QMenu styling (see :mod:`ui.styles`).
 SUBMENU_FONT_SIZE_PX = 13
 
 # Full-page create/view forms: one row height for QLineEdit and QComboBox (10px text + padding + border).
-FORM_SINGLELINE_FIELD_HEIGHT_PX = 28
+FORM_SINGLELINE_FIELD_HEIGHT_PX = 28 if IS_LEGACY_THEME else 34
 
 # QLineEdit / QPlainTextEdit placeholder (same body size as inputs; muted color).
 INPUT_PLACEHOLDER_COLOR = "#94a3b8"
@@ -108,19 +108,22 @@ MODAL_FIELD_HEIGHT_PX = 24
 FORM_LABEL_FIELD_SPACING_PX = 4
 
 FORM_LABEL_STYLE = (
-    f"color: #64748b; font-size: {APP_FONT_SIZE_PX}px; font-weight: 600; "
-    "letter-spacing: 0.5px; text-transform: uppercase;"
+    f"color: {Theme.TEXT_SECONDARY}; font-size: {APP_FONT_SIZE_PX}px; "
+    f"font-weight: {600 if IS_LEGACY_THEME else 700}; "
+    f"letter-spacing: {0.5 if IS_LEGACY_THEME else 0.2}px;"
+    + ("" if IS_LEGACY_THEME else " text-transform: none;")
 )
 
 FORM_INPUT_STYLE = (
-    f"font-size: {APP_FONT_SIZE_PX}px; padding: 2px 8px; border: 1px solid #e2e8f0; "
-    "border-radius: 4px; background-color: #ffffff;"
+    f"font-size: {APP_FONT_SIZE_PX}px; padding: 2px 10px; border: 1px solid {Theme.BORDER_INPUT}; "
+    f"border-radius: {4 if IS_LEGACY_THEME else 6}px; background-color: {Theme.BG_WHITE};"
     + LINEEDIT_PLACEHOLDER_SUBSTYLE
 )
 
 FORM_READONLY_INPUT_STYLE = (
-    f"font-size: {APP_FONT_SIZE_PX}px; padding: 2px 8px; border: 1px solid #e2e8f0; "
-    "border-radius: 4px; background-color: #f1f5f9; color: #64748b;"
+    f"font-size: {APP_FONT_SIZE_PX}px; padding: 2px 10px; border: 1px solid {Theme.BORDER_DEFAULT}; "
+    f"border-radius: {4 if IS_LEGACY_THEME else 6}px; background-color: {Theme.BG_PAGE_ALT}; "
+    f"color: {Theme.TEXT_SECONDARY};"
     + LINEEDIT_PLACEHOLDER_SUBSTYLE
 )
 
@@ -132,10 +135,10 @@ FORM_ERROR_LABEL_STYLE = (
 
 DATA_TABLE_STYLESHEET = f"""
             QTableWidget {{
-                background: #ffffff;
-                border: 1px solid #e2e8f0;
-                border-radius: 8px;
-                gridline-color: #e2e8f0;
+                background: {Theme.BG_WHITE};
+                border: 1px solid {Theme.BORDER_DEFAULT};
+                border-radius: {8 if IS_LEGACY_THEME else 10}px;
+                gridline-color: {Theme.BORDER_DEFAULT};
                 font-size: {APP_FONT_SIZE_PX}px;
             }}
             QTableWidget::item {{
@@ -145,12 +148,12 @@ DATA_TABLE_STYLESHEET = f"""
                 font-size: {APP_FONT_SIZE_PX}px;
             }}
             QTableWidget::item:selected {{
-                background-color: #e0e7ff;
-                color: #0f172a;
+                background-color: {Theme.ACCENT_SOFT};
+                color: {Theme.TEXT_PRIMARY};
             }}
             QTableWidget::item:selected:active {{
-                background-color: #e0e7ff;
-                color: #0f172a;
+                background-color: {Theme.ACCENT_SOFT};
+                color: {Theme.TEXT_PRIMARY};
             }}
             QHeaderView::section {{
                 background: #f8fafc;
@@ -174,7 +177,7 @@ FILTER_EDIT_STYLE = (
 
 LIST_PAGE_HEADER_TITLE_FONT_PX = 16
 LIST_PAGE_HEADER_BUTTON_FONT_PX = 12
-LIST_PAGE_HEADER_HEIGHT_PX = 52
+LIST_PAGE_HEADER_HEIGHT_PX = 52 if IS_LEGACY_THEME else 56
 LIST_PAGE_HEADER_BUTTON_PADDING_V_PX = 5
 LIST_PAGE_HEADER_BUTTON_PADDING_H_PX = 16
 LIST_PAGE_HEADER_LAYOUT_MARGINS = (16, 0, 16, 0)
@@ -190,10 +193,10 @@ _MODAL_PRIMARY_DISABLED = (
     f"border: 1px solid {Theme.BORDER_DEFAULT}; }}"
 )
 MODAL_DIALOG_PRIMARY_BUTTON_STYLESHEET = (
-    f"QPushButton {{ background: #0f172a; color: white; border: none; "
+    f"QPushButton {{ background: {Theme.BTN_PRIMARY_BG}; color: white; border: none; "
     f"border-radius: 6px; padding: {_MDL_BTN_PV}px {_MDL_BTN_PH}px; font-size: {_MDL_BTN_FS}px; font-weight: 500; }}"
-    "QPushButton:hover:!disabled { background: #1e293b; }"
-    "QPushButton:pressed:!disabled { background: #020617; }"
+    f"QPushButton:hover:!disabled {{ background: {Theme.BTN_PRIMARY_HOVER}; }}"
+    f"QPushButton:pressed:!disabled {{ background: {Theme.BTN_PRIMARY_PRESSED}; }}"
     + _MODAL_PRIMARY_DISABLED
 )
 _MODAL_SECONDARY_DISABLED = (

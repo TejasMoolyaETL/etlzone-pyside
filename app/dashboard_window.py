@@ -68,6 +68,7 @@ from app.etl.import_metadata import EtlImportMetadataPage
 from app.etl.extraction import EtlExtractionPage
 from app.etl.job_logs import EtlJobLogsPage
 from app.etl.data_transformation import DataTransformationPage
+from app.etl.excel import ExcelPage, ExtractFilePage, UploadFilePage
 from app.user_profile.settings_page import SettingsPage
 from app.user_management.users.user_list import UsersPage
 from app.user_management.user_timepass.user_reset_password import ResetUserPasswordPage
@@ -439,6 +440,12 @@ class DashboardWindow(QMainWindow):
         self.stack.addWidget(self.etl_extraction_page)
         self.etl_job_logs_page = EtlJobLogsPage(monitor_ws=self._etl_monitor_ws)
         self.stack.addWidget(self.etl_job_logs_page)
+        self.etl_excel_page = ExcelPage()
+        self.stack.addWidget(self.etl_excel_page)
+        self.etl_upload_file_page = UploadFilePage()
+        self.stack.addWidget(self.etl_upload_file_page)
+        self.etl_extract_file_page = ExtractFilePage()
+        self.stack.addWidget(self.etl_extract_file_page)
         self.etl_data_transformation_page = DataTransformationPage()
         self.stack.addWidget(self.etl_data_transformation_page)
         self._etl_pages: dict[str, QWidget] = {
@@ -447,6 +454,11 @@ class DashboardWindow(QMainWindow):
             "Import Metadata": self.etl_import_metadata_page,
             "Extraction": self.etl_extraction_page,
             "Job Logs": self.etl_job_logs_page,
+        }
+        self._excel_pages: dict[str, QWidget] = {
+            "Import State": self.etl_excel_page,
+            "Upload File": self.etl_upload_file_page,
+            "Extract File": self.etl_extract_file_page,
         }
         self._data_transformation_pages: dict[str, QWidget] = {
             "DT: Object": self.etl_data_transformation_page,
@@ -1163,6 +1175,13 @@ class DashboardWindow(QMainWindow):
             w = self._etl_pages[item_name]
             self.stack.setCurrentWidget(w)
             # ETL list pages reload in ``showEvent``; avoid duplicate GETs here.
+            self.left_panel.set_current_item(item_name)
+        elif item_name in self._excel_pages:
+            w = self._excel_pages[item_name]
+            self.stack.setCurrentWidget(w)
+            go_to = getattr(w, "go_to_nav_item", None)
+            if callable(go_to):
+                go_to(item_name)
             self.left_panel.set_current_item(item_name)
         elif item_name in self._data_transformation_pages:
             self.stack.setCurrentWidget(self.etl_data_transformation_page)

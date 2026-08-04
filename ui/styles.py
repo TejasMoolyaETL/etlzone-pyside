@@ -22,7 +22,7 @@ from ui.form_combobox_style import (
     FORM_LIST_ITEM_SELECTED_FG,
     install_global_completer_popup_styling,
 )
-from ui.theme import Theme, panel_frame_stylesheet
+from ui.theme import IS_LEGACY_THEME, Theme, panel_frame_stylesheet
 
 # —— Backward-compatible aliases (delegate to Theme) ——
 COLOR_ERROR = Theme.ERROR
@@ -33,7 +33,7 @@ COLOR_ACTIVITY_BG = Theme.BG_ACTIVITY
 COLOR_ACTIVITY_BORDER = Theme.BORDER_ACTIVITY
 
 TITLE_STYLE = (
-    f"font-size: 28px; font-weight: 700; color: {Theme.TEXT_TITLE};"
+    f"font-size: {28 if IS_LEGACY_THEME else 24}px; font-weight: 700; color: {Theme.TEXT_TITLE};"
 )
 SUBTITLE_STYLE = f"font-size: 14px; color: {Theme.TEXT_SUBTITLE};"
 
@@ -120,6 +120,7 @@ def global_application_stylesheet() -> str:
     return f"""
     QWidget {{
         color: {t.TEXT_PRIMARY};
+        font-family: "Segoe UI";
     }}
     QMainWindow {{
         background-color: {t.BG_APP};
@@ -154,6 +155,48 @@ def global_application_stylesheet() -> str:
     QHeaderView::section {{
         background-color: #f8fafc;
         color: #475569;
+    }}
+    QScrollBar:vertical {{
+        background: transparent;
+        width: 10px;
+        margin: 2px;
+    }}
+    QScrollBar::handle:vertical {{
+        background: #cbd5e1;
+        min-height: 32px;
+        border-radius: 4px;
+    }}
+    QScrollBar::handle:vertical:hover {{
+        background: #94a3b8;
+    }}
+    QScrollBar::add-line:vertical,
+    QScrollBar::sub-line:vertical,
+    QScrollBar::add-page:vertical,
+    QScrollBar::sub-page:vertical {{
+        background: transparent;
+        border: none;
+        height: 0px;
+    }}
+    QScrollBar:horizontal {{
+        background: transparent;
+        height: 10px;
+        margin: 2px;
+    }}
+    QScrollBar::handle:horizontal {{
+        background: #cbd5e1;
+        min-width: 32px;
+        border-radius: 4px;
+    }}
+    QScrollBar::handle:horizontal:hover {{
+        background: #94a3b8;
+    }}
+    QScrollBar::add-line:horizontal,
+    QScrollBar::sub-line:horizontal,
+    QScrollBar::add-page:horizontal,
+    QScrollBar::sub-page:horizontal {{
+        background: transparent;
+        border: none;
+        width: 0px;
     }}
     QToolTip {{
         background-color: {t.BG_WHITE};
@@ -210,8 +253,15 @@ def global_application_stylesheet() -> str:
     QComboBox {{
         background-color: {t.BG_WHITE};
         color: {t.TEXT_INPUT};
-        border: 1px solid {t.BORDER_DEFAULT};
+        border: 1px solid {t.BORDER_INPUT};
+        border-radius: 6px;
         font-size: {APP_FONT_SIZE_PX}px;
+    }}
+    QLineEdit:focus,
+    QTextEdit:focus,
+    QPlainTextEdit:focus,
+    QComboBox:focus {{
+        border: 1px solid {t.FOCUS_RING};
     }}
     QComboBox QAbstractItemView {{
         background-color: {t.BG_WHITE};
@@ -221,6 +271,10 @@ def global_application_stylesheet() -> str:
     }}
     QPushButton {{
         color: {t.TEXT_PRIMARY};
+        outline: none;
+    }}
+    QPushButton:focus {{
+        outline: none;
     }}
     QLineEdit::placeholder {{
         color: {INPUT_PLACEHOLDER_COLOR};

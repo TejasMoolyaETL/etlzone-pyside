@@ -143,6 +143,15 @@ from core.config import (
     ETL_CONNECTIONS_SAVE_PATH,
     ETL_CONNECTIONS_UPDATE_BY_ID_PREFIX,
     ETL_CONNECTIONS_REMOVE_BY_ID_PREFIX,
+    IMPORTS_CREATE_PATH,
+    IMPORTS_GET_ALL_SESSION_ID_PATH,
+    IMPORTS_UPLOAD_PATH_PREFIX,
+    IMPORTS_ANALYZE_PATH_PREFIX,
+    IMPORTS_ANALYZE_IF_PRESENT_PATH_PREFIX,
+    IMPORTS_MAPPING_PATH_PREFIX,
+    IMPORTS_GET_ALL_IMPORT_SHEET_PATH,
+    IMPORTS_GET_IMPORT_SHEET_BY_UUID_PREFIX,
+    IMPORTS_EXECUTE_PATH_PREFIX,
     ETL_METADATA_SCAN_TABLES_PATH_PREFIX,
     ETL_SCAN_CONNECTION_SOURCE_TABLES_PATH_PREFIX,
     ETL_METADATA_SCAN_FIELDS_PATH_PREFIX,
@@ -12190,6 +12199,1352 @@ def _connections_auth_headers(token: str | None) -> dict[str, str] | None:
     if not token or not str(token).strip():
         return None
     return {"Authorization": f"Bearer {token}"}
+
+
+def api_create_import(
+    name: str,
+    source_type: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """POST create an import job (default: ``imports``).
+
+    Body: ``name``, ``sourceType`` (e.g. EXCEL, CSV, JSON).
+    """
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    body: dict[str, Any] = {
+        "name": (name or "").strip(),
+        "sourceType": (source_type or "").strip().upper(),
+    }
+    if not body["name"]:
+        return {"success": False, "message": "Name is required."}
+    if not body["sourceType"]:
+        return {"success": False, "message": "Type is required."}
+    url = _api_url(IMPORTS_CREATE_PATH)
+    try:
+        payload = _http_post_json(url, body, timeout_s=15.0, extra_headers=headers)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Failed to create import."
+            )
+            if rej is not None:
+                return rej
+            ok = (
+                payload.get("success") is True
+                or payload.get("status") == "SUCCESS"
+                or "id" in payload
+                or "importId" in payload
+            )
+            if ok or payload == {}:
+                return {
+                    "success": True,
+                    "message": payload.get("message", "Import created.")
+                    if isinstance(payload, dict)
+                    else "Import created.",
+                    "data": payload,
+                }
+            # Some backends return the created entity without a success flag.
+            if payload.get("name") is not None or payload.get("sourceType") is not None:
+                return {
+                    "success": True,
+                    "message": payload.get("message", "Import created."),
+                    "data": payload,
+                }
+        return {
+            "success": False,
+            "message": _extract_error_message(payload, "Failed to create import."),
+        }
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Import failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def _parse_import_sessions(payload: Any) -> list[dict[str, str]]:
+    """Normalize get-all-sessionId responses into ``{sessionId, sessionName}`` rows."""
+    raw: Any = payload
+    if isinstance(payload, dict):
+        for key in (
+            "data",
+            "sessionIds",
+            "sessionIdList",
+            "session_ids",
+            "result",
+            "content",
+        ):
+            if key in payload and payload.get(key) is not None:
+                raw = payload.get(key)
+                break
+
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(*, session_id: Any, session_name: Any) -> None:
+        sid = str(session_id or "").strip()
+        name = str(session_name or "").strip()
+        if not sid and not name:
+            return
+        key = sid or name
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(
+            {
+                "sessionId": sid or name,
+                "sessionName": name or sid,
+            }
+        )
+
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                sid = None
+                for key in ("sessionId", "sessionID", "session_id", "id"):
+                    if key in item and item.get(key) is not None:
+                        sid = item.get(key)
+                        break
+                name = None
+                for key in ("sessionName", "session_name", "name"):
+                    if key in item and item.get(key) is not None:
+                        name = item.get(key)
+                        break
+                if sid is None and name is None and len(item) == 1:
+                    only = next(iter(item.values()))
+                    _add(session_id=only, session_name=only)
+                else:
+                    _add(session_id=sid, session_name=name)
+            else:
+                _add(session_id=item, session_name=item)
+    elif isinstance(raw, (str, int, float)):
+        _add(session_id=raw, session_name=raw)
+    return out
+
+
+def api_get_all_import_session_ids(token: str | None = None) -> dict[str, Any]:
+    """GET import sessions (default: ``imports/get-all-sessionId``).
+
+    Uses the same Bearer token pattern as :func:`api_get_all_connections`.
+    Returns ``data`` as a list of ``{sessionId, sessionName}`` dicts.
+    """
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {
+            "success": False,
+            "message": "Session expired. Please log in again.",
+            "data": [],
+        }
+    url = _api_url(IMPORTS_GET_ALL_SESSION_ID_PATH)
+    try:
+        payload = _http_get_json(url, headers=headers, timeout_s=15.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Failed to load session IDs.", data=[]
+            )
+            if rej is not None:
+                return rej
+        sessions = _parse_import_sessions(payload)
+        return {
+            "success": True,
+            "message": "Session IDs loaded.",
+            "data": sessions,
+        }
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Failed to load session IDs ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+            "data": [],
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {
+            "success": False,
+            "message": "Backend not reachable.",
+            "data": [],
+        }
+
+
+def api_upload_import_file(
+    session_id: str,
+    file_path: str,
+    *,
+    token: str | None = None,
+    field_name: str = "file",
+) -> dict[str, Any]:
+    """POST multipart file to ``imports/{sessionId}/upload``."""
+    tk = _normalize_bearer_token(token)
+    if not tk:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    sid = str(session_id or "").strip()
+    if not sid:
+        return {"success": False, "message": "Select a session before uploading."}
+    path = Path(file_path)
+    if not path.is_file():
+        return {"success": False, "message": "Select a file to upload."}
+    try:
+        body, boundary = _multipart_file_body(field_name=field_name, file_path=str(path))
+    except OSError as exc:
+        return {"success": False, "message": f"Could not read file: {exc}"}
+    url = _api_url(f"{IMPORTS_UPLOAD_PATH_PREFIX}/{quote(sid, safe='')}/upload")
+    headers: dict[str, str] = {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Accept": "application/json",
+        "User-Agent": "MY-ETLZONE-App/1.0",
+        "Authorization": f"Bearer {tk}",
+    }
+    try:
+        req = Request(url, data=body, headers=headers, method="POST")
+        with _http_urlopen_logged(req, timeout=120.0) as resp:
+            raw = resp.read()
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Upload failed."
+            )
+            if rej is not None:
+                rej["data"] = payload
+                return rej
+            if payload.get("success") is False:
+                return {
+                    "success": False,
+                    "message": _extract_error_message(payload, "Upload failed."),
+                    "data": payload,
+                }
+            status = str(payload.get("status") or "").strip().upper()
+            ok = (
+                payload.get("success") is True
+                or status == "SUCCESS"
+                or "sessionId" in payload
+            )
+            if ok:
+                return {
+                    "success": True,
+                    "message": str(
+                        payload.get("message")
+                        or payload.get("msg")
+                        or "File uploaded successfully."
+                    ),
+                    "data": payload.get("data", payload),
+                    "status": status or "SUCCESS",
+                }
+            return {
+                "success": False,
+                "message": _extract_error_message(payload, "Upload failed."),
+                "data": payload,
+            }
+        return {
+            "success": True,
+            "message": "File uploaded successfully.",
+            "data": payload,
+        }
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Upload failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+            "data": err_payload if isinstance(err_payload, dict) else None,
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def _first_present(row: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in row and row.get(key) is not None:
+            return row.get(key)
+    return None
+
+
+def _normalize_analyze_column(row: dict[str, Any], ordinal_fallback: int) -> dict[str, Any]:
+    name = _first_present(row, "name", "columnName", "column_name", "srcColumnName", "sourceName")
+    datatype = _first_present(row, "datatype", "dataType", "data_type", "type", "srcDatatype")
+    nullable = _first_present(row, "nullable", "isNullable", "nullAble")
+    ordinal = _first_present(row, "ordinal", "ordinalPosition", "position", "index", "seq")
+    tgt_name = _first_present(
+        row,
+        "tgtColumnName",
+        "targetColumnName",
+        "tgt_column_name",
+        "targetName",
+        "mappedColumnName",
+    )
+    tgt_type = _first_present(
+        row,
+        "tgtDatatype",
+        "targetDatatype",
+        "tgtDataType",
+        "targetDataType",
+        "mappedDatatype",
+    )
+    length = _first_present(row, "length", "maxLength", "size", "charLength")
+    decimal_val = _first_present(row, "decimal", "scale", "decimalScale")
+    precision = _first_present(row, "precision", "pricision", "numericPrecision")
+    source_column_id = _first_present(
+        row,
+        "sourceColumnId",
+        "source_column_id",
+        "columnId",
+        "column_id",
+        "fieldId",
+        "id",
+    )
+    primary_key = _first_present(
+        row,
+        "primaryKey",
+        "isPrimaryKey",
+        "primary_key",
+        "pk",
+        "isPk",
+    )
+    selected = _first_present(row, "selected", "isSelected", "include", "mapped")
+
+    if nullable is None:
+        nullable_text = ""
+        nullable_bool = True
+    elif isinstance(nullable, bool):
+        nullable_text = "TRUE" if nullable else "FALSE"
+        nullable_bool = nullable
+    else:
+        text = str(nullable).strip()
+        low = text.lower()
+        if low in ("1", "true", "yes", "y"):
+            nullable_text = "TRUE"
+            nullable_bool = True
+        elif low in ("0", "false", "no", "n"):
+            nullable_text = "FALSE"
+            nullable_bool = False
+        else:
+            nullable_text = text.upper()
+            nullable_bool = True
+
+    if isinstance(primary_key, bool):
+        primary_key_bool = primary_key
+    elif primary_key is None:
+        primary_key_bool = False
+    else:
+        primary_key_bool = str(primary_key).strip().lower() in ("1", "true", "yes", "y")
+
+    if isinstance(selected, bool):
+        selected_bool = selected
+    elif selected is None:
+        selected_bool = True
+    else:
+        selected_bool = str(selected).strip().lower() not in ("0", "false", "no", "n")
+
+    name_text = "" if name is None else str(name).strip()
+    tgt_name_text = "" if tgt_name is None else str(tgt_name).strip()
+    if not tgt_name_text:
+        tgt_name_text = name_text.lstrip("#").strip() if name_text else ""
+
+    try:
+        ordinal_num = int(ordinal) if ordinal is not None and str(ordinal).strip() != "" else ordinal_fallback
+    except (TypeError, ValueError):
+        ordinal_num = ordinal_fallback
+
+    return {
+        "name": name_text,
+        "datatype": "" if datatype is None else str(datatype).strip(),
+        "nullable": nullable_text,
+        "nullableBool": nullable_bool,
+        "ordinal": ordinal_num,
+        "tgtColumnName": tgt_name_text,
+        "tgtDatatype": "" if tgt_type is None else str(tgt_type).strip(),
+        "length": "255" if length is None or str(length).strip() == "" else str(length).strip(),
+        "decimal": "" if decimal_val is None else str(decimal_val).strip(),
+        "precision": "" if precision is None else str(precision).strip(),
+        "sourceColumnId": source_column_id,
+        "primaryKey": primary_key_bool,
+        "selected": selected_bool,
+        "_raw": row,
+    }
+
+
+def _normalize_analyze_columns(raw_columns: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_columns, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for i, item in enumerate(raw_columns, start=1):
+        if isinstance(item, dict):
+            out.append(_normalize_analyze_column(item, i))
+        elif item is not None:
+            text = str(item).strip()
+            if text:
+                out.append(
+                    _normalize_analyze_column(
+                        {"name": text, "tgtColumnName": text, "ordinal": i},
+                        i,
+                    )
+                )
+    return out
+
+
+def _normalize_import_connection_id(value: Any) -> Any:
+    """Resolve connection id from a scalar or nested connection object."""
+    if isinstance(value, dict):
+        return _first_present(value, "id", "connectionId", "connectionID", "connection_id")
+    return value
+
+
+def _extract_import_target_meta(
+    payload: Any,
+    sheets: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Pull ``targetTableName`` / ``targetConnectionId`` from analyze payloads.
+
+    Backend ``analyze-if-present`` shape:
+    - ``connectionId``: full connection object (``{ id, connectionName, ... }``)
+    - sheet ``tableName``: target table for that sheet (may be null)
+    """
+    table_name: Any = None
+    connection_id: Any = None
+
+    def _from_mapping(row: dict[str, Any], *, allow_table_name_alias: bool = False) -> None:
+        nonlocal table_name, connection_id
+        if table_name is None or str(table_name).strip() == "":
+            keys = [
+                "targetTableName",
+                "target_table_name",
+                "tgtTableName",
+                "tgt_table_name",
+                "targetTable",
+            ]
+            if allow_table_name_alias:
+                keys.append("tableName")
+            found = _first_present(row, *keys)
+            if found is not None and str(found).strip():
+                table_name = found
+        if connection_id is None or str(connection_id).strip() == "":
+            raw_conn = _first_present(
+                row,
+                "targetConnectionId",
+                "target_connection_id",
+                "connectionId",
+                "connection_id",
+                "connectionID",
+                "connection",
+            )
+            connection_id = _normalize_import_connection_id(raw_conn)
+
+    if isinstance(payload, dict):
+        # Prefer nested connection object at top level.
+        top_conn = payload.get("connectionId") or payload.get("connection")
+        if isinstance(top_conn, dict):
+            connection_id = _normalize_import_connection_id(top_conn)
+        _from_mapping(payload, allow_table_name_alias=False)
+        for key in ("data", "result", "payload", "content", "analyzeResult", "analysis"):
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                nested_conn = nested.get("connectionId") or nested.get("connection")
+                if connection_id is None and isinstance(nested_conn, dict):
+                    connection_id = _normalize_import_connection_id(nested_conn)
+                _from_mapping(nested, allow_table_name_alias=False)
+
+    for sheet in sheets or []:
+        if not isinstance(sheet, dict):
+            continue
+        # Sheet target table is ``tableName`` in analyze-if-present.
+        _from_mapping(sheet, allow_table_name_alias=True)
+        raw = sheet.get("_raw")
+        if isinstance(raw, dict):
+            _from_mapping(raw, allow_table_name_alias=True)
+
+    out: dict[str, Any] = {}
+    if table_name is not None and str(table_name).strip():
+        out["targetTableName"] = str(table_name).strip()
+    connection_id = _normalize_import_connection_id(connection_id)
+    if connection_id is not None and str(connection_id).strip() != "":
+        out["targetConnectionId"] = connection_id
+    return out
+
+
+def _parse_import_analyze_payload(payload: Any) -> list[dict[str, Any]]:
+    """Normalize analyze response into ``[{name, columns: [...]}, ...]`` sheets."""
+    root: Any = payload
+    if isinstance(payload, dict):
+        for key in ("data", "result", "payload", "content", "analyzeResult", "analysis"):
+            if isinstance(payload.get(key), (dict, list)):
+                root = payload.get(key)
+                break
+
+    sheets: list[dict[str, Any]] = []
+
+    def _add_sheet(name: Any, columns: Any, sheet_meta: dict[str, Any] | None = None) -> None:
+        meta = sheet_meta if isinstance(sheet_meta, dict) else {}
+        sheet_name = str(name or "").strip() or f"Sheet{len(sheets) + 1}"
+        sheet_id = _first_present(meta, "sheetId", "sheet_id", "sheetID", "id")
+        target_table = _first_present(
+            meta,
+            "targetTableName",
+            "target_table_name",
+            "tgtTableName",
+            "tgt_table_name",
+            "targetTable",
+            "tableName",
+        )
+        raw_connection = _first_present(
+            meta,
+            "targetConnectionId",
+            "target_connection_id",
+            "connectionId",
+            "connection_id",
+            "connectionID",
+            "connection",
+        )
+        target_connection = _normalize_import_connection_id(raw_connection)
+        sheets.append(
+            {
+                "name": sheet_name,
+                "sheetId": sheet_id,
+                "targetTableName": (
+                    str(target_table).strip()
+                    if target_table is not None and str(target_table).strip()
+                    else None
+                ),
+                "targetConnectionId": target_connection,
+                "columns": _normalize_analyze_columns(columns),
+                "_raw": meta,
+            }
+        )
+
+    if isinstance(root, list):
+        if not root:
+            return []
+        if all(
+            isinstance(x, dict)
+            and ("columns" in x or "fields" in x or "sheetName" in x or "name" in x)
+            for x in root
+        ):
+            for item in root:
+                if not isinstance(item, dict):
+                    continue
+                cols = (
+                    item.get("columns")
+                    or item.get("fields")
+                    or item.get("columnList")
+                    or item.get("columnMetadata")
+                    or []
+                )
+                _add_sheet(
+                    item.get("sheetName")
+                    or item.get("name")
+                    or item.get("sheet")
+                    or item.get("title"),
+                    cols,
+                    item,
+                )
+        else:
+            # Flat column list → single sheet
+            _add_sheet("Sheet1", root)
+        return sheets
+
+    if isinstance(root, dict):
+        nested_sheets = (
+            root.get("sheets")
+            or root.get("sheetList")
+            or root.get("worksheets")
+            or root.get("sheetMetadata")
+        )
+        if isinstance(nested_sheets, list):
+            for item in nested_sheets:
+                if not isinstance(item, dict):
+                    continue
+                cols = (
+                    item.get("columns")
+                    or item.get("fields")
+                    or item.get("columnList")
+                    or item.get("columnMetadata")
+                    or []
+                )
+                _add_sheet(
+                    item.get("sheetName")
+                    or item.get("name")
+                    or item.get("sheet")
+                    or item.get("title"),
+                    cols,
+                    item,
+                )
+            if sheets:
+                return sheets
+
+        # Dict keyed by sheet name → column lists
+        dict_sheet_candidates = {
+            k: v
+            for k, v in root.items()
+            if isinstance(v, list) and k.lower() not in ("columns", "fields", "data", "errors", "messages")
+        }
+        if dict_sheet_candidates and all(
+            (not v) or isinstance(v[0], (dict, str)) for v in dict_sheet_candidates.values() if isinstance(v, list)
+        ):
+            for name, cols in dict_sheet_candidates.items():
+                _add_sheet(name, cols)
+            if sheets:
+                return sheets
+
+        cols = root.get("columns") or root.get("fields") or root.get("columnList")
+        if isinstance(cols, list):
+            _add_sheet(root.get("sheetName") or root.get("name") or "Sheet1", cols, root)
+    return sheets
+
+
+def api_analyze_import_file(
+    session_id: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """POST analyze an uploaded import session (default: ``imports/{sessionId}/analyze``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again.", "data": []}
+    sid = str(session_id or "").strip()
+    if not sid:
+        return {"success": False, "message": "Session ID is required.", "data": []}
+    url = _api_url(f"{IMPORTS_ANALYZE_PATH_PREFIX}/{quote(sid, safe='')}/analyze")
+    try:
+        # curl --request POST with no JSON body
+        payload = _http_post_json(url, {}, timeout_s=120.0, extra_headers=headers)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Analyze failed.", data=[]
+            )
+            if rej is not None:
+                return rej
+            status = str(payload.get("status") or "").strip().upper()
+            if payload.get("success") is False:
+                return {
+                    "success": False,
+                    "message": _extract_error_message(payload, "Analyze failed."),
+                    "data": [],
+                    "raw": payload,
+                }
+            if status and status not in ("SUCCESS", "OK", "SUCCEEDED", ""):
+                # Some backends only set status on failure; keep parsing if sheets exist.
+                pass
+        sheets = _parse_import_analyze_payload(payload)
+        return {
+            "success": True,
+            "message": "Analyze completed.",
+            "data": sheets,
+            "raw": payload,
+        }
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Analyze failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+            "data": [],
+            "raw": err_payload if err_payload else None,
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable.", "data": []}
+
+
+def api_analyze_import_if_present(
+    session_id: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """POST ``imports/{sessionId}/analyze-if-present``.
+
+    Returns ``present=True`` with sheet data when upload/analyze already exists;
+    ``present=False`` when nothing is uploaded yet (normal upload flow continues).
+    """
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {
+            "success": False,
+            "present": False,
+            "message": "Session expired. Please log in again.",
+            "data": [],
+        }
+    sid = str(session_id or "").strip()
+    if not sid:
+        return {
+            "success": False,
+            "present": False,
+            "message": "Session ID is required.",
+            "data": [],
+        }
+    url = _api_url(
+        f"{IMPORTS_ANALYZE_IF_PRESENT_PATH_PREFIX}/{quote(sid, safe='')}/analyze-if-present"
+    )
+    try:
+        payload = _http_post_json(url, {}, timeout_s=120.0, extra_headers=headers)
+        if isinstance(payload, dict):
+            # Explicit not-present signals from backend.
+            present_flag = payload.get("present")
+            if present_flag is False or str(present_flag).strip().lower() in (
+                "false",
+                "0",
+                "no",
+            ):
+                return {
+                    "success": True,
+                    "present": False,
+                    "message": str(payload.get("message") or "No uploaded file for this session."),
+                    "data": [],
+                    "raw": payload,
+                }
+            status = str(payload.get("status") or "").strip().upper()
+            msg = str(payload.get("message") or payload.get("msg") or "").strip().lower()
+            if payload.get("success") is False:
+                # Treat "not found / not present / no file" style failures as empty, not hard errors.
+                if any(
+                    needle in msg
+                    for needle in (
+                        "not present",
+                        "not found",
+                        "no file",
+                        "not uploaded",
+                        "no upload",
+                        "empty",
+                    )
+                ) or status in ("NOT_FOUND", "NOT_PRESENT", "NO_DATA", "EMPTY"):
+                    return {
+                        "success": True,
+                        "present": False,
+                        "message": _extract_error_message(
+                            payload, "No uploaded file for this session."
+                        ),
+                        "data": [],
+                        "raw": payload,
+                    }
+                rej = _reject_json_business_failure(
+                    payload, message_fallback="Analyze-if-present failed.", data=[]
+                )
+                if rej is not None:
+                    rej["present"] = False
+                    return rej
+        sheets = _parse_import_analyze_payload(payload)
+        # Require at least one sheet with columns; empty shells are "not present".
+        usable = [
+            s
+            for s in sheets
+            if isinstance(s, dict) and isinstance(s.get("columns"), list) and s.get("columns")
+        ]
+        if usable:
+            meta = _extract_import_target_meta(payload, usable)
+            return {
+                "success": True,
+                "present": True,
+                "message": "Existing analysis loaded.",
+                "data": usable,
+                "targetTableName": meta.get("targetTableName"),
+                "targetConnectionId": meta.get("targetConnectionId"),
+                "raw": payload,
+            }
+        return {
+            "success": True,
+            "present": False,
+            "message": "No uploaded file for this session.",
+            "data": [],
+            "targetTableName": None,
+            "targetConnectionId": None,
+            "raw": payload,
+        }
+    except HTTPError as exc:
+        code = getattr(exc, "code", None)
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        # 404 / 204-style "nothing uploaded yet" → continue normal upload flow.
+        if code in (404, 204, 409):
+            return {
+                "success": True,
+                "present": False,
+                "message": _extract_error_message(
+                    err_payload, "No uploaded file for this session."
+                ),
+                "data": [],
+                "targetTableName": None,
+                "targetConnectionId": None,
+                "raw": err_payload if err_payload else None,
+            }
+        return {
+            "success": False,
+            "present": False,
+            "message": _extract_error_message(
+                err_payload,
+                f"Analyze-if-present failed ({code or 'HTTP error'}).",
+            ),
+            "data": [],
+            "targetTableName": None,
+            "targetConnectionId": None,
+            "raw": err_payload if err_payload else None,
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {
+            "success": False,
+            "present": False,
+            "message": "Backend not reachable.",
+            "data": [],
+            "targetTableName": None,
+            "targetConnectionId": None,
+        }
+
+
+def import_target_data_type_to_java(value: Any) -> str:
+    """Map SQL / UI datatype labels to Java-style types expected by mapping API."""
+    text = str(value or "").strip().upper()
+    if not text:
+        return "STRING"
+    if "(" in text:
+        text = text.split("(", 1)[0].strip()
+    # Normalize spaced postgres labels.
+    text = text.replace("DOUBLE PRECISION", "DOUBLE_PRECISION")
+    mapping = {
+        "STRING": "STRING",
+        "TEXT": "STRING",
+        "NTEXT": "STRING",
+        "NVARCHAR": "STRING",
+        "VARCHAR": "STRING",
+        "VARCHAR2": "STRING",
+        "NVARCHAR2": "STRING",
+        "CHAR": "STRING",
+        "NCHAR": "STRING",
+        "CLOB": "STRING",
+        "INTEGER": "INTEGER",
+        "INT": "INTEGER",
+        "SMALLINT": "INTEGER",
+        "TINYINT": "INTEGER",
+        "NUMBER": "DECIMAL",
+        "BIGINT": "LONG",
+        "LONG": "LONG",
+        "DECIMAL": "DECIMAL",
+        "NUMERIC": "DECIMAL",
+        "FLOAT": "FLOAT",
+        "REAL": "FLOAT",
+        "BINARY_FLOAT": "FLOAT",
+        "DOUBLE": "DOUBLE",
+        "DOUBLE_PRECISION": "DOUBLE",
+        "BINARY_DOUBLE": "DOUBLE",
+        "BOOLEAN": "BOOLEAN",
+        "BOOL": "BOOLEAN",
+        "BIT": "BOOLEAN",
+        "DATE": "DATE",
+        "DATETIME": "DATETIME",
+        "DATETIME2": "DATETIME",
+        "SMALLDATETIME": "DATETIME",
+        "TIMESTAMP": "TIMESTAMP",
+        "TIMESTAMPTZ": "TIMESTAMP",
+    }
+    return mapping.get(text, text)
+
+
+def import_sql_datatypes_for_db(db_type: Any) -> tuple[str, ...]:
+    """SQL datatype choices for the selected connection ``dbType``."""
+    key = str(db_type or "").strip().upper().replace(" ", "").replace("_", "")
+    if key in ("SQLSERVER", "MSSQL", "SQLSERVERVPS"):
+        return (
+            "NVARCHAR",
+            "VARCHAR",
+            "CHAR",
+            "NCHAR",
+            "INT",
+            "BIGINT",
+            "SMALLINT",
+            "TINYINT",
+            "DECIMAL",
+            "NUMERIC",
+            "FLOAT",
+            "REAL",
+            "BIT",
+            "DATE",
+            "DATETIME",
+            "DATETIME2",
+            "SMALLDATETIME",
+            "TIME",
+            "TEXT",
+            "NTEXT",
+        )
+    if key in ("ORACLE",):
+        return (
+            "VARCHAR2",
+            "NVARCHAR2",
+            "CHAR",
+            "NCHAR",
+            "NUMBER",
+            "INTEGER",
+            "FLOAT",
+            "BINARY_FLOAT",
+            "BINARY_DOUBLE",
+            "DATE",
+            "TIMESTAMP",
+            "CLOB",
+            "BLOB",
+            "RAW",
+        )
+    if key in ("MYSQL", "MARIADB"):
+        return (
+            "VARCHAR",
+            "CHAR",
+            "TEXT",
+            "TINYINT",
+            "SMALLINT",
+            "INT",
+            "BIGINT",
+            "DECIMAL",
+            "FLOAT",
+            "DOUBLE",
+            "BOOLEAN",
+            "DATE",
+            "DATETIME",
+            "TIMESTAMP",
+            "TIME",
+            "BLOB",
+        )
+    if key in ("POSTGRES", "POSTGRESQL", "PG"):
+        return (
+            "VARCHAR",
+            "CHAR",
+            "TEXT",
+            "SMALLINT",
+            "INTEGER",
+            "BIGINT",
+            "NUMERIC",
+            "DECIMAL",
+            "REAL",
+            "DOUBLE PRECISION",
+            "BOOLEAN",
+            "DATE",
+            "TIMESTAMP",
+            "TIMESTAMPTZ",
+            "BYTEA",
+        )
+    # Fallback generic SQL list.
+    return (
+        "VARCHAR",
+        "NVARCHAR",
+        "CHAR",
+        "INT",
+        "BIGINT",
+        "DECIMAL",
+        "FLOAT",
+        "DOUBLE",
+        "BOOLEAN",
+        "DATE",
+        "DATETIME",
+        "TIMESTAMP",
+        "TEXT",
+    )
+
+
+def import_target_data_type_to_sql(value: Any, db_type: Any = None) -> str:
+    """Map Java / mixed datatype labels into SQL types for the selected connection."""
+    java = import_target_data_type_to_java(value)
+    key = str(db_type or "").strip().upper().replace(" ", "").replace("_", "")
+    sql_options = import_sql_datatypes_for_db(db_type)
+    raw = str(value or "").strip().upper()
+    if "(" in raw:
+        raw = raw.split("(", 1)[0].strip()
+    if raw in {opt.upper() for opt in sql_options}:
+        # Preserve already-valid SQL label casing from options list.
+        for opt in sql_options:
+            if opt.upper() == raw:
+                return opt
+
+    by_db: dict[str, dict[str, str]] = {
+        "SQLSERVER": {
+            "STRING": "NVARCHAR",
+            "INTEGER": "INT",
+            "LONG": "BIGINT",
+            "DECIMAL": "DECIMAL",
+            "FLOAT": "FLOAT",
+            "DOUBLE": "FLOAT",
+            "BOOLEAN": "BIT",
+            "DATE": "DATE",
+            "DATETIME": "DATETIME",
+            "TIMESTAMP": "DATETIME2",
+        },
+        "MSSQL": {},
+        "ORACLE": {
+            "STRING": "VARCHAR2",
+            "INTEGER": "NUMBER",
+            "LONG": "NUMBER",
+            "DECIMAL": "NUMBER",
+            "FLOAT": "BINARY_FLOAT",
+            "DOUBLE": "BINARY_DOUBLE",
+            "BOOLEAN": "NUMBER",
+            "DATE": "DATE",
+            "DATETIME": "DATE",
+            "TIMESTAMP": "TIMESTAMP",
+        },
+        "MYSQL": {
+            "STRING": "VARCHAR",
+            "INTEGER": "INT",
+            "LONG": "BIGINT",
+            "DECIMAL": "DECIMAL",
+            "FLOAT": "FLOAT",
+            "DOUBLE": "DOUBLE",
+            "BOOLEAN": "BOOLEAN",
+            "DATE": "DATE",
+            "DATETIME": "DATETIME",
+            "TIMESTAMP": "TIMESTAMP",
+        },
+        "MARIADB": {},
+        "POSTGRES": {
+            "STRING": "VARCHAR",
+            "INTEGER": "INTEGER",
+            "LONG": "BIGINT",
+            "DECIMAL": "NUMERIC",
+            "FLOAT": "REAL",
+            "DOUBLE": "DOUBLE PRECISION",
+            "BOOLEAN": "BOOLEAN",
+            "DATE": "DATE",
+            "DATETIME": "TIMESTAMP",
+            "TIMESTAMP": "TIMESTAMP",
+        },
+        "POSTGRESQL": {},
+        "PG": {},
+    }
+    # Alias empty maps to primary family maps.
+    by_db["MSSQL"] = by_db["SQLSERVER"]
+    by_db["SQLSERVERVPS"] = by_db["SQLSERVER"]
+    by_db["MARIADB"] = by_db["MYSQL"]
+    by_db["POSTGRESQL"] = by_db["POSTGRES"]
+    by_db["PG"] = by_db["POSTGRES"]
+
+    family = by_db.get(key) or by_db["SQLSERVER"]
+    mapped = family.get(java, "NVARCHAR" if key in ("SQLSERVER", "MSSQL", "SQLSERVERVPS", "") else "VARCHAR")
+    # Ensure result is in options; otherwise fall back to first option.
+    for opt in sql_options:
+        if opt.upper() == mapped.upper():
+            return opt
+    return sql_options[0] if sql_options else mapped
+
+
+def api_save_import_mapping(
+    session_id: str,
+    body: dict[str, Any],
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """POST import column mapping (default: ``imports/{sessionId}/mapping``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    sid = str(session_id or "").strip()
+    if not sid:
+        return {"success": False, "message": "Session ID is required."}
+    if not isinstance(body, dict):
+        return {"success": False, "message": "Mapping payload is required."}
+    url = _api_url(f"{IMPORTS_MAPPING_PATH_PREFIX}/{quote(sid, safe='')}/mapping")
+    try:
+        payload = _http_post_json(url, body, timeout_s=60.0, extra_headers=headers)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Failed to save mapping."
+            )
+            if rej is not None:
+                return rej
+            if payload.get("success") is False:
+                return {
+                    "success": False,
+                    "message": _extract_error_message(payload, "Failed to save mapping."),
+                    "data": payload,
+                }
+            return {
+                "success": True,
+                "message": str(
+                    payload.get("message")
+                    or payload.get("msg")
+                    or "Mapping saved successfully."
+                ),
+                "data": payload.get("data", payload),
+            }
+        return {
+            "success": True,
+            "message": "Mapping saved successfully.",
+            "data": payload,
+        }
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Failed to save mapping ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+            "data": err_payload if isinstance(err_payload, dict) else None,
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
+
+
+def _parse_import_sheets(payload: Any) -> list[dict[str, Any]]:
+    """Normalize ``get-all-import-sheet`` into ``{sessionId, sessionName, sheetId, sheetName}`` rows."""
+    raw: Any = payload
+    if isinstance(payload, dict):
+        for key in ("data", "result", "payload", "content", "sheets", "importSheets"):
+            if isinstance(payload.get(key), list):
+                raw = payload.get(key)
+                break
+        else:
+            if isinstance(payload.get("data"), dict):
+                nested = payload.get("data") or {}
+                for key in ("sheets", "importSheets", "list", "items", "content"):
+                    if isinstance(nested.get(key), list):
+                        raw = nested.get(key)
+                        break
+
+    if not isinstance(raw, list):
+        return []
+
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        session_id = (
+            item.get("sessionId")
+            or item.get("session_id")
+            or item.get("importSessionId")
+            or item.get("importId")
+        )
+        session_name = (
+            item.get("sessionName")
+            or item.get("session_name")
+            or item.get("importName")
+            or item.get("name")
+            or session_id
+        )
+        sheet_id = (
+            item.get("sheetId")
+            or item.get("sheet_id")
+            or item.get("id")
+        )
+        sheet_name = (
+            item.get("sheetName")
+            or item.get("sheet_name")
+            or item.get("sheet")
+            or item.get("title")
+        )
+        sid = str(session_id).strip() if session_id is not None else ""
+        if not sid and sheet_id is None:
+            continue
+        out.append(
+            {
+                "sessionId": sid,
+                "sessionName": str(session_name or sid).strip(),
+                "sheetId": sheet_id,
+                "sheetName": str(sheet_name).strip() if sheet_name is not None else "",
+                "_raw": item,
+            }
+        )
+    return out
+
+
+def api_get_all_import_sheets(token: str | None = None) -> dict[str, Any]:
+    """GET import sheets for Extract File (default: ``imports/get-all-import-sheet``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {
+            "success": False,
+            "message": "Session expired. Please log in again.",
+            "data": [],
+        }
+    url = _api_url(IMPORTS_GET_ALL_IMPORT_SHEET_PATH)
+    try:
+        payload = _http_get_json(url, headers=headers, timeout_s=20.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Failed to load import sheets.", data=[]
+            )
+            if rej is not None:
+                return rej
+        sheets = _parse_import_sheets(payload)
+        return {
+            "success": True,
+            "message": "Import sheets loaded.",
+            "data": sheets,
+        }
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Failed to load import sheets ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+            "data": [],
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {
+            "success": False,
+            "message": "Backend not reachable.",
+            "data": [],
+        }
+
+
+def api_get_import_sheets_by_uuid(
+    session_id: str,
+    *,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """GET sheets for one import session (``imports/get-import-sheet-by-uuid/{sessionId}``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {
+            "success": False,
+            "message": "Session expired. Please log in again.",
+            "data": [],
+        }
+    sid = str(session_id or "").strip()
+    if not sid:
+        return {
+            "success": False,
+            "message": "Select a session first.",
+            "data": [],
+        }
+    url = _api_url(f"{IMPORTS_GET_IMPORT_SHEET_BY_UUID_PREFIX}/{quote(sid, safe='')}")
+    try:
+        payload = _http_get_json(url, headers=headers, timeout_s=20.0)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Failed to load sheets for session.", data=[]
+            )
+            if rej is not None:
+                return rej
+        sheets = _parse_import_sheets(payload)
+        # Ensure session id is attached when API returns only sheet fields.
+        for row in sheets:
+            if not str(row.get("sessionId") or "").strip():
+                row["sessionId"] = sid
+        return {
+            "success": True,
+            "message": "Sheets loaded.",
+            "data": sheets,
+        }
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload,
+                f"Failed to load sheets ({getattr(exc, 'code', 'HTTP error')}).",
+            ),
+            "data": [],
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {
+            "success": False,
+            "message": "Backend not reachable.",
+            "data": [],
+        }
+
+
+def api_execute_import_sheet(
+    session_id: str,
+    sheet_id: int | str,
+    *,
+    operation: str,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """POST execute a mapped import sheet (default: ``imports/{sessionId}/execute``)."""
+    headers = _connections_auth_headers(token)
+    if headers is None:
+        return {"success": False, "message": "Session expired. Please log in again."}
+    sid = str(session_id or "").strip()
+    if not sid:
+        return {"success": False, "message": "Session ID is required."}
+    op = str(operation or "").strip().upper().replace("-", "_").replace(" ", "_")
+    if op in {"DROP_AND_CREATE", "DROPANDCREATE"}:
+        op = "DROP_CREATE"
+    if op not in {"DROP_CREATE", "DELETE"}:
+        return {"success": False, "message": "Select Drop and Create or Delete."}
+    try:
+        sheet_id_value: int | str = int(sheet_id)
+    except (TypeError, ValueError):
+        sheet_id_value = str(sheet_id).strip()
+        if not sheet_id_value:
+            return {"success": False, "message": "Sheet ID is required."}
+    url = _api_url(f"{IMPORTS_EXECUTE_PATH_PREFIX}/{quote(sid, safe='')}/execute")
+    body: dict[str, Any] = {
+        "sheetId": sheet_id_value,
+        "operation": op,
+    }
+    try:
+        payload = _http_post_json(url, body, timeout_s=120.0, extra_headers=headers)
+        if isinstance(payload, dict):
+            rej = _reject_json_business_failure(
+                payload, message_fallback="Extract failed."
+            )
+            if rej is not None:
+                return rej
+            if payload.get("success") is False:
+                return {
+                    "success": False,
+                    "message": _extract_error_message(payload, "Extract failed."),
+                    "data": payload,
+                }
+            return {
+                "success": True,
+                "message": str(
+                    payload.get("message")
+                    or payload.get("msg")
+                    or "Extract completed."
+                ),
+                "data": payload.get("data", payload),
+            }
+        return {
+            "success": True,
+            "message": "Extract completed.",
+            "data": payload,
+        }
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+            err_payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            err_payload = {}
+        return {
+            "success": False,
+            "message": _extract_error_message(
+                err_payload, f"Extract failed ({getattr(exc, 'code', 'HTTP error')})."
+            ),
+            "data": err_payload if isinstance(err_payload, dict) else None,
+        }
+    except (URLError, TimeoutError, ValueError):
+        return {"success": False, "message": "Backend not reachable."}
 
 
 def _parse_connections_list_payload(payload: Any) -> list[dict[str, Any]]:

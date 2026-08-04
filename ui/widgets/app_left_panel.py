@@ -16,6 +16,7 @@ from core.left_panel_nav_items import (
     DATA_MIGRATION_ONBOARDING_SUB_OPTIONS,
     DATA_TRANSFORMATION_SUB_OPTIONS,
     ETL_SUB_OPTIONS,
+    EXCEL_SUB_OPTIONS,
     LEAD_MANAGEMENT_SUB_OPTIONS,
     MASTER_SETUP_ITEM,
     OBJECT_TRACKER_SUB_OPTIONS,
@@ -24,6 +25,7 @@ from core.left_panel_nav_items import (
 )
 from core.nav_access import LeftPanelAccessState
 from ui.styles import PANEL_STYLESHEET
+from ui.theme import IS_LEGACY_THEME, Theme
 
 _FIX_PIN_ICON_PATH = Path(__file__).resolve().parents[2] / "assets" / "fix_pin.png"
 
@@ -91,7 +93,7 @@ class AppLeftPanel(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._default_panel_width = 280
+        self._default_panel_width = 280 if IS_LEGACY_THEME else 264
         self._min_panel_width = 220
         self._max_panel_width = 520
         self._resizing_panel = False
@@ -116,8 +118,8 @@ class AppLeftPanel(QWidget):
         self._resize_handle.setFixedWidth(6)
         self._resize_handle.setCursor(Qt.CursorShape.SizeHorCursor)
         self._resize_handle.setStyleSheet(
-            "#leftPanelResizeHandle { background: #d1d5db; border: none; }"
-            "#leftPanelResizeHandle:hover { background: #94a3b8; }"
+            f"#leftPanelResizeHandle {{ background: {Theme.BORDER_DEFAULT}; border: none; }}"
+            f"#leftPanelResizeHandle:hover {{ background: {Theme.FOCUS_RING}; }}"
         )
         self._resize_handle.installEventFilter(self)
         root_layout.addWidget(self._resize_handle)
@@ -130,7 +132,8 @@ class AppLeftPanel(QWidget):
         title_frame.setObjectName("panelTitleFrame")
         title_frame.setMinimumHeight(72)
         title_frame.setStyleSheet(
-            "#panelTitleFrame { background-color: #0f2340; border: none; border-bottom: 1px solid #475569; }"
+            f"#panelTitleFrame {{ background-color: {Theme.PANEL_BG}; border: none; "
+            f"border-bottom: 1px solid {Theme.PANEL_BORDER}; }}"
         )
         title_frame_layout = QVBoxLayout(title_frame)
         title_frame_layout.setContentsMargins(14, 6, 4, 28)
@@ -222,24 +225,28 @@ class AppLeftPanel(QWidget):
 
         content_widget = QWidget()
         content_layout = QVBoxLayout(content_widget)
-        content_layout.setContentsMargins(14, 10, 6, 18)
-        content_layout.setSpacing(10)
+        content_layout.setContentsMargins(12, 12, 8, 18)
+        content_layout.setSpacing(8)
 
         _toggle_style = (
-            "QPushButton { color: #ffffff; background-color: transparent; border: none; "
-            "border-bottom: 1px solid #3d5a7a; border-radius: 6px; text-align: left; padding: 8px 10px; }"
-            "QPushButton:hover { background-color: #19365f; }"
-            "QPushButton:checked { background-color: #1e3a5f; border-left: 3px solid #3b82f6; padding-left: 7px; }"
+            f"QPushButton {{ color: {Theme.PANEL_TEXT_BRIGHT}; background-color: transparent; border: none; "
+            f"border-bottom: 1px solid {Theme.PANEL_NAV_BORDER}; border-radius: 7px; text-align: left; "
+            f"padding: 9px 11px; font-size: {12 if IS_LEGACY_THEME else 13}px; font-weight: 600; }}"
+            f"QPushButton:hover {{ background-color: {Theme.PANEL_NAV_HOVER}; }}"
+            f"QPushButton:checked {{ background-color: {Theme.PANEL_NAV_SELECTED}; "
+            f"border-left: 3px solid {Theme.ACCENT}; padding-left: 8px; }}"
         )
         _sub_btn_style = (
-            "QPushButton { color: #ffffff; background-color: transparent; border: none; "
-            "border-radius: 4px; text-align: left; padding: 6px 10px; font-size: 12px; }"
-            "QPushButton:hover { background-color: #1e3a5f; color: #e2e8f0; }"
+            f"QPushButton {{ color: {Theme.PANEL_TEXT}; background-color: transparent; border: none; "
+            f"border-radius: 6px; text-align: left; padding: 7px 10px; font-size: 12px; }}"
+            f"QPushButton:hover {{ background-color: {Theme.PANEL_NAV_SELECTED}; color: {Theme.PANEL_TEXT_BRIGHT}; }}"
         )
         _nav_selected_style = (
-            "QPushButton { color: #e2e8f0; background-color: #1e3a5f; border: none; border-left: 3px solid #3b82f6; "
-            "border-radius: 4px; text-align: left; padding: 6px 10px; font-size: 12px; padding-left: 10px; }"
-            "QPushButton:hover { background-color: #234876; color: #f1f5f9; }"
+            f"QPushButton {{ color: {Theme.PANEL_TEXT_BRIGHT}; background-color: {Theme.PANEL_NAV_SELECTED}; "
+            f"border: none; border-left: 3px solid {Theme.ACCENT}; border-radius: 6px; text-align: left; "
+            f"padding: 7px 10px; font-size: 12px; font-weight: 600; }}"
+            f"QPushButton:hover {{ background-color: {Theme.PANEL_NAV_SELECTED_HOVER}; "
+            f"color: {Theme.PANEL_TEXT_BRIGHT}; }}"
         )
         self._nav_buttons: dict[str, QPushButton] = {}
         self._nav_normal_style = _sub_btn_style
@@ -459,7 +466,29 @@ class AppLeftPanel(QWidget):
         self._etl_sub_container.setMinimumHeight(0)
         self._etl_sub_container.set_content_height(len(ETL_SUB_OPTIONS) * 36 + 20)
 
-        # 12. Data Transformation (below ETL, collapsible)
+        # 12. Excel (below ETL, collapsible)
+        self._excel_toggle = QPushButton("Excel")
+        self._excel_toggle.setCheckable(True)
+        self._excel_toggle.setChecked(False)
+        self._excel_toggle.setStyleSheet(_toggle_style)
+        self._excel_toggle.clicked.connect(self._on_excel_toggle)
+        content_layout.addWidget(self._excel_toggle)
+        self._excel_sub_container = _CollapsibleWidget()
+        self._excel_sub_container.setMaximumHeight(0)
+        excel_layout = QVBoxLayout(self._excel_sub_container)
+        excel_layout.setContentsMargins(20, 4, 0, 8)
+        excel_layout.setSpacing(6)
+        for opt in EXCEL_SUB_OPTIONS:
+            btn = QPushButton(opt)
+            btn.setStyleSheet(_sub_btn_style)
+            btn.clicked.connect(lambda checked=False, name=opt: self.navigation_requested.emit(name))
+            self._nav_buttons[opt] = btn
+            excel_layout.addWidget(btn)
+        content_layout.addWidget(self._excel_sub_container)
+        self._excel_sub_container.setMinimumHeight(0)
+        self._excel_sub_container.set_content_height(len(EXCEL_SUB_OPTIONS) * 36 + 20)
+
+        # 13. Data Transformation (below Excel, collapsible)
         self._data_transformation_toggle = QPushButton("Data Transformation")
         self._data_transformation_toggle.setCheckable(True)
         self._data_transformation_toggle.setChecked(False)
@@ -483,7 +512,7 @@ class AppLeftPanel(QWidget):
             len(DATA_TRANSFORMATION_SUB_OPTIONS) * 36 + 20
         )
 
-        # 13. App Config (collapsible, start collapsed)
+        # 14. App Config (collapsible, start collapsed)
         self._app_config_toggle = QPushButton("App Config")
         self._app_config_toggle.setCheckable(True)
         self._app_config_toggle.setChecked(False)
@@ -638,6 +667,9 @@ class AppLeftPanel(QWidget):
         _pair(self._etl_toggle, self._etl_sub_container, True)
         _apply_subs(ETL_SUB_OPTIONS, self._etl_sub_container)
 
+        _pair(self._excel_toggle, self._excel_sub_container, True)
+        _apply_subs(EXCEL_SUB_OPTIONS, self._excel_sub_container)
+
         _pair(self._data_transformation_toggle, self._data_transformation_sub_container, True)
         _apply_subs(DATA_TRANSFORMATION_SUB_OPTIONS, self._data_transformation_sub_container)
 
@@ -666,7 +698,13 @@ class AppLeftPanel(QWidget):
     def set_current_item(self, item_name: str) -> None:
         """Highlight the nav button for the current page; expand section if item is a child, else collapse all."""
         for name, btn in self._nav_buttons.items():
-            btn.setStyleSheet(self._nav_selected_style if name == item_name else self._nav_normal_style)
+            # Excel sub-items stay unhighlighted (same look as other collapsed-section children at rest).
+            if name in EXCEL_SUB_OPTIONS:
+                btn.setStyleSheet(self._nav_normal_style)
+            else:
+                btn.setStyleSheet(
+                    self._nav_selected_style if name == item_name else self._nav_normal_style
+                )
         if item_name in ORG_MANAGEMENT_SUB_OPTIONS:
             self._collapse_others_except(self._org_mgmt_toggle)
             self._org_mgmt_toggle.setChecked(True)
@@ -703,6 +741,10 @@ class AppLeftPanel(QWidget):
             self._collapse_others_except(self._etl_toggle)
             self._etl_toggle.setChecked(True)
             self._etl_sub_container.expand()
+        elif item_name in EXCEL_SUB_OPTIONS:
+            self._collapse_others_except(self._excel_toggle)
+            self._excel_toggle.setChecked(True)
+            self._excel_sub_container.expand()
         elif item_name in DATA_TRANSFORMATION_SUB_OPTIONS:
             self._collapse_others_except(self._data_transformation_toggle)
             self._data_transformation_toggle.setChecked(True)
@@ -734,6 +776,8 @@ class AppLeftPanel(QWidget):
         self._object_tracker_sub_container.collapse()
         self._etl_toggle.setChecked(False)
         self._etl_sub_container.collapse()
+        self._excel_toggle.setChecked(False)
+        self._excel_sub_container.collapse()
         self._data_transformation_toggle.setChecked(False)
         self._data_transformation_sub_container.collapse()
         self._app_config_toggle.setChecked(False)
@@ -768,6 +812,9 @@ class AppLeftPanel(QWidget):
         if except_toggle is not self._etl_toggle:
             self._etl_toggle.setChecked(False)
             self._etl_sub_container.collapse()
+        if except_toggle is not self._excel_toggle:
+            self._excel_toggle.setChecked(False)
+            self._excel_sub_container.collapse()
         if except_toggle is not self._data_transformation_toggle:
             self._data_transformation_toggle.setChecked(False)
             self._data_transformation_sub_container.collapse()
@@ -781,6 +828,13 @@ class AppLeftPanel(QWidget):
             self._etl_sub_container.expand()
         else:
             self._etl_sub_container.collapse()
+
+    def _on_excel_toggle(self) -> None:
+        if self._excel_toggle.isChecked():
+            self._collapse_others_except(self._excel_toggle)
+            self._excel_sub_container.expand()
+        else:
+            self._excel_sub_container.collapse()
 
     def _on_data_transformation_toggle(self) -> None:
         if self._data_transformation_toggle.isChecked():
