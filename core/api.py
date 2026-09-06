@@ -13351,6 +13351,12 @@ def _parse_import_sheets(payload: Any) -> list[dict[str, Any]]:
             or item.get("sheet")
             or item.get("title")
         )
+        table_name = (
+            item.get("tableName")
+            or item.get("table_name")
+            or item.get("targetTableName")
+            or item.get("target_table_name")
+        )
         sid = str(session_id).strip() if session_id is not None else ""
         if not sid and sheet_id is None:
             continue
@@ -13360,6 +13366,11 @@ def _parse_import_sheets(payload: Any) -> list[dict[str, Any]]:
                 "sessionName": str(session_name or sid).strip(),
                 "sheetId": sheet_id,
                 "sheetName": str(sheet_name).strip() if sheet_name is not None else "",
+                "tableName": (
+                    str(table_name).strip()
+                    if table_name is not None and str(table_name).strip()
+                    else None
+                ),
                 "_raw": item,
             }
         )
