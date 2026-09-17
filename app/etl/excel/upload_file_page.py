@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QShowEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -67,6 +68,117 @@ _UPLOAD_FILE_FILTER = (
     "Spreadsheets (*.xlsx *.xls *.csv);;Excel (*.xlsx *.xls);;CSV (*.csv);;"
     "JSON (*.json);;All files (*.*)"
 )
+
+# (label, codepage value sent to API)
+_CODEPAGE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("UTF-8 (Unicode) — 65001", "65001"),
+    ("Windows Arabic — 1256", "1256"),
+    ("ISO-8859-6 Arabic — 28596", "28596"),
+    ("Windows Western European — 1252", "1252"),
+    ("Windows Cyrillic — 1251", "1251"),
+    ("Windows Central European — 1250", "1250"),
+    ("Windows Greek — 1253", "1253"),
+    ("Windows Turkish — 1254", "1254"),
+    ("Windows Hebrew — 1255", "1255"),
+    ("Shift-JIS Japanese — 932", "932"),
+    ("GBK Chinese Simplified — 936", "936"),
+    ("Big5 Chinese Traditional — 950", "950"),
+    ("EUC-KR Korean — 949", "949"),
+)
+
+
+def _text_looks_mojibake_or_question_marks(text: str) -> bool:
+    s = str(text or "")
+    if not s:
+        return False
+    q = s.count("?")
+    if q >= 2 and (q / max(len(s), 1)) >= 0.35:
+        return True
+    return "\ufffd" in s
+
+
+def _read_local_workbook_headers(path: str) -> list[dict[str, Any]]:
+    """Read sheet titles + header row via openpyxl (Unicode-safe for .xlsx)."""
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        return []
+    p = Path(path)
+    if not p.is_file():
+        return []
+    try:
+        wb = load_workbook(p, read_only=True, data_only=True)
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        for ws in wb.worksheets:
+            headers: list[str] = []
+            for row in ws.iter_rows(min_row=1, max_row=1, values_only=True):
+                for cell in row:
+                    headers.append("" if cell is None else str(cell))
+                break
+            out.append({"name": str(ws.title or ""), "headers": headers})
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+    return out
+
+
+def _enrich_analyze_sheets_unicode(
+    sheets: list[Any],
+    *,
+    file_path: str,
+    multi_language: bool,
+) -> list[Any]:
+    """Replace corrupted ``?`` sheet/column names using the local workbook when possible."""
+    if not multi_language or not sheets or not file_path:
+        return sheets
+    local = _read_local_workbook_headers(file_path)
+    if not local:
+        return sheets
+    enriched: list[Any] = []
+    for index, sheet in enumerate(sheets):
+        if not isinstance(sheet, dict):
+            enriched.append(sheet)
+            continue
+        sheet_copy = deepcopy(sheet)
+        local_sheet = local[index] if index < len(local) else None
+        if local_sheet:
+            api_name = str(sheet_copy.get("name") or "")
+            local_name = str(local_sheet.get("name") or "")
+            if local_name and (
+                not api_name
+                or _text_looks_mojibake_or_question_marks(api_name)
+                or ("?" in api_name and "?" not in local_name)
+            ):
+                sheet_copy["name"] = local_name
+            columns = sheet_copy.get("columns")
+            local_headers = local_sheet.get("headers") if isinstance(local_sheet, dict) else None
+            if isinstance(columns, list) and isinstance(local_headers, list):
+                new_cols: list[Any] = []
+                for col_i, col in enumerate(columns):
+                    if not isinstance(col, dict):
+                        new_cols.append(col)
+                        continue
+                    col_copy = dict(col)
+                    local_hdr = (
+                        str(local_headers[col_i]) if col_i < len(local_headers) else ""
+                    )
+                    if local_hdr:
+                        name = str(col_copy.get("name") or "")
+                        tgt = str(col_copy.get("tgtColumnName") or "")
+                        if not name or _text_looks_mojibake_or_question_marks(name):
+                            col_copy["name"] = local_hdr
+                        if not tgt or _text_looks_mojibake_or_question_marks(tgt):
+                            col_copy["tgtColumnName"] = local_hdr
+                    new_cols.append(col_copy)
+                sheet_copy["columns"] = new_cols
+        enriched.append(sheet_copy)
+    return enriched
+
 
 _ANALYZE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("name", "Name"),
@@ -325,6 +437,38 @@ class UploadFilePage(QWidget):
         file_row_layout.addWidget(self.file_path_edit, 1)
         file_row_layout.addWidget(browse_btn)
         form_layout.addWidget(labeled_field_block(file_lbl, file_row))
+
+        self.multi_language_check = QCheckBox("Enable multi-language (Unicode)")
+        self.multi_language_check.setChecked(True)
+        self.multi_language_check.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.multi_language_check.setStyleSheet(
+            "QCheckBox { color: #334155; font-size: 11px; font-weight: 600; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; }"
+        )
+        self.multi_language_check.setToolTip(
+            "Preserve Arabic and other non-English sheet/column names. "
+            "Also repairs names locally from the workbook when the server returns '?'."
+        )
+        form_layout.addWidget(self.multi_language_check)
+
+        codepage_lbl = field_caption_label("Codepage", FORM_LABEL_STYLE)
+        self.codepage_combo = QComboBox()
+        for label, value in _CODEPAGE_OPTIONS:
+            self.codepage_combo.addItem(label, value)
+        self.codepage_combo.setCurrentIndex(0)  # UTF-8
+        apply_form_combobox_field(
+            self.codepage_combo,
+            height_px=FORM_SINGLELINE_FIELD_HEIGHT_PX,
+            min_width=field_w,
+        )
+        install_combo_popup_below_field(self.codepage_combo)
+        self.codepage_combo.setToolTip(
+            "Character encoding / Windows code page used when reading the file. "
+            "Use UTF-8 for .xlsx, or Windows Arabic (1256) for older .xls/CSV Arabic files."
+        )
+        form_layout.addWidget(labeled_field_block(codepage_lbl, self.codepage_combo))
+        self.multi_language_check.toggled.connect(self.codepage_combo.setEnabled)
+        self.codepage_combo.setEnabled(True)
 
         self.message_label = QLabel()
         self.message_label.setStyleSheet(FORM_ERROR_LABEL_STYLE)
@@ -692,7 +836,13 @@ class UploadFilePage(QWidget):
         self.analyze_panel.setVisible(False)
 
     def _apply_analyze_sheets(self, sheets: list[Any], *, success_message: str | None = None) -> None:
-        self._sheets = deepcopy(sheets if isinstance(sheets, list) else [])
+        raw = sheets if isinstance(sheets, list) else []
+        enriched = _enrich_analyze_sheets_unicode(
+            raw,
+            file_path=self._selected_path,
+            multi_language=self.multi_language_enabled(),
+        )
+        self._sheets = deepcopy(enriched)
         self._saved_sheet_keys.clear()
         self._edit_mode = False
         self.edit_btn.setText("Edit mapping")
@@ -760,6 +910,15 @@ class UploadFilePage(QWidget):
         status = str(result.get("status") or "").strip().upper()
         return (not status) or status == "SUCCESS"
 
+    def selected_codepage(self) -> str:
+        data = self.codepage_combo.currentData()
+        if data is not None and str(data).strip():
+            return str(data).strip()
+        return "65001"
+
+    def multi_language_enabled(self) -> bool:
+        return bool(self.multi_language_check.isChecked())
+
     def _handle_upload(self) -> None:
         if self._uploading or self._analyzing:
             return
@@ -779,6 +938,8 @@ class UploadFilePage(QWidget):
                 session_id,
                 self._selected_path,
                 token=self._token(),
+                codepage=self.selected_codepage() if self.multi_language_enabled() else None,
+                multi_language=self.multi_language_enabled(),
             )
         finally:
             self._uploading = False
@@ -795,7 +956,12 @@ class UploadFilePage(QWidget):
         self._analyzing = True
         self.upload_btn.setEnabled(False)
         try:
-            result = api_analyze_import_file(session_id, token=self._token())
+            result = api_analyze_import_file(
+                session_id,
+                token=self._token(),
+                codepage=self.selected_codepage() if self.multi_language_enabled() else None,
+                multi_language=self.multi_language_enabled(),
+            )
         finally:
             self._analyzing = False
             self.upload_btn.setEnabled(True)

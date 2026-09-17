@@ -10163,26 +10163,54 @@ def api_remove_dmt_user_module_assignments(
         return {"success": False, "message": "Backend not reachable."}
 
 
-def _multipart_file_body(*, field_name: str, file_path: str) -> tuple[bytes, str]:
+def _multipart_file_body(
+    *,
+    field_name: str,
+    file_path: str,
+    extra_fields: dict[str, str] | None = None,
+) -> tuple[bytes, str]:
+    from urllib.parse import quote as _url_quote
+
     path = Path(file_path)
     data = path.read_bytes()
     filename = path.name
+    # ASCII-safe fallback filename + RFC 5987 UTF-8 filename* for non-ASCII names.
+    ascii_name = filename.encode("ascii", errors="replace").decode("ascii").replace('"', "_")
+    utf8_name = _url_quote(filename, safe="")
     content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
     boundary = uuid4().hex
     b = boundary.encode("ascii")
-    parts: list[bytes] = [
-        b"--",
-        b,
-        b"\r\n",
-        f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'.encode(
-            "utf-8"
-        ),
-        f"Content-Type: {content_type}\r\n\r\n".encode("ascii"),
-        data,
-        b"\r\n--",
-        b,
-        b"--\r\n",
-    ]
+    parts: list[bytes] = []
+    for key, value in (extra_fields or {}).items():
+        k = str(key or "").strip()
+        if not k:
+            continue
+        parts.extend(
+            [
+                b"--",
+                b,
+                b"\r\n",
+                f'Content-Disposition: form-data; name="{k}"\r\n\r\n'.encode("utf-8"),
+                str(value).encode("utf-8"),
+                b"\r\n",
+            ]
+        )
+    parts.extend(
+        [
+            b"--",
+            b,
+            b"\r\n",
+            (
+                f'Content-Disposition: form-data; name="{field_name}"; '
+                f'filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_name}\r\n'
+            ).encode("utf-8"),
+            f"Content-Type: {content_type}\r\n\r\n".encode("ascii"),
+            data,
+            b"\r\n--",
+            b,
+            b"--\r\n",
+        ]
+    )
     return b"".join(parts), boundary
 
 
@@ -12387,8 +12415,14 @@ def api_upload_import_file(
     *,
     token: str | None = None,
     field_name: str = "file",
+    codepage: str | None = None,
+    multi_language: bool = False,
 ) -> dict[str, Any]:
-    """POST multipart file to ``imports/{sessionId}/upload``."""
+    """POST multipart file to ``imports/{sessionId}/upload``.
+
+    Optional ``codepage`` / ``multi_language`` are sent as multipart form fields so the
+    backend can preserve non-ASCII sheet and column names.
+    """
     tk = _normalize_bearer_token(token)
     if not tk:
         return {"success": False, "message": "Session expired. Please log in again."}
@@ -12398,8 +12432,22 @@ def api_upload_import_file(
     path = Path(file_path)
     if not path.is_file():
         return {"success": False, "message": "Select a file to upload."}
+    extra: dict[str, str] = {}
+    cp = str(codepage or "").strip()
+    if cp:
+        extra["codePage"] = cp
+        extra["codepage"] = cp
+        extra["encoding"] = cp
+    if multi_language:
+        extra["multiLanguage"] = "true"
+        extra["enableMultiLanguage"] = "true"
+        extra["unicode"] = "true"
     try:
-        body, boundary = _multipart_file_body(field_name=field_name, file_path=str(path))
+        body, boundary = _multipart_file_body(
+            field_name=field_name,
+            file_path=str(path),
+            extra_fields=extra or None,
+        )
     except OSError as exc:
         return {"success": False, "message": f"Could not read file: {exc}"}
     url = _api_url(f"{IMPORTS_UPLOAD_PATH_PREFIX}/{quote(sid, safe='')}/upload")
@@ -12813,8 +12861,14 @@ def api_analyze_import_file(
     session_id: str,
     *,
     token: str | None = None,
+    codepage: str | None = None,
+    multi_language: bool = False,
 ) -> dict[str, Any]:
-    """POST analyze an uploaded import session (default: ``imports/{sessionId}/analyze``)."""
+    """POST analyze an uploaded import session (default: ``imports/{sessionId}/analyze``).
+
+    When set, ``codepage`` and ``multi_language`` are included in the JSON body so the
+    backend can decode multi-language sheet/column names correctly.
+    """
     headers = _connections_auth_headers(token)
     if headers is None:
         return {"success": False, "message": "Session expired. Please log in again.", "data": []}
@@ -12822,9 +12876,18 @@ def api_analyze_import_file(
     if not sid:
         return {"success": False, "message": "Session ID is required.", "data": []}
     url = _api_url(f"{IMPORTS_ANALYZE_PATH_PREFIX}/{quote(sid, safe='')}/analyze")
+    body: dict[str, Any] = {}
+    cp = str(codepage or "").strip()
+    if cp:
+        body["codePage"] = cp
+        body["codepage"] = cp
+        body["encoding"] = cp
+    if multi_language:
+        body["multiLanguage"] = True
+        body["enableMultiLanguage"] = True
+        body["unicode"] = True
     try:
-        # curl --request POST with no JSON body
-        payload = _http_post_json(url, {}, timeout_s=120.0, extra_headers=headers)
+        payload = _http_post_json(url, body, timeout_s=120.0, extra_headers=headers)
         if isinstance(payload, dict):
             rej = _reject_json_business_failure(
                 payload, message_fallback="Analyze failed.", data=[]

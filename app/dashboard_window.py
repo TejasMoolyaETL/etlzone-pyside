@@ -67,8 +67,14 @@ from app.etl.scan_connection import EtlScanConnectionPage
 from app.etl.import_metadata import EtlImportMetadataPage
 from app.etl.extraction import EtlExtractionPage
 from app.etl.job_logs import EtlJobLogsPage
-from app.etl.data_transformation import DataTransformationPage
-from app.etl.excel import ExcelPage, ExtractFilePage, UploadFilePage
+from app.etl.data_transformation import DataTransformationPage, NewFlowDesignerPage
+from app.etl.excel import (
+    AllImportPage,
+    BulkFolderImportPage,
+    ExcelPage,
+    ExtractFilePage,
+    UploadFilePage,
+)
 from app.user_profile.settings_page import SettingsPage
 from app.user_management.users.user_list import UsersPage
 from app.user_management.user_timepass.user_reset_password import ResetUserPasswordPage
@@ -446,8 +452,15 @@ class DashboardWindow(QMainWindow):
         self.stack.addWidget(self.etl_upload_file_page)
         self.etl_extract_file_page = ExtractFilePage()
         self.stack.addWidget(self.etl_extract_file_page)
+        self.etl_all_import_page = AllImportPage()
+        self.stack.addWidget(self.etl_all_import_page)
+        self.etl_bulk_folder_page = BulkFolderImportPage()
+        self.stack.addWidget(self.etl_bulk_folder_page)
         self.etl_data_transformation_page = DataTransformationPage()
         self.stack.addWidget(self.etl_data_transformation_page)
+        self.etl_new_flow_designer_page = NewFlowDesignerPage()
+        self.etl_new_flow_designer_page.sign_out_requested.connect(self._handle_sign_out)
+        self.stack.addWidget(self.etl_new_flow_designer_page)
         self._etl_pages: dict[str, QWidget] = {
             "Connections": self.etl_connections_page,
             "Scan": self.etl_scan_connection_page,
@@ -459,6 +472,8 @@ class DashboardWindow(QMainWindow):
             "Import State": self.etl_excel_page,
             "Upload File": self.etl_upload_file_page,
             "Extract File": self.etl_extract_file_page,
+            "Excel All Import": self.etl_all_import_page,
+            "Excel bulk via folder path": self.etl_bulk_folder_page,
         }
         self._data_transformation_pages: dict[str, QWidget] = {
             "DT: Object": self.etl_data_transformation_page,
@@ -466,6 +481,7 @@ class DashboardWindow(QMainWindow):
             "DT: Flow": self.etl_data_transformation_page,
             "DT: Work Flow": self.etl_data_transformation_page,
             "DT: Step": self.etl_data_transformation_page,
+            "DT: new Flow": self.etl_new_flow_designer_page,
         }
 
         self.create_category_page = CreateCategoryPage(
@@ -1184,8 +1200,11 @@ class DashboardWindow(QMainWindow):
                 go_to(item_name)
             self.left_panel.set_current_item(item_name)
         elif item_name in self._data_transformation_pages:
-            self.stack.setCurrentWidget(self.etl_data_transformation_page)
-            self.etl_data_transformation_page.go_to_nav_item(item_name)
+            w = self._data_transformation_pages[item_name]
+            self.stack.setCurrentWidget(w)
+            go_to = getattr(w, "go_to_nav_item", None)
+            if callable(go_to):
+                go_to(item_name)
             self.left_panel.set_current_item(item_name)
         elif item_name == MASTER_SETUP_ITEM:
             self.stack.setCurrentWidget(self.master_setup_page)

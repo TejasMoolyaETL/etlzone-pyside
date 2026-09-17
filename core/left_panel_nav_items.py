@@ -87,6 +87,8 @@ EXCEL_SUB_OPTIONS = [
     "Import State",
     "Upload File",
     "Extract File",
+    "Excel All Import",
+    "Excel bulk via folder path",
 ]
 
 # Data Transformation (below Excel)
@@ -96,6 +98,7 @@ DATA_TRANSFORMATION_SUB_OPTIONS = [
     "DT: Work Flow",
     "DT: Flow",
     "DT: Step",
+    "DT: new Flow",
 ]
 
 MASTER_SETUP_ITEM = "Master Setup Value"

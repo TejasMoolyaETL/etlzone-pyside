@@ -9,7 +9,9 @@ from __future__ import annotations
 import os
 
 # Single source of truth for backend base URL.
-API_BASE_URL = os.getenv("ETL_API_BASE_URL", "http://72.62.74.158:9091").rstrip("/")
+# API_BASE_URL = os.getenv("ETL_API_BASE_URL", "http://72.62.74.158:9091").rstrip("/")
+API_BASE_URL = os.getenv("ETL_API_BASE_URL", "http://localhost:9091").rstrip("/")
+
 
 
 def _http_base_to_ws_base(http_base: str) -> str:
