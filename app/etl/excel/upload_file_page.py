@@ -786,6 +786,8 @@ class UploadFilePage(QWidget):
         return ""
 
     def _apply_session_target_meta(self, result: dict[str, Any], sheets: list[Any]) -> None:
+        """Apply session-level connection only; table name is per sheet."""
+        _ = sheets
         connection_id = self._resolve_connection_id(result.get("targetConnectionId"))
         raw = result.get("raw") if isinstance(result.get("raw"), dict) else {}
         if connection_id is None and raw:
@@ -793,23 +795,7 @@ class UploadFilePage(QWidget):
                 raw.get("connectionId") or raw.get("connection") or raw.get("targetConnectionId")
             )
 
-        table_name = str(result.get("targetTableName") or "").strip()
-        # Prefer the first sheet that already has a mapped table name.
-        if not table_name:
-            for sheet in sheets:
-                if not isinstance(sheet, dict):
-                    continue
-                table_name = self._sheet_target_table_name(sheet)
-                if table_name:
-                    break
-
-        if table_name:
-            self.target_table_edit.setText(table_name)
-        else:
-            self.target_table_edit.clear()
-
         if connection_id is not None and str(connection_id).strip() != "":
-            # Ensure the picker has connections loaded before selecting.
             if not self._ctx.connections():
                 self._refresh_connections()
             selected = self._ctx.select_by_id(connection_id)
@@ -818,13 +804,29 @@ class UploadFilePage(QWidget):
                     f"Connection ID {connection_id} from session was not found in the connection list."
                 )
 
-    def _sync_target_table_for_active_sheet(self) -> None:
+    def _capture_target_table_into_sheet(self) -> None:
+        """Store the current Target table name onto the active sheet only."""
         if not self._sheets:
+            return
+        if self._active_sheet_index < 0 or self._active_sheet_index >= len(self._sheets):
+            return
+        sheet = self._sheets[self._active_sheet_index]
+        if not isinstance(sheet, dict):
+            return
+        text = self.target_table_edit.text().strip()
+        sheet["targetTableName"] = text or None
+        raw = sheet.get("_raw")
+        if isinstance(raw, dict):
+            raw["tableName"] = text or None
+
+    def _sync_target_table_for_active_sheet(self) -> None:
+        """Show only this sheet's Target table name (empty if none)."""
+        if not self._sheets:
+            self.target_table_edit.clear()
             return
         sheet = self._sheets[self._active_sheet_index]
         table_name = self._sheet_target_table_name(sheet if isinstance(sheet, dict) else None)
-        if table_name:
-            self.target_table_edit.setText(table_name)
+        self.target_table_edit.setText(table_name)
 
     def _clear_analyze_panel(self) -> None:
         self._sheets = []
@@ -1025,6 +1027,9 @@ class UploadFilePage(QWidget):
             return
         if self._edit_mode:
             self._capture_table_edits_into_sheet()
+        # Keep Target table name scoped to each sheet when switching tabs.
+        if index != self._active_sheet_index:
+            self._capture_target_table_into_sheet()
         self._active_sheet_index = index
         for i, btn in enumerate(self._sheet_tab_buttons):
             btn.setChecked(i == index)
@@ -1268,8 +1273,15 @@ class UploadFilePage(QWidget):
             self._show_error(str(result.get("message") or "Failed to save mapping."))
             return
         sheet = self._sheets[self._active_sheet_index]
+        saved_table = str(body.get("targetTableName") or "").strip()
+        if isinstance(sheet, dict):
+            sheet["targetTableName"] = saved_table or None
+            raw = sheet.get("_raw")
+            if isinstance(raw, dict):
+                raw["tableName"] = saved_table or None
         self._saved_sheet_keys.add(self._sheet_key(sheet, self._active_sheet_index))
         self._refresh_sheet_tab_styles()
+        self._sync_target_table_for_active_sheet()
         self._show_success(str(result.get("message") or "Mapping saved successfully."))
 
 
