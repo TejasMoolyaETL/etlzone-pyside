@@ -9,13 +9,13 @@ from __future__ import annotations
 import os
 
 # Single source of truth for backend base URL.
-# API_BASE_URL = os.getenv("ETL_API_BASE_URL", "http://72.62.74.158:9091").rstrip("/")
-API_BASE_URL = os.getenv("ETL_API_BASE_URL", "http://localhost:9091").rstrip("/")
+API_BASE_URL = os.getenv("ETL_API_BASE_URL", "http://72.62.74.158:9091").rstrip("/")
+# API_BASE_URL = os.getenv("ETL_API_BASE_URL", "http://localhost:9091").rstrip("/")
 
 
 
 def _http_base_to_ws_base(http_base: str) -> str:
-    b = (http_base or "").strip().rstrip("/")
+    b = (http_base or "").strip().rstrip("/")   
     if b.startswith("https://"):
         return "wss://" + b[len("https://") :]
     if b.startswith("http://"):
@@ -592,6 +592,10 @@ IMPORTS_GET_IMPORT_SHEET_BY_UUID_PREFIX = os.getenv(
 # POST extract/execute import sheet: ``imports/{sessionId}/execute``
 IMPORTS_EXECUTE_PATH_PREFIX = os.getenv(
     "ETL_IMPORTS_EXECUTE_PATH_PREFIX", "imports"
+).strip().lstrip("/").rstrip("/")
+# POST validate import operation: ``imports/{sessionId}/validate``
+IMPORTS_VALIDATE_PATH_PREFIX = os.getenv(
+    "ETL_IMPORTS_VALIDATE_PATH_PREFIX", "imports"
 ).strip().lstrip("/").rstrip("/")
 
 # ETL — import metadata (connection id in path / body; table name as query where noted).

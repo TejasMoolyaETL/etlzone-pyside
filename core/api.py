@@ -152,6 +152,7 @@ from core.config import (
     IMPORTS_GET_ALL_IMPORT_SHEET_PATH,
     IMPORTS_GET_IMPORT_SHEET_BY_UUID_PREFIX,
     IMPORTS_EXECUTE_PATH_PREFIX,
+    IMPORTS_VALIDATE_PATH_PREFIX,
     ETL_METADATA_SCAN_TABLES_PATH_PREFIX,
     ETL_SCAN_CONNECTION_SOURCE_TABLES_PATH_PREFIX,
     ETL_METADATA_SCAN_FIELDS_PATH_PREFIX,
@@ -12233,11 +12234,13 @@ def api_create_import(
     name: str,
     source_type: str,
     *,
+    encoding: str | None = None,
     token: str | None = None,
 ) -> dict[str, Any]:
     """POST create an import job (default: ``imports``).
 
-    Body: ``name``, ``sourceType`` (e.g. EXCEL, CSV, JSON).
+    Body: ``name``, ``sourceType`` (e.g. EXCEL, CSV, JSON), optional ``encoding``
+    (e.g. ``UTF_8``).
     """
     headers = _connections_auth_headers(token)
     if headers is None:
@@ -12246,6 +12249,9 @@ def api_create_import(
         "name": (name or "").strip(),
         "sourceType": (source_type or "").strip().upper(),
     }
+    enc = str(encoding or "").strip()
+    if enc:
+        body["encoding"] = enc.upper().replace("-", "_").replace(" ", "_")
     if not body["name"]:
         return {"success": False, "message": "Name is required."}
     if not body["sourceType"]:
@@ -12259,25 +12265,43 @@ def api_create_import(
             )
             if rej is not None:
                 return rej
+            # Backend may return {sessionId, state, sessionName} with no success flag.
+            has_session = any(
+                payload.get(k) is not None and str(payload.get(k)).strip()
+                for k in (
+                    "sessionId",
+                    "sessionID",
+                    "session_id",
+                    "importSessionId",
+                    "importId",
+                    "uuid",
+                    "id",
+                )
+            )
             ok = (
                 payload.get("success") is True
-                or payload.get("status") == "SUCCESS"
-                or "id" in payload
-                or "importId" in payload
+                or str(payload.get("status") or "").strip().upper() == "SUCCESS"
+                or has_session
             )
             if ok or payload == {}:
                 return {
                     "success": True,
-                    "message": payload.get("message", "Import created.")
-                    if isinstance(payload, dict)
-                    else "Import created.",
+                    "message": payload.get("message")
+                    or payload.get("msg")
+                    or "Import created.",
                     "data": payload,
                 }
             # Some backends return the created entity without a success flag.
-            if payload.get("name") is not None or payload.get("sourceType") is not None:
+            if (
+                payload.get("name") is not None
+                or payload.get("sessionName") is not None
+                or payload.get("sourceType") is not None
+            ):
                 return {
                     "success": True,
-                    "message": payload.get("message", "Import created."),
+                    "message": payload.get("message")
+                    or payload.get("msg")
+                    or "Import created.",
                     "data": payload,
                 }
         return {
@@ -12300,8 +12324,12 @@ def api_create_import(
         return {"success": False, "message": "Backend not reachable."}
 
 
-def _parse_import_sessions(payload: Any) -> list[dict[str, str]]:
-    """Normalize get-all-sessionId responses into ``{sessionId, sessionName}`` rows."""
+def _parse_import_sessions(payload: Any) -> list[dict[str, Any]]:
+    """Normalize get-all-sessionId responses into session row dicts.
+
+    Always includes ``sessionId`` / ``sessionName``. When the API returns richer
+    objects, also copies common activity-dashboard fields (state, sourceType, …).
+    """
     raw: Any = payload
     if isinstance(payload, dict):
         for key in (
@@ -12316,47 +12344,80 @@ def _parse_import_sessions(payload: Any) -> list[dict[str, str]]:
                 raw = payload.get(key)
                 break
 
-    out: list[dict[str, str]] = []
+    out: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    def _add(*, session_id: Any, session_name: Any) -> None:
-        sid = str(session_id or "").strip()
-        name = str(session_name or "").strip()
+    def _add(row: dict[str, Any]) -> None:
+        sid = str(row.get("sessionId") or "").strip()
+        name = str(row.get("sessionName") or "").strip()
         if not sid and not name:
             return
         key = sid or name
         if key in seen:
             return
         seen.add(key)
-        out.append(
-            {
-                "sessionId": sid or name,
-                "sessionName": name or sid,
-            }
-        )
+        row["sessionId"] = sid or name
+        row["sessionName"] = name or sid
+        out.append(row)
 
     if isinstance(raw, list):
         for item in raw:
             if isinstance(item, dict):
                 sid = None
-                for key in ("sessionId", "sessionID", "session_id", "id"):
+                for key in ("sessionId", "sessionID", "session_id", "uuid", "id"):
                     if key in item and item.get(key) is not None:
                         sid = item.get(key)
                         break
                 name = None
-                for key in ("sessionName", "session_name", "name"):
+                for key in ("sessionName", "session_name", "importName", "name"):
                     if key in item and item.get(key) is not None:
                         name = item.get(key)
                         break
                 if sid is None and name is None and len(item) == 1:
                     only = next(iter(item.values()))
-                    _add(session_id=only, session_name=only)
-                else:
-                    _add(session_id=sid, session_name=name)
+                    _add({"sessionId": only, "sessionName": only})
+                    continue
+                row: dict[str, Any] = {
+                    "sessionId": sid,
+                    "sessionName": name,
+                    "_raw": item,
+                }
+                for src, dst in (
+                    ("state", "state"),
+                    ("status", "status"),
+                    ("sourceType", "sourceType"),
+                    ("fileType", "sourceType"),
+                    ("encoding", "encoding"),
+                    ("operation", "operation"),
+                    ("targetTableName", "targetTableName"),
+                    ("tableName", "targetTableName"),
+                    ("target_table_name", "targetTableName"),
+                    ("fileName", "fileName"),
+                    ("executionDate", "executionDate"),
+                    ("executedAt", "executionDate"),
+                    ("completedAt", "executionDate"),
+                    ("updatedAt", "executionDate"),
+                    ("createdAt", "executionDate"),
+                    ("duration", "duration"),
+                    ("durationMs", "duration"),
+                    ("rowsProcessed", "rowsProcessed"),
+                    ("totalRows", "rowsProcessed"),
+                    ("successfulRows", "rowsProcessed"),
+                    ("rowsFailed", "rowsFailed"),
+                    ("failedRows", "rowsFailed"),
+                    ("failCount", "rowsFailed"),
+                    ("executedBy", "executedBy"),
+                    ("createdBy", "executedBy"),
+                    ("username", "executedBy"),
+                    ("userName", "executedBy"),
+                ):
+                    if item.get(src) is not None and str(item.get(src)).strip():
+                        row.setdefault(dst, item.get(src))
+                _add(row)
             else:
-                _add(session_id=item, session_name=item)
+                _add({"sessionId": item, "sessionName": item})
     elif isinstance(raw, (str, int, float)):
-        _add(session_id=raw, session_name=raw)
+        _add({"sessionId": raw, "sessionName": raw})
     return out
 
 
@@ -13546,24 +13607,36 @@ def api_get_import_sheets_by_uuid(
         }
 
 
-def api_execute_import_sheet(
+def _normalize_import_operation(operation: str) -> str | None:
+    op = str(operation or "").strip().upper().replace("-", "_").replace(" ", "_")
+    if op in {"DROP_AND_CREATE", "DROPANDCREATE"}:
+        op = "DROP_CREATE"
+    if op in {"DROP_CREATE", "DELETE"}:
+        return op
+    return None
+
+
+def _import_sheet_post(
     session_id: str,
     sheet_id: int | str,
     *,
     operation: str,
+    path_suffix: str,
+    path_prefix: str,
     token: str | None = None,
+    ok_fallback: str,
+    fail_fallback: str,
+    timeout_s: float = 120.0,
 ) -> dict[str, Any]:
-    """POST execute a mapped import sheet (default: ``imports/{sessionId}/execute``)."""
+    """POST ``imports/{sessionId}/{path_suffix}`` with sheetId + operation."""
     headers = _connections_auth_headers(token)
     if headers is None:
         return {"success": False, "message": "Session expired. Please log in again."}
     sid = str(session_id or "").strip()
     if not sid:
         return {"success": False, "message": "Session ID is required."}
-    op = str(operation or "").strip().upper().replace("-", "_").replace(" ", "_")
-    if op in {"DROP_AND_CREATE", "DROPANDCREATE"}:
-        op = "DROP_CREATE"
-    if op not in {"DROP_CREATE", "DELETE"}:
+    op = _normalize_import_operation(operation)
+    if not op:
         return {"success": False, "message": "Select Drop and Create or Delete."}
     try:
         sheet_id_value: int | str = int(sheet_id)
@@ -13571,23 +13644,23 @@ def api_execute_import_sheet(
         sheet_id_value = str(sheet_id).strip()
         if not sheet_id_value:
             return {"success": False, "message": "Sheet ID is required."}
-    url = _api_url(f"{IMPORTS_EXECUTE_PATH_PREFIX}/{quote(sid, safe='')}/execute")
+    url = _api_url(f"{path_prefix}/{quote(sid, safe='')}/{path_suffix.lstrip('/')}")
     body: dict[str, Any] = {
         "sheetId": sheet_id_value,
         "operation": op,
     }
     try:
-        payload = _http_post_json(url, body, timeout_s=120.0, extra_headers=headers)
+        payload = _http_post_json(url, body, timeout_s=timeout_s, extra_headers=headers)
         if isinstance(payload, dict):
             rej = _reject_json_business_failure(
-                payload, message_fallback="Extract failed."
+                payload, message_fallback=fail_fallback
             )
             if rej is not None:
                 return rej
             if payload.get("success") is False:
                 return {
                     "success": False,
-                    "message": _extract_error_message(payload, "Extract failed."),
+                    "message": _extract_error_message(payload, fail_fallback),
                     "data": payload,
                 }
             return {
@@ -13595,13 +13668,13 @@ def api_execute_import_sheet(
                 "message": str(
                     payload.get("message")
                     or payload.get("msg")
-                    or "Extract completed."
+                    or ok_fallback
                 ),
                 "data": payload.get("data", payload),
             }
         return {
             "success": True,
-            "message": "Extract completed.",
+            "message": ok_fallback,
             "data": payload,
         }
     except HTTPError as exc:
@@ -13613,12 +13686,57 @@ def api_execute_import_sheet(
         return {
             "success": False,
             "message": _extract_error_message(
-                err_payload, f"Extract failed ({getattr(exc, 'code', 'HTTP error')})."
+                err_payload, f"{fail_fallback} ({getattr(exc, 'code', 'HTTP error')})."
             ),
             "data": err_payload if isinstance(err_payload, dict) else None,
         }
     except (URLError, TimeoutError, ValueError):
         return {"success": False, "message": "Backend not reachable."}
+
+
+def api_validate_import_sheet(
+    session_id: str,
+    sheet_id: int | str,
+    *,
+    operation: str,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """POST validate import operation (default: ``imports/{sessionId}/validate``).
+
+    Body: ``{"sheetId": 1, "operation": "DROP_CREATE"|"DELETE"}``.
+    """
+    return _import_sheet_post(
+        session_id,
+        sheet_id,
+        operation=operation,
+        path_suffix="validate",
+        path_prefix=IMPORTS_VALIDATE_PATH_PREFIX,
+        token=token,
+        ok_fallback="Validation passed.",
+        fail_fallback="Validation failed.",
+        timeout_s=60.0,
+    )
+
+
+def api_execute_import_sheet(
+    session_id: str,
+    sheet_id: int | str,
+    *,
+    operation: str,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """POST execute a mapped import sheet (default: ``imports/{sessionId}/execute``)."""
+    return _import_sheet_post(
+        session_id,
+        sheet_id,
+        operation=operation,
+        path_suffix="execute",
+        path_prefix=IMPORTS_EXECUTE_PATH_PREFIX,
+        token=token,
+        ok_fallback="Extract completed.",
+        fail_fallback="Extract failed.",
+        timeout_s=120.0,
+    )
 
 
 def _parse_connections_list_payload(payload: Any) -> list[dict[str, Any]]:

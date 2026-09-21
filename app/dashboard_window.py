@@ -69,7 +69,7 @@ from app.etl.extraction import EtlExtractionPage
 from app.etl.job_logs import EtlJobLogsPage
 from app.etl.data_transformation import DataTransformationPage, NewFlowDesignerPage
 from app.etl.excel import (
-    AllImportPage,
+    AllImportHubPage,
     BulkFolderImportPage,
     ExcelPage,
     ExtractFilePage,
@@ -452,7 +452,7 @@ class DashboardWindow(QMainWindow):
         self.stack.addWidget(self.etl_upload_file_page)
         self.etl_extract_file_page = ExtractFilePage()
         self.stack.addWidget(self.etl_extract_file_page)
-        self.etl_all_import_page = AllImportPage()
+        self.etl_all_import_page = AllImportHubPage()
         self.stack.addWidget(self.etl_all_import_page)
         self.etl_bulk_folder_page = BulkFolderImportPage()
         self.stack.addWidget(self.etl_bulk_folder_page)
